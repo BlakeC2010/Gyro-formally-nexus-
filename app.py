@@ -110,17 +110,17 @@ IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                 ".nexus_history", ".nexus_data", "static", "templates"}
 IGNORED_FILES = {"nexus.py", "app.py", "requirements.txt", ".env", ".gitignore"}
 MAX_CONTEXT_CHARS = 900_000
-DEFAULT_MODEL = "gemini-3-flash-preview"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
-GUEST_MODEL = "gemini-3-flash-preview"
+GUEST_MODEL = "gemini-2.5-flash"
 
 MODELS = {
     # Google — free tier (server API key, no per-user cost)
-    "gemini-3-flash-preview":  {"provider": "google",    "label": "Gemini 3 Flash",    "tier": "free"},
-    "gemini-3.1-pro-preview":  {"provider": "google",    "label": "Gemini 3.1 Pro",    "tier": "free"},
+    "gemini-2.5-flash":  {"provider": "google",    "label": "Gemini 2.5 Flash",    "tier": "free"},
+    "gemini-2.5-pro":  {"provider": "google",    "label": "Gemini 2.5 Pro",    "tier": "free"},
     # Google — pro tier
-    "gemini-2.5-flash":        {"provider": "google",    "label": "Gemini 2.5 Flash",   "tier": "pro"},
-    "gemini-2.5-pro":          {"provider": "google",    "label": "Gemini 2.5 Pro",     "tier": "pro"},
+    "gemini-3-flash-preview":        {"provider": "google",    "label": "Gemini 2.5 Flash",   "tier": "pro"},
+    "gemini-3.1-pro-preview":        {"provider": "google",    "label": "Gemini 2.5 Pro",     "tier": "pro"},
     # OpenAI — pro tier
     "gpt-5.4-mini":            {"provider": "openai",    "label": "GPT-5.4 Mini",       "tier": "pro"},
     "gpt-5.4":                 {"provider": "openai",    "label": "GPT-5.4",            "tier": "pro"},
