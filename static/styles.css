@@ -404,6 +404,11 @@ body.light .chat-area::before{
 
 .msg.user{align-self:flex-end;background:var(--bg-hover);color:var(--text-primary);border:1px solid var(--border-hover);border-bottom-right-radius:4px}
 .msg.user .msg-f{margin-top:6px;font-size:10px;opacity:.65}
+.msg-user-files{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.user-file-preview{border:1px solid var(--border);background:var(--bg-surface);border-radius:10px;padding:6px 8px;font-size:10px;color:var(--text-muted)}
+.user-file-preview.image{display:flex;flex-direction:column;gap:6px;max-width:180px}
+.user-file-preview.image img{width:168px;max-width:100%;height:auto;border-radius:8px;display:block;border:1px solid var(--border)}
+.user-file-preview.image span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
 
 .msg.kairo{align-self:flex-start;background:transparent;border:none;border-bottom-left-radius:4px;padding-left:0}
 .msg.kairo::before{display:none}
@@ -419,13 +424,19 @@ body.light .chat-area::before{
 .msg .stream-state{margin-top:8px;padding:8px 10px;border-radius:var(--r-sm);border:1px dashed var(--accent-border);background:var(--accent-dim);color:var(--text-muted);font-size:11px;display:inline-flex;align-items:center;gap:8px}
 .msg .artifact-grid{display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px}
 .msg .artifact-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--bg-surface)}
+.msg .artifact-card.clickable{cursor:pointer;transition:all .15s var(--ease)}
+.msg .artifact-card.clickable:hover{background:var(--bg-hover);border-color:var(--border-hover)}
+.msg .artifact-card.disabled{opacity:.7}
 .msg .artifact-card .meta{display:flex;flex-direction:column;gap:3px;min-width:0}
 .msg .artifact-card .meta .name{font-size:12px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .msg .artifact-card .meta .sub{font-size:10px;color:var(--text-muted)}
-.msg .artifact-card button{padding:6px 10px;border-radius:var(--r-xs);border:1px solid var(--border);background:var(--bg-deep);font-size:10px;color:var(--text-secondary);cursor:pointer}
-.msg .artifact-card button:hover{background:var(--bg-hover);color:var(--text-primary)}
+.msg .artifact-card .artifact-arrow{font-size:13px;color:var(--text-muted)}
 .msg .mermaid-container .mermaid{display:flex;justify-content:center}
 .msg .mermaid-container svg{max-width:100%;filter:drop-shadow(0 10px 20px rgba(0,0,0,.25));background:radial-gradient(circle at 50% 50%,rgba(191,107,58,.05),transparent 70%);border-radius:12px}
+.msg .mermaid-container .mermaid-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:10px}
+.msg .mermaid-container .mermaid-toolbar button,.msg .mermaid-container .mermaid-toolbar a{padding:6px 10px;border-radius:var(--r-xs);border:1px solid var(--border);background:var(--bg-deep);font-size:10px;color:var(--text-secondary);cursor:pointer;text-decoration:none}
+.msg .mermaid-container .mermaid-toolbar button:hover,.msg .mermaid-container .mermaid-toolbar a:hover{background:var(--bg-hover);color:var(--text-primary)}
+.msg .mermaid-container img.mermaid-png{width:100%;height:auto;border-radius:12px;border:1px solid var(--border);display:block}
 
 .choice-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .choice-btn{
@@ -624,6 +635,28 @@ input[type="file"]{display:none}
 .research-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid var(--border);font-size:10px;color:var(--text-muted);background:var(--bg-deep)}
 .research-summary{margin-top:10px;padding:10px;border-radius:var(--r-sm);background:var(--bg-deep);border:1px solid var(--border);font-size:11px;color:var(--text-secondary)}
 
+/* Productivity hub */
+.prod-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.prod-card{border:1px solid var(--border);background:var(--bg-surface);border-radius:var(--r-md);padding:12px}
+.todo-list,.vision-list{display:flex;flex-direction:column;gap:8px;margin-top:10px;max-height:240px;overflow:auto}
+.todo-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep)}
+.todo-item.done .todo-text{text-decoration:line-through;opacity:.65}
+.todo-check{width:24px;height:24px;border-radius:999px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text-secondary);font-size:12px;cursor:pointer}
+.todo-text{flex:1;font-size:12px;color:var(--text-primary)}
+.todo-del{padding:4px 7px;border-radius:6px;border:1px solid var(--border);background:var(--bg-surface);font-size:11px;color:var(--text-muted);cursor:pointer}
+.todo-del:hover{color:var(--red);border-color:rgba(248,113,113,.3)}
+.todo-empty{font-size:11px;color:var(--text-muted);padding:8px 2px}
+.vision-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep)}
+.vision-main{min-width:0;flex:1}
+.vision-title{font-size:12px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vision-meta{font-size:10px;color:var(--text-muted);margin-top:2px}
+.vision-actions{display:flex;gap:6px}
+.vision-actions button{padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-surface);font-size:10px;color:var(--text-secondary);cursor:pointer}
+.vision-actions button:hover{background:var(--bg-hover);color:var(--text-primary)}
+.prod-launchers{display:flex;flex-wrap:wrap;gap:8px}
+.prod-launchers button{padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-surface);font-size:11px;color:var(--text-secondary);cursor:pointer}
+.prod-launchers button:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-hover)}
+
 
 /* Onboarding modal */
 .onboarding-modal{width:620px}
@@ -749,6 +782,7 @@ input[type="file"]{display:none}
 @media(max-width:960px){
   .wl-grid{grid-template-columns:1fr}
   .upgrade-plans,.upgrade-actions{grid-template-columns:1fr}
+  .prod-grid{grid-template-columns:1fr}
 }
 @media(max-width:700px){
   .sidebar{position:fixed;left:0;top:0;bottom:0;z-index:100}

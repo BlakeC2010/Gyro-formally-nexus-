@@ -520,6 +520,15 @@ def _chats_col():
     if not uid: return None
     return _user_doc(uid).collection("chats")
 
+def _is_transient_empty_chat(chat_obj):
+    """Hide placeholder chats that were created but never used."""
+    if not isinstance(chat_obj, dict):
+        return False
+    title = (chat_obj.get("title") or "").strip().lower()
+    folder = (chat_obj.get("folder") or "").strip()
+    has_messages = bool(chat_obj.get("messages") or [])
+    return (not has_messages) and title in ("", "new chat") and not folder
+
 def list_chats():
     if session.get("guest") and not session.get("user_id"): return []
     uid = session.get("user_id")
@@ -532,6 +541,8 @@ def list_chats():
             try:
                 m = _load_json(f, {})
                 if m:
+                    if _is_transient_empty_chat(m):
+                        continue
                     chats.append({"id": m.get("id", f.stem), "title": m.get("title", "Untitled"),
                         "created": m.get("created"), "updated": m.get("updated"),
                         "model": m.get("model", ""), "folder": m.get("folder", ""),
@@ -545,6 +556,8 @@ def list_chats():
     chats = []
     for doc in docs:
         m = doc.to_dict()
+        if _is_transient_empty_chat(m):
+            continue
         chats.append({"id": doc.id, "title": m.get("title", "Untitled"),
             "created": m.get("created"), "updated": m.get("updated"),
             "model": m.get("model", ""), "folder": m.get("folder", ""),
@@ -1817,7 +1830,18 @@ def status_route():
 def get_greeting():
     user = _cur_user()
     uname = user.get("name", "").split()[0] if user and user.get("name") else ""
-    h = datetime.datetime.now().hour
+    h = None
+    # Prefer client-provided local hour so greetings are correct across server regions.
+    try:
+        hour_raw = (request.args.get("hour") or "").strip()
+        if hour_raw:
+            parsed = int(hour_raw)
+            if 0 <= parsed <= 23:
+                h = parsed
+    except Exception:
+        h = None
+    if h is None:
+        h = datetime.datetime.now().hour
     if h < 5: period = "late night"
     elif h < 12: period = "morning"
     elif h < 17: period = "afternoon"

@@ -7,6 +7,7 @@ let onboardingChecked=false;
 const runningStreams=new Map();
 const artifactStore=[];
 const artifactIndex=new Map();
+const mindMapStore=new Map();
 const uploadedHistory=[];
 const workspaceFileCache=new Map();
 let canvasTabs=[];
@@ -265,7 +266,7 @@ function getWelcomeHTML(greeting){
 
   const recent=allChats.filter(c=>(c.message_count||0)>0).slice(0,4);
   const recentItems=recent.length>0
-    ?recent.map(c=>`<div class="wl-recent-item" onclick="openChat('${c.id}')"><span class="wl-ri-icon">💬</span><span class="wl-ri-title">${esc(c.title)}</span></div>`).join('')
+    ?recent.map(c=>`<div class="wl-recent-item" onclick="openChat('${c.id}')"><span class="wl-ri-title">${esc(c.title)}</span></div>`).join('')
     :`<div class="wl-empty">No chats yet — start one below.</div>`;
   const allBtn=recent.length>0?`<button class="wl-all-btn" onclick="document.getElementById('chatSearch').focus()">View all chats →</button>`:'';
 
@@ -303,14 +304,15 @@ function typewriterEffect(el,text,speed=46){
   tick();
 }
 
-async function loadWelcome(){
+async function loadWelcome(force=false){
   const area=document.getElementById('chatArea');
-  if(curChat)return;
+  if(curChat&&!force)return;
   area.innerHTML=getWelcomeHTML();
   try{
-    const r=await fetch('/api/greeting');
+    const localHour=new Date().getHours();
+    const r=await fetch(`/api/greeting?hour=${encodeURIComponent(localHour)}`);
     const d=await r.json();
-    if(!curChat&&d.greeting){
+    if((!curChat||force)&&d.greeting){
       area.innerHTML=getWelcomeHTML('\u200b');
       const greetEl=area.querySelector('.welcome-greeting');
       if(greetEl)typewriterEffect(greetEl,d.greeting);
@@ -441,7 +443,7 @@ function renderChatList(filter=''){
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
       const g=isChatRunning(c.id)?' generating':'';
-      html+=`<div class="sb-chat${a}${g}" onclick="openChat('${c.id}')"><span style="font-size:13px">💬</span><span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
+      html+=`<div class="sb-chat${a}${g}" onclick="openChat('${c.id}')"><span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
@@ -465,7 +467,7 @@ async function createChat(folder=''){
   const c=await r.json();
   curChat=c.id;
   document.getElementById('chatArea').innerHTML='';
-  loadWelcome();
+  loadWelcome(true);
   document.getElementById('topTitle').textContent=c.title||'New Chat';
   await refreshChats();
   updateComposerBusyUI();
@@ -497,9 +499,15 @@ async function openChat(id){
       if(m.role==='user')addMsg('user',m.text,[],m);
       else addMsg('kairo',m.text,m.files_modified||[],m);
     }
-    setTimeout(()=>{try{mermaid.run()}catch(e){console.log('Mermaid re-render:',e)}},200);
+    setTimeout(()=>{
+      try{
+        Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams());
+      }catch(e){
+        console.log('Mermaid re-render:',e);
+      }
+    },200);
   }else{
-    loadWelcome();
+    loadWelcome(true);
   }
   renderChatList(document.getElementById('chatSearch').value);
   updateComposerBusyUI();
@@ -895,7 +903,7 @@ function registerArtifactsFromReply(reply,filesModified=[]){
   while((m=codeRe.exec(reply||''))!==null){
     const lang=(m[1]||'text').toLowerCase();
     const content=m[2]||'';
-    const title=`${lang.toUpperCase()} snippet ${idx++}`;
+    const title=lang==='mermaid'?inferMindMapTitle(content,idx++):`${(lang||'code').toUpperCase()} snippet ${idx++}`;
     ids.push(registerArtifact({title,content,isCode:lang!=='text'&&lang!=='md'&&lang!=='markdown',path:''}));
   }
   for(const f of(filesModified||[])){
@@ -912,10 +920,10 @@ function renderArtifactCards(ids,state='ready'){
     if(!a)return '';
     const name=esc(a.title||a.path||'Artifact');
     const sub=esc(a.path||a.action||'Generated file');
-    const btn=state==='ready'
-      ?`<button onclick="openArtifact('${a.id}')">Open in Canvas</button>`
-      :`<button disabled>Generating...</button>`;
-    return `<div class="artifact-card"><div class="meta"><div class="name">${name}</div><div class="sub">${sub}</div></div>${btn}</div>`;
+    if(state!=='ready'){
+      return `<div class="artifact-card disabled"><div class="meta"><div class="name">${name}</div><div class="sub">${sub}</div></div><span class="artifact-arrow">…</span></div>`;
+    }
+    return `<div class="artifact-card clickable" role="button" tabindex="0" onclick="openArtifact('${a.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openArtifact('${a.id}')}" title="Open in Canvas"><div class="meta"><div class="name">${name}</div><div class="sub">${sub}</div></div><span class="artifact-arrow">↗</span></div>`;
   }).join('')}</div>`;
 }
 
@@ -955,10 +963,11 @@ async function sendMessage(){
     w.style.animation='slideOut .3s var(--ease-out) forwards';
     setTimeout(()=>{if(w.parentNode)w.remove();},280);
   }
-  addMsg('user',text,[],{fileNames:pendingFiles.map(f=>f.name)});
+  const files=[...pendingFiles];
+  addMsg('user',text,[],{fileNames:files.map(f=>f.name),files});
   setStatus('Working on it...');
   input.value='';input.style.height='auto';
-  const files=[...pendingFiles];pendingFiles=[];renderPF();
+  pendingFiles=[];renderPF();
   for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
   if(researchEnabled){
@@ -1071,7 +1080,7 @@ async function sendMessage(){
             if(canRender()){
               contentEl.innerHTML=finalHTML;
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
-              try{mermaid.run()}catch{}
+              try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
             }
             refreshChats();
             setStatus('Done. Ask a follow-up or start something new.');
@@ -1108,6 +1117,16 @@ function addMsg(role,text,files,extra={}){
   div.className=`msg ${role}`;let html='';
   if(role==='kairo')html+='<div class="lbl">Nexus</div>';
   if(role==='user'&&extra.fileNames?.length)html+=`<div class="msg-f">📎 ${extra.fileNames.map(esc).join(', ')}</div>`;
+  if(role==='user'&&extra.files?.length){
+    const previews=extra.files.map(f=>{
+      const name=esc(f.name||'upload');
+      if(f.mime?.startsWith('image/')&&f.data){
+        return `<div class="user-file-preview image"><img src="data:${f.mime};base64,${f.data}" alt="${name}" loading="lazy"><span>${name}</span></div>`;
+      }
+      return `<div class="user-file-preview"><span>📄 ${name}</span></div>`;
+    }).join('');
+    html+=`<div class="msg-user-files">${previews}</div>`;
+  }
   let displayText=text||'';
   if(displayText.includes('<<<THINKING>>>')&&displayText.includes('<<<END_THINKING>>>')){
     const parts=displayText.split('<<<END_THINKING>>>');
@@ -1152,7 +1171,10 @@ function fmt(text){
   let blocks=[];
   t=t.replace(/```mermaid\n([\s\S]*?)```/g,(_,c)=>{
     const restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').trim();
-    blocks.push(`<div class="mermaid-container"><pre class="mermaid">${restored}</pre></div>`);
+    const mindId='mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
+    const title=inferMindMapTitle(restored,blocks.length+1);
+    mindMapStore.set(mindId,{title,source:restored});
+    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button type="button" onclick="openMindMapCanvas('${mindId}')">Open in Canvas</button><a class="mm-download" href="#" onclick="return false">Download PNG</a></div><pre class="mermaid">${restored}</pre></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   t=t.replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>{
@@ -1169,6 +1191,23 @@ function fmt(text){
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+function inferMindMapTitle(source,fallbackIndex=1){
+  const lines=(source||'').split('\n').map(l=>l.trim()).filter(Boolean);
+  for(const line of lines){
+    if(/^(mindmap|graph|flowchart|classDiagram|sequenceDiagram|stateDiagram|erDiagram|gantt|journey|pie)\b/i.test(line))continue;
+    const cleaned=line
+      .replace(/^[\-+*#>\d.\s]+/,'')
+      .replace(/:::.+$/,'')
+      .replace(/[{}\[\]()]/g,'')
+      .replace(/\s+/g,' ')
+      .trim();
+    if(cleaned.length>=3){
+      return `Mind map: ${cleaned.slice(0,56)}`;
+    }
+  }
+  return `Mind map ${fallbackIndex}`;
+}
 
 // ─── Settings ─────────────────────────────────────
 async function openSettings(){
@@ -1487,6 +1526,187 @@ function sendCanvasToAI(){
   showToast('Canvas content added to chat','info');
 }
 
+function openMindMapCanvas(mindId){
+  const item=mindMapStore.get(mindId);
+  if(!item)return;
+  const wrapped=`\`\`\`mermaid\n${item.source}\n\`\`\``;
+  openCanvas(wrapped,item.title,true,{openPanel:true});
+}
+
+function mermaidSvgToPngDataUrl(svgEl,scale=2){
+  return new Promise(resolve=>{
+    try{
+      const xml=new XMLSerializer().serializeToString(svgEl);
+      const blob=new Blob([xml],{type:'image/svg+xml;charset=utf-8'});
+      const url=URL.createObjectURL(blob);
+      const img=new Image();
+      img.onload=()=>{
+        try{
+          const w=Math.max(1,Math.ceil((svgEl.viewBox?.baseVal?.width||svgEl.clientWidth||svgEl.getBoundingClientRect().width||900)*scale));
+          const h=Math.max(1,Math.ceil((svgEl.viewBox?.baseVal?.height||svgEl.clientHeight||svgEl.getBoundingClientRect().height||560)*scale));
+          const canvas=document.createElement('canvas');
+          canvas.width=w;canvas.height=h;
+          const ctx=canvas.getContext('2d');
+          ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--bg-surface')||'#121212';
+          ctx.fillRect(0,0,w,h);
+          ctx.drawImage(img,0,0,w,h);
+          const dataUrl=canvas.toDataURL('image/png');
+          URL.revokeObjectURL(url);
+          resolve(dataUrl);
+        }catch{
+          URL.revokeObjectURL(url);
+          resolve('');
+        }
+      };
+      img.onerror=()=>{URL.revokeObjectURL(url);resolve('');};
+      img.src=url;
+    }catch{
+      resolve('');
+    }
+  });
+}
+
+async function enhanceMermaidDiagrams(){
+  const containers=[...document.querySelectorAll('.mermaid-container')];
+  for(const container of containers){
+    const svg=container.querySelector('svg');
+    if(!svg)continue;
+    const mindId=container.getAttribute('data-mindmap-id')||'';
+    const mm=mindMapStore.get(mindId);
+    const png=await mermaidSvgToPngDataUrl(svg,2);
+    if(!png)continue;
+    let img=container.querySelector('img.mermaid-png');
+    if(!img){
+      img=document.createElement('img');
+      img.className='mermaid-png';
+      img.alt=(mm?.title||'Mind map');
+      img.loading='lazy';
+      if(mindId){
+        img.style.cursor='pointer';
+        img.onclick=()=>openMindMapCanvas(mindId);
+      }
+      container.appendChild(img);
+    }
+    img.src=png;
+    svg.style.display='none';
+    const dl=container.querySelector('.mm-download');
+    if(dl){
+      const fn=((mm?.title||'mind_map').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'mind_map')+'.png';
+      dl.href=png;
+      dl.download=fn;
+      dl.onclick=null;
+    }
+  }
+}
+
+const PRODUCTIVITY_KEY='nexus_productivity_v1';
+
+function loadProductivityState(){
+  try{
+    const raw=localStorage.getItem(PRODUCTIVITY_KEY);
+    if(!raw)return {todos:[],visions:[]};
+    const parsed=JSON.parse(raw);
+    return {
+      todos:Array.isArray(parsed.todos)?parsed.todos:[],
+      visions:Array.isArray(parsed.visions)?parsed.visions:[],
+    };
+  }catch{
+    return {todos:[],visions:[]};
+  }
+}
+
+function saveProductivityState(state){
+  localStorage.setItem(PRODUCTIVITY_KEY,JSON.stringify(state));
+}
+
+function openProductivityHub(){
+  const modal=document.getElementById('productivityModal');
+  if(!modal)return;
+  modal.classList.add('open');
+  renderProductivityHub();
+}
+
+function renderProductivityHub(){
+  const state=loadProductivityState();
+  const todoList=document.getElementById('todoList');
+  const visionList=document.getElementById('visionList');
+  if(todoList){
+    todoList.innerHTML=state.todos.length
+      ?state.todos.map(t=>`<div class="todo-item ${t.done?'done':''}"><button class="todo-check" onclick="toggleTodoItem('${t.id}')">${t.done?'✓':'○'}</button><div class="todo-text">${esc(t.text)}</div><button class="todo-del" onclick="deleteTodoItem('${t.id}')">✕</button></div>`).join('')
+      :'<div class="todo-empty">No tasks yet. Add one to get moving.</div>';
+  }
+  if(visionList){
+    visionList.innerHTML=state.visions.length
+      ?state.visions.map(v=>`<div class="vision-item"><div class="vision-main"><div class="vision-title">${esc(v.title)}</div><div class="vision-meta">${esc(v.when||'No target date')}</div></div><div class="vision-actions"><button onclick="insertVisionPrompt('${v.id}')">Use</button><button onclick="deleteVisionItem('${v.id}')">✕</button></div></div>`).join('')
+      :'<div class="todo-empty">No vision cards yet. Add your next milestone.</div>';
+  }
+}
+
+function addTodoItem(){
+  const input=document.getElementById('todoInput');
+  const text=(input?.value||'').trim();
+  if(!text)return;
+  const state=loadProductivityState();
+  state.todos.unshift({id:'t_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),text,done:false});
+  saveProductivityState(state);
+  input.value='';
+  renderProductivityHub();
+}
+
+function toggleTodoItem(id){
+  const state=loadProductivityState();
+  const item=state.todos.find(t=>t.id===id);
+  if(!item)return;
+  item.done=!item.done;
+  saveProductivityState(state);
+  renderProductivityHub();
+}
+
+function deleteTodoItem(id){
+  const state=loadProductivityState();
+  state.todos=state.todos.filter(t=>t.id!==id);
+  saveProductivityState(state);
+  renderProductivityHub();
+}
+
+function addVisionItem(){
+  const titleEl=document.getElementById('visionTitle');
+  const whenEl=document.getElementById('visionWhen');
+  const title=(titleEl?.value||'').trim();
+  if(!title)return;
+  const state=loadProductivityState();
+  state.visions.unshift({id:'v_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),title,when:(whenEl?.value||'').trim()});
+  saveProductivityState(state);
+  titleEl.value='';
+  if(whenEl)whenEl.value='';
+  renderProductivityHub();
+}
+
+function deleteVisionItem(id){
+  const state=loadProductivityState();
+  state.visions=state.visions.filter(v=>v.id!==id);
+  saveProductivityState(state);
+  renderProductivityHub();
+}
+
+function insertVisionPrompt(id){
+  const state=loadProductivityState();
+  const card=state.visions.find(v=>v.id===id);
+  if(!card)return;
+  closeM('productivityModal');
+  setDraft(`Help me create a concrete weekly execution plan for this vision: ${card.title}${card.when?` (target: ${card.when})`:''}`);
+}
+
+function insertProductivityPrompt(kind){
+  closeM('productivityModal');
+  const prompts={
+    day:'Create my highest-impact plan for today with 3 priority tasks and time blocks.',
+    week:'Build me a realistic weekly plan with milestones, focus sessions, and review checkpoints.',
+    focus:'Set up a focused 50-minute sprint plan with a clear objective and done criteria.'
+  };
+  setDraft(prompts[kind]||prompts.day);
+}
+
 // ─── Mermaid ──────────────────────────────────────
 function initMermaidTheme(){
   if(!window.mermaid)return;
@@ -1527,3 +1747,4 @@ function initMermaidTheme(){
 }
 
 document.addEventListener('DOMContentLoaded',()=>{initMermaidTheme();});
+document.addEventListener('DOMContentLoaded',()=>{renderProductivityHub();});
