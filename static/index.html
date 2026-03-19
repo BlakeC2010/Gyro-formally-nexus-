@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEXUS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+     LOGIN PAGE
+     ═══════════════════════════════════════════════════ -->
+<div id="loginPage" class="login-page">
+<div class="login-card">
+  <div class="login-orb"></div>
+  <h1>Nexus</h1>
+  <div class="subtitle">AI Workspace</div>
+  <div class="intro">Sign in to access your personal AI assistant with memory, tools, and multi-model support.</div>
+  <div class="login-err" id="loginErr"></div>
+  <div class="social-btns" style="margin-top:20px">
+    <div class="google-btn-wrap" id="googleButton"></div>
+    <div class="google-help" id="googleHelp">Sign in with your Google account to get started.</div>
+  </div>
+  <div class="divider">or</div>
+  <button onclick="guestLogin()" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text-secondary);font-size:13px;cursor:pointer;transition:all .15s;">Continue without an account</button>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     APP SHELL
+     ═══════════════════════════════════════════════════ -->
+<div class="app" id="appPage">
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar" id="sidebar">
+  <div class="sb-head">
+    <div class="sb-brand"><div class="sb-logo"></div><span class="sb-title">Nexus</span></div>
+    <button class="sb-x" onclick="toggleSB()">✕</button>
+  </div>
+  <div class="sb-actions">
+    <button class="sb-btn" onclick="createChat()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Chat
+    </button>
+    <button class="sb-btn" onclick="newFolder()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      Folder
+    </button>
+  </div>
+  <div class="sb-search"><input type="text" id="chatSearch" placeholder="Search chats..." oninput="filterChats()"></div>
+  <div class="sb-chats" id="chatList"></div>
+  <div class="sb-footer">
+    <div class="sb-avatar" id="userAvatar">?</div>
+    <div class="sb-user">
+      <div class="sb-user-name" id="userName">User</div>
+      <div class="sb-user-email" id="userEmail">email</div>
+      <div style="margin-top:5px">
+        <span class="plan-badge free" id="userPlan" onclick="openUpgradeModal()" title="View plans">Free</span>
+      </div>
+    </div>
+    <button class="sb-signout" onclick="signOut()" title="Sign out">⏻</button>
+  </div>
+</aside>
+
+<!-- ── Main area ── -->
+<div class="main">
+  <div class="topbar">
+    <div class="topbar-left">
+      <button class="btn-menu" onclick="toggleSB()">☰</button>
+      <button class="tb-btn" onclick="openFileHub()" title="Files">📁</button>
+      <span class="topbar-title" id="topTitle">Nexus</span>
+    </div>
+    <div class="topbar-right">
+      <div class="cms-container" id="cmsContainer">
+        <div class="cms-current" id="cmsCurrent" onclick="document.getElementById('cmsDropdown').classList.toggle('show')">
+          <span id="cmsCurrentIcon"></span>
+          <span id="cmsCurrentText">Loading...</span>
+        </div>
+        <div class="cms-dropdown" id="cmsDropdown"></div>
+      </div>
+      <button class="tb-btn" id="btnTheme" onclick="toggleTheme()" title="Toggle theme" style="display:none">🌙</button>
+      <button class="tb-btn" onclick="openSettings()" title="Settings">⚙</button>
+    </div>
+  </div>
+
+  <div class="chat-area" id="chatArea">
+    <div class="welcome" id="welcomeEl">
+      <h2 id="greeting">Good evening.</h2>
+      <p>What would you like to work on?</p>
+    </div>
+  </div>
+
+  <!-- ── Command Bar ── -->
+  <div class="input-area">
+    <div class="file-preview" id="filePreview"></div>
+    <div class="input-suggestions" id="inputSuggestions" style="display:none"></div>
+    <div class="input-row">
+      <div class="plus-menu-wrap">
+        <button class="plus-btn" id="plusBtn" onclick="togglePlusMenu()" title="Tools & attachments">+</button>
+        <div class="plus-popup" id="plusPopup">
+          <div class="plus-header">Attach</div>
+          <div class="plus-item" onclick="document.getElementById('fileInput').click();closePlusMenu()"><span class="pi-icon">📎</span><span class="pi-label">Upload file</span></div>
+          <div class="plus-divider"></div>
+          <div class="plus-header">Modes</div>
+          <div class="plus-item plus-toggle" id="thinkMenuItem" onclick="toggleThinking();closePlusMenu()"><span class="pi-icon">🧠</span><span class="pi-label">Thinking</span><span class="pi-badge" id="thinkMenuBadge">OFF</span></div>
+          <div class="plus-item plus-toggle" id="researchMenuItem" onclick="toggleResearch();closePlusMenu()"><span class="pi-icon">🧪</span><span class="pi-label">Research</span><span class="pi-badge" id="researchMenuBadge">OFF</span></div>
+          <div class="plus-divider"></div>
+          <div class="plus-header">Tools</div>
+          <div class="plus-item" onclick="activateTool('canvas');closePlusMenu()"><span class="pi-icon">✏️</span><span class="pi-label">Canvas</span></div>
+          <div class="plus-item" onclick="activateTool('search');closePlusMenu()"><span class="pi-icon">🔍</span><span class="pi-label">Google Search</span></div>
+          <div class="plus-item" onclick="openResearchModal();closePlusMenu()"><span class="pi-icon">🧪</span><span class="pi-label">Deep Research</span></div>
+          <div class="plus-item disabled" onclick="event.stopPropagation()"><span class="pi-icon">🎨</span><span class="pi-label">Image Generation</span><span class="pi-badge">SOON</span></div>
+          <div class="plus-item" onclick="activateTool('mindmap');closePlusMenu()"><span class="pi-icon">🗺️</span><span class="pi-label">Mind Map</span></div>
+        </div>
+      </div>
+      <input type="file" id="fileInput" multiple onchange="handleFiles(this)">
+      <textarea id="msgInput" placeholder="What do you want to solve?" rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+      <button class="ib ib-stop" id="btnStop" onclick="stopStreaming()" title="Stop generating" style="display:none">⏹</button>
+      <button class="ib ib-send" id="btnSend" onclick="sendMessage()" title="Send">➤</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     MODALS
+     ═══════════════════════════════════════════════════ -->
+
+<!-- Settings -->
+<div class="ov" id="settingsModal">
+<div class="modal" style="width:560px">
+  <div class="mh"><h3>⚙ Settings</h3><button class="mx" onclick="closeM('settingsModal')">✕</button></div>
+  <div class="mb">
+    <p class="st">🧠 Memory</p>
+    <p class="hint">Facts here are included in every chat. Nexus can also add them when you say "remember that..."</p>
+    <div class="mem-list" id="memList"></div>
+    <hr>
+    <p class="st">📂 Files</p>
+    <p class="hint">Your uploaded documents and files.</p>
+    <div id="filesList"></div>
+    <hr>
+    <p class="st">📊 Data & Stats</p>
+    <div id="dataInfo"></div>
+    <div class="data-stat" id="dataStats"></div>
+    <p style="margin-top:12px;font-size:11px;color:var(--text-secondary)"><strong>Memory Facts:</strong></p>
+    <div id="dataMemory" style="font-size:11px;color:var(--text-muted)"></div>
+    <p style="margin-top:12px;font-size:11px;color:var(--text-secondary)"><strong>Chat History:</strong></p>
+    <div id="dataChats" style="font-size:11px;color:var(--text-muted)"></div>
+    <hr>
+    <p class="st">👤 Profile</p>
+    <label>Display Name</label>
+    <div class="kr"><input type="text" id="profileName" placeholder="Your name"><button onclick="saveName()">Save</button></div>
+    <hr>
+    <p class="st">🎨 Appearance</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
+      <div>
+        <div style="font-size:12px;font-weight:500;color:var(--text-primary)">Theme</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Light or dark interface</div>
+      </div>
+      <div style="display:inline-flex;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--bg-deep);">
+        <button onclick="if(theme!=='dark'){toggleTheme()}" style="padding:7px 14px;font-size:11px;font-weight:500;background:transparent;border:none;color:var(--text-muted);cursor:pointer;transition:all .2s;" id="themeBtn_dark">Dark</button>
+        <button onclick="if(theme!=='light'){toggleTheme()}" style="padding:7px 14px;font-size:11px;font-weight:500;background:transparent;border:none;color:var(--text-muted);cursor:pointer;transition:all .2s;" id="themeBtn_light">Light</button>
+      </div>
+    </div>
+    <hr>
+    <p class="st">⚠ Reset All Data</p>
+    <p class="hint">This permanently deletes all your chats, memory, uploads, and settings.</p>
+    <div class="kr"><input type="text" id="resetCode" placeholder="Type DELETE-MY-DATA"><button onclick="resetData()">Reset Everything</button></div>
+  </div>
+</div>
+</div>
+
+<!-- Image Gen -->
+<div class="ov" id="imageModal">
+<div class="modal">
+  <div class="mh"><h3>🎨 Generate Image</h3><button class="mx" onclick="closeM('imageModal')">✕</button></div>
+  <div class="mb">
+    <p class="hint">Powered by Google Imagen. Requires Google API key.</p>
+    <label>Describe the image</label>
+    <div class="kr"><input type="text" id="imgPrompt" placeholder="A futuristic command center..."><button onclick="genImage()">Generate</button></div>
+    <div id="imgResult" style="margin-top:14px;text-align:center"></div>
+  </div>
+</div>
+</div>
+
+<!-- Deep Research -->
+<div class="ov" id="researchModal">
+<div class="modal research-modal">
+  <div class="mh"><h3>🧪 Deep Research</h3><button class="mx" onclick="closeM('researchModal')">✕</button></div>
+  <div class="mb">
+    <p class="hint">Multi-step web research with source reading, synthesis, and export to markdown/PDF.</p>
+    <label>Research Question</label>
+    <textarea id="researchQuery" rows="4" style="width:100%;padding:10px 12px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--bg-deep);resize:vertical;min-height:98px;outline:none" placeholder="Example: Analyze the latest state of edge AI chips in 2026, major vendors, benchmarks, costs, and near-term trends."></textarea>
+    <div class="research-grid" style="margin-top:10px">
+      <div>
+        <label>Depth</label>
+        <select id="researchDepth">
+          <option value="quick">Quick (faster)</option>
+          <option value="standard" selected>Standard (balanced)</option>
+          <option value="deep">Deep (most detailed)</option>
+        </select>
+      </div>
+      <button onclick="startResearchFromModal()">Start Research</button>
+    </div>
+    <div class="research-summary">
+      Tip: You can also toggle <strong>Research</strong> beside the send button and ask directly in chat.
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- Voice Orb -->
+<div class="orb-ov" id="orbOv">
+  <button class="orb-close" onclick="closeOrb()">✕</button>
+  <div class="orb" id="orb"></div>
+  <div class="orb-lbl" id="orbLbl">LISTENING</div>
+  <div class="orb-txt" id="orbTxt"></div>
+</div>
+
+<!-- Guest limit overlay -->
+<div class="guest-limit-ov" id="guestLimitOverlay">
+<div class="login-card" style="animation:modalIn .3s var(--ease-out)">
+  <div style="font-size:48px;margin-bottom:8px;">🔒</div>
+  <h1 style="font-size:20px;margin-bottom:4px;-webkit-text-fill-color:var(--text-primary);background:none;">Sign in to continue</h1>
+  <div class="intro">Sign in with your Google account to keep chatting with Nexus.</div>
+  <div class="social-btns" style="margin-top:20px">
+    <div class="google-btn-wrap" id="guestGoogleButton"></div>
+  </div>
+</div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- Custom Dialog -->
+<div class="dlg-ov" id="dlgOverlay">
+  <div class="dlg-box" id="dlgBox">
+    <div class="dlg-icon-band" id="dlgIconBand">
+      <div class="dlg-icon-wrap" id="dlgIconWrap"><span id="dlgIconEmoji"></span></div>
+    </div>
+    <div class="dlg-body">
+      <div class="dlg-title" id="dlgTitle"></div>
+      <div class="dlg-msg" id="dlgMsg"></div>
+      <div class="dlg-input-wrap" id="dlgInputWrap" style="display:none">
+        <label id="dlgInputLabel"></label>
+        <input class="dlg-input" id="dlgInput" type="text" autocomplete="off">
+      </div>
+    </div>
+    <div class="dlg-actions" id="dlgActions"></div>
+  </div>
+</div>
+
+<!-- First-time onboarding -->
+<div class="ov" id="onboardingModal">
+<div class="modal onboarding-modal">
+  <div class="mh"><h3>👋 Quick setup</h3></div>
+  <div class="mb">
+    <p class="onb-intro">Before we start, answer a few quick questions so Nexus can personalize how it helps you.</p>
+    <div class="onb-grid">
+      <div class="full">
+        <label for="onbName">What should Nexus call you?</label>
+        <input type="text" id="onbName" maxlength="120" placeholder="Preferred name">
+      </div>
+      <div class="full">
+        <label for="onbWork">What do you do?</label>
+        <textarea id="onbWork" maxlength="300" placeholder="Student, designer, founder, engineer, manager..."></textarea>
+      </div>
+      <div class="full">
+        <label for="onbHobbies">What are your hobbies or interests?</label>
+        <textarea id="onbHobbies" maxlength="300" placeholder="Reading, lifting, coding side projects, hiking..."></textarea>
+      </div>
+      <div class="full">
+        <label for="onbFocus">What are you most focused on right now? <span class="hint">(optional)</span></label>
+        <textarea id="onbFocus" maxlength="300" placeholder="Launching a product, learning a skill, job search, consistency..."></textarea>
+      </div>
+    </div>
+    <div class="onb-err" id="onbErr"></div>
+    <div class="onb-actions"><button class="onb-save" id="onbSaveBtn" onclick="submitOnboarding()">Save and continue</button></div>
+  </div>
+</div>
+</div>
+
+<!-- Upgrade / Plan Modal -->
+<div class="ov" id="upgradeModal">
+<div class="modal" style="width:860px;max-width:95vw">
+  <div class="mh">
+    <h3>⚡ Manage Plan</h3>
+    <button class="mx" onclick="closeM('upgradeModal')">✕</button>
+  </div>
+  <div class="mb">
+    <p class="hint" style="margin-bottom:16px" id="upgradeModalSubtitle">Choose the plan that fits you.</p>
+    <div class="upgrade-hero">
+      <div class="upgrade-kicker">Unlock the full Nexus stack</div>
+      <div class="upgrade-headline">Ship faster with better models, more context, and premium workflows.</div>
+      <div class="upgrade-perks">
+        <span>Longer context windows</span>
+        <span>Priority generation queue</span>
+        <span>Advanced reasoning modes</span>
+      </div>
+    </div>
+    <div class="upgrade-plans">
+      <div class="uplan" id="uplanFree">
+        <div class="uplan-name">Free</div>
+        <div class="uplan-price">$0 <span>/mo</span></div>
+        <div class="uplan-desc">Great for casual use and exploring Nexus.</div>
+        <ul class="uplan-features">
+          <li>Gemini 3 Flash</li>
+          <li>Gemini 3.1 Pro</li>
+          <li class="no">GPT-4o / Claude</li>
+          <li class="no">Priority access</li>
+        </ul>
+      </div>
+      <div class="uplan recommended" id="uplanPro">
+        <div class="uplan-badge">RECOMMENDED</div>
+        <div class="uplan-name">Pro</div>
+        <div class="uplan-price">$20 <span>/mo</span></div>
+        <div class="uplan-desc">Full model access for power users and professionals.</div>
+        <ul class="uplan-features">
+          <li>All Free models</li>
+          <li>GPT-4o &amp; GPT-4o Mini</li>
+          <li>Claude Sonnet 4 &amp; Haiku</li>
+          <li>Priority access</li>
+        </ul>
+      </div>
+      <div class="uplan uplan-max" id="uplanMax">
+        <div class="uplan-badge">ULTIMATE</div>
+        <div class="uplan-name">Max</div>
+        <div class="uplan-price">$100 <span>/mo</span></div>
+        <div class="uplan-desc">Built for teams and heavy daily use with highest limits.</div>
+        <ul class="uplan-features">
+          <li>Everything in Pro</li>
+          <li>Highest daily usage limits</li>
+          <li>Top-priority generation lane</li>
+          <li>Early access to experimental features</li>
+        </ul>
+      </div>
+    </div>
+    <div class="upgrade-actions">
+      <button class="upgrade-btn" id="upgradeBtn_free" onclick="applyPlanChange('free')">Choose Free</button>
+      <button class="upgrade-btn pro" id="upgradeBtn_pro" onclick="applyPlanChange('pro')">Upgrade to Pro</button>
+      <button class="upgrade-btn max" id="upgradeBtn_max" onclick="applyPlanChange('max')">Go Max</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- File Hub -->
+<div class="ov" id="fileHubModal">
+<div class="modal" style="width:760px;max-width:95vw">
+  <div class="mh"><h3>📁 Files</h3><button class="mx" onclick="closeM('fileHubModal')">✕</button></div>
+  <div class="mb">
+    <p class="st">Queued Uploads</p>
+    <p class="hint">Files attached in the current composer but not yet sent.</p>
+    <div id="hubUploads" class="hub-list"></div>
+    <hr>
+    <p class="st">Generated / Modified Files</p>
+    <p class="hint">Files touched by AI responses. Click to open in Canvas.</p>
+    <div id="hubArtifacts" class="hub-list"></div>
+    <hr>
+    <p class="st">Workspace Files</p>
+    <p class="hint">Project files available to Nexus.</p>
+    <div id="hubWorkspace" class="hub-list"></div>
+  </div>
+</div>
+</div>
+
+<!-- Canvas Panel -->
+<div class="canvas-panel" id="canvasPanel">
+  <div class="canvas-head">
+    <div class="ch-left">
+      <span class="ch-title" id="canvasTitle">Document</span>
+      <span class="ch-mode" id="canvasMode">PROSE</span>
+    </div>
+    <div class="ch-actions">
+      <button class="ch-btn" onclick="copyCanvas()" title="Copy">📋 Copy</button>
+      <button class="ch-btn" onclick="downloadCanvas()" title="Download">💾 Save</button>
+      <button class="ch-btn" onclick="sendCanvasToAI()" title="Ask AI to edit">✨ AI Edit</button>
+      <button class="ch-btn" onclick="closeCanvas()" title="Close">✕</button>
+    </div>
+  </div>
+  <div class="canvas-body">
+    <div class="canvas-tabs" id="canvasTabs"></div>
+    <textarea class="canvas-editor" id="canvasEditor" placeholder="Start writing or paste content here..." spellcheck="true"></textarea>
+  </div>
+  <div class="canvas-ai-bar">
+    <input type="text" id="canvasAiInput" placeholder="Ask AI to edit this document..." onkeydown="if(event.key==='Enter')canvasAiEdit()">
+    <button onclick="canvasAiEdit()">Apply</button>
+  </div>
+  <div class="canvas-footer">
+    <div class="cf-info">
+      <span id="canvasLines">0 lines</span>
+      <span id="canvasChars">0 chars</span>
+    </div>
+    <span id="canvasStatus">Ready</span>
+  </div>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>

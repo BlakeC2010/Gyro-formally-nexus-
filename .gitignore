@@ -1,0 +1,36 @@
+# Environment & dependencies
+.env
+.env.*
+*.env
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Firebase service account — NEVER commit
+serviceAccount.json
+*serviceAccount*.json
+
+# User data — never commit
+.nexus_data/
+.nexus_history/
+.nexus_session_secret
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+
+# Node (just in case)
+node_modules/
