@@ -33,8 +33,19 @@ function startThinkingPhrases(el){
   _thinkInterval=setInterval(()=>{
     if(!el||!el.isConnected){clearInterval(_thinkInterval);_thinkInterval=null;return;}
     i=(i+1)%_thinkPhrases.length;
-    el.textContent=' '+_thinkPhrases[i];
-  },2200);
+    el.style.transition='opacity .3s ease, transform .3s ease';
+    el.style.opacity='0';
+    el.style.transform='translateY(-3px)';
+    setTimeout(()=>{
+      if(!el.isConnected)return;
+      el.textContent=' '+_thinkPhrases[i];
+      el.style.transform='translateY(3px)';
+      requestAnimationFrame(()=>{
+        el.style.opacity='1';
+        el.style.transform='translateY(0)';
+      });
+    },300);
+  },2800);
 }
 
 function stopThinkingPhrases(){
@@ -1469,6 +1480,7 @@ function registerArtifactsFromReply(reply,filesModified=[]){
   const codeRe=/```(\w*)\n([\s\S]*?)```/g;
   while((m=codeRe.exec(reply||''))!==null){
     const lang=(m[1]||'text').toLowerCase();
+    if(lang==='todolist')continue;
     const content=m[2]||'';
     const title=lang==='mermaid'?inferMindMapTitle(content,idx++):`${(lang||'code').toUpperCase()} snippet ${idx++}`;
     ids.push(registerArtifact({title,content,isCode:lang!=='text'&&lang!=='md'&&lang!=='markdown',path:''}));
@@ -1605,7 +1617,7 @@ async function sendMessage(){
 
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
-  msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .4s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase"> Thinking...</span></div></div>';
+  msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
   area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
   startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
@@ -1666,22 +1678,28 @@ async function sendMessage(){
             fullText+=data.text;
             if(canRender()){
               const preview=esc(stripMetaBlocks(fullText));
-              const generating=hasUnclosedCodeFence(fullText)?'<div class="stream-state">🛠 Generating file artifact...</div>':'';
-              contentEl.innerHTML=`<div class="stream-preview">${preview||'...'}</div>${generating}`;
+              const generating=hasUnclosedCodeFence(fullText)?'<div class="stream-state"><span class="ss-icon">⚙</span> Generating file artifact...</div>':'';
+              contentEl.innerHTML=`<div class="stream-preview">${preview||'...'}<span class="stream-cursor"></span></div>${generating}`;
               area.scrollTop=area.scrollHeight;
             }
           }else if(data.type==='done'){
             // Morph thinking indicator into response
             const thinkIndicator=contentEl.querySelector('.think-active');
             if(thinkIndicator){
-              thinkIndicator.style.transition='all .25s var(--ease)';
+              thinkIndicator.style.transition='all .35s var(--ease-smooth)';
               thinkIndicator.style.opacity='0';
-              thinkIndicator.style.transform='translateY(-6px) scale(.97)';
+              thinkIndicator.style.transform='translateY(-8px) scale(.95)';
+              thinkIndicator.style.filter='blur(4px)';
               thinkIndicator.style.maxHeight='0';
               thinkIndicator.style.padding='0';
               thinkIndicator.style.margin='0';
             }
-            await new Promise(r=>setTimeout(r,200));
+            // Fade out stream preview gracefully
+            const streamPreview=contentEl.querySelector('.stream-preview');
+            if(streamPreview){
+              contentEl.classList.add('morphing-out');
+            }
+            await new Promise(r=>setTimeout(r,350));
             let finalHTML='';
             let displayReply=data.reply||'';
             if(displayReply.includes('<<<THINKING>>>')&&displayReply.includes('<<<END_THINKING>>>')){
@@ -1722,14 +1740,23 @@ async function sendMessage(){
             }
 
             if(canRender()){
+              contentEl.classList.remove('morphing-out');
               contentEl.style.opacity='0';
-              contentEl.style.transform='translateY(6px)';
+              contentEl.style.filter='blur(6px)';
+              contentEl.style.transform='translateY(8px)';
               contentEl.innerHTML=finalHTML;
-              // Animate content in
+              // Animate content in with blur-dissolve
               requestAnimationFrame(()=>{
-                contentEl.style.transition='opacity .35s var(--ease-out), transform .35s var(--ease-out)';
+                contentEl.style.transition='opacity .45s var(--ease-smooth), filter .45s var(--ease-smooth), transform .45s var(--ease-smooth)';
                 contentEl.style.opacity='1';
+                contentEl.style.filter='blur(0)';
                 contentEl.style.transform='translateY(0)';
+                // Clean up inline styles after animation
+                setTimeout(()=>{
+                  contentEl.style.transition='';
+                  contentEl.style.filter='';
+                  contentEl.style.transform='';
+                },500);
               });
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
               try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
@@ -1843,22 +1870,41 @@ function sanitizeMermaidSource(src){
 }
 
 // ─── Inline interactive todo lists ─────────────────
+function countTodoItems(items){
+  let total=0,done=0;
+  for(const it of items){total++;if(it.done)done++;if(it.subtasks)for(const s of it.subtasks){total++;if(s.done)done++;}}
+  return{total,done};
+}
+
+function renderTodoRowHTML(listId,item,isSub,parentId){
+  const checked=item.done?'checked':'';
+  const doneClass=item.done?'done':'';
+  const subClass=isSub?'subtask':'';
+  const pAttr=parentId?` data-parent-id="${parentId}"`:'';
+  const pArg=parentId?`,'${parentId}'`:'';
+  let h=`<div class="chat-todo-row ${doneClass} ${subClass}" data-item-id="${item.id}"${pAttr}>`;
+  h+=`<button class="chat-todo-check ${checked}" onclick="toggleChatTodo('${listId}','${item.id}'${pArg})"><span>${item.done?'✓':''}</span></button>`;
+  h+=`<span class="chat-todo-text" ondblclick="editChatTodo('${listId}','${item.id}',this${pArg})">${esc(item.text)}</span>`;
+  if(!isSub)h+=`<button class="chat-todo-addsub" onclick="addSubtask('${listId}','${item.id}')" title="Add subtask">⊕</button>`;
+  h+=`<button class="chat-todo-del" onclick="deleteChatTodo('${listId}','${item.id}'${pArg})" title="Delete">✕</button>`;
+  h+=`</div>`;
+  return h;
+}
+
 function renderChatTodoList(listId){
   const items=chatTodoStore.get(listId)||[];
-  const doneCount=items.filter(i=>i.done).length;
-  const total=items.length;
-  const pct=total?Math.round(doneCount/total*100):0;
+  const{total,done}=countTodoItems(items);
+  const pct=total?Math.round(done/total*100):0;
   let html=`<div class="chat-todo" data-list-id="${listId}">`;
-  html+=`<div class="chat-todo-header"><span class="chat-todo-icon">☑</span><span class="chat-todo-title">${doneCount}/${total} completed</span><div class="chat-todo-bar"><div class="chat-todo-bar-fill" style="width:${pct}%"></div></div></div>`;
+  html+=`<div class="chat-todo-header"><span class="chat-todo-icon">☑</span><span class="chat-todo-title">${done}/${total} completed</span><div class="chat-todo-bar"><div class="chat-todo-bar-fill" style="width:${pct}%"></div></div></div>`;
   html+=`<div class="chat-todo-items">`;
   items.forEach(item=>{
-    const checked=item.done?'checked':'';
-    const doneClass=item.done?'done':'';
-    html+=`<div class="chat-todo-row ${doneClass}" data-item-id="${item.id}">`;
-    html+=`<button class="chat-todo-check ${checked}" onclick="toggleChatTodo('${listId}','${item.id}')"><span>${item.done?'✓':''}</span></button>`;
-    html+=`<span class="chat-todo-text" ondblclick="editChatTodo('${listId}','${item.id}',this)">${esc(item.text)}</span>`;
-    html+=`<button class="chat-todo-del" onclick="deleteChatTodo('${listId}','${item.id}')" title="Delete">✕</button>`;
-    html+=`</div>`;
+    html+=renderTodoRowHTML(listId,item,false);
+    if(item.subtasks&&item.subtasks.length){
+      html+=`<div class="chat-todo-subtask-group" data-parent-id="${item.id}">`;
+      item.subtasks.forEach(sub=>{html+=renderTodoRowHTML(listId,sub,true,item.id);});
+      html+=`</div>`;
+    }
   });
   html+=`</div>`;
   html+=`<div class="chat-todo-footer"><button class="chat-todo-add" onclick="addChatTodo('${listId}')">+ Add task</button></div>`;
@@ -1866,72 +1912,192 @@ function renderChatTodoList(listId){
   return html;
 }
 
-function reRenderChatTodo(listId){
+function updateChatTodoHeader(listId){
   const el=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
   if(!el)return;
-  const tmp=document.createElement('div');
-  tmp.innerHTML=renderChatTodoList(listId);
-  el.replaceWith(tmp.firstElementChild);
-  // Also sync to localStorage productivity state
+  const items=chatTodoStore.get(listId)||[];
+  const{total,done}=countTodoItems(items);
+  const pct=total?Math.round(done/total*100):0;
+  const title=el.querySelector('.chat-todo-title');
+  if(title)title.textContent=`${done}/${total} completed`;
+  const fill=el.querySelector('.chat-todo-bar-fill');
+  if(fill)fill.style.width=pct+'%';
   syncChatTodosToStorage(listId);
+}
+
+function findTodoItem(items,itemId,parentId){
+  if(parentId){const p=items.find(i=>i.id===parentId);return p&&p.subtasks?p.subtasks.find(s=>s.id===itemId):null;}
+  return items.find(i=>i.id===itemId);
+}
+
+function updateRowDOM(listId,itemId,done){
+  const el=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
+  if(!el)return;
+  const row=el.querySelector(`.chat-todo-row[data-item-id="${itemId}"]`);
+  if(!row)return;
+  row.classList.toggle('done',done);
+  const check=row.querySelector('.chat-todo-check');
+  if(check){check.classList.toggle('checked',done);check.querySelector('span').textContent=done?'✓':'';}
+}
+
+function autoCheckParent(listId,parentId){
+  const items=chatTodoStore.get(listId);
+  if(!items)return;
+  const parent=items.find(i=>i.id===parentId);
+  if(!parent||!parent.subtasks||!parent.subtasks.length)return;
+  const allDone=parent.subtasks.every(s=>s.done);
+  if(allDone&&!parent.done){parent.done=true;updateRowDOM(listId,parentId,true);}
+  else if(!allDone&&parent.done){parent.done=false;updateRowDOM(listId,parentId,false);}
 }
 
 function syncChatTodosToStorage(listId){
   const items=chatTodoStore.get(listId)||[];
   const state=loadProductivityState();
-  // Remove old items from this list, add current ones
   state.todos=state.todos.filter(t=>!t.id.startsWith(listId));
-  items.forEach(it=>{state.todos.push({id:it.id,text:it.text,done:it.done});});
+  items.forEach(it=>{
+    state.todos.push({id:it.id,text:it.text,done:it.done});
+    if(it.subtasks)it.subtasks.forEach(s=>{state.todos.push({id:s.id,text:s.text,done:s.done});});
+  });
   saveProductivityState(state);
 }
 
-function toggleChatTodo(listId,itemId){
+function toggleChatTodo(listId,itemId,parentId){
   const items=chatTodoStore.get(listId);
   if(!items)return;
-  const item=items.find(i=>i.id===itemId);
+  const item=findTodoItem(items,itemId,parentId);
   if(!item)return;
   item.done=!item.done;
-  reRenderChatTodo(listId);
+  updateRowDOM(listId,itemId,item.done);
+  if(parentId)autoCheckParent(listId,parentId);
+  updateChatTodoHeader(listId);
 }
 
-function deleteChatTodo(listId,itemId){
+function deleteChatTodo(listId,itemId,parentId){
   const items=chatTodoStore.get(listId);
   if(!items)return;
-  chatTodoStore.set(listId,items.filter(i=>i.id!==itemId));
-  reRenderChatTodo(listId);
+  const el=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
+  const row=el?.querySelector(`.chat-todo-row[data-item-id="${itemId}"]`);
+  if(row){
+    row.classList.add('removing');
+    row.addEventListener('animationend',()=>{
+      row.remove();
+      if(!parentId){const sg=el.querySelector(`.chat-todo-subtask-group[data-parent-id="${itemId}"]`);if(sg)sg.remove();}
+    },{once:true});
+  }
+  if(parentId){
+    const parent=items.find(i=>i.id===parentId);
+    if(parent&&parent.subtasks){
+      parent.subtasks=parent.subtasks.filter(s=>s.id!==itemId);
+      setTimeout(()=>{const sg=el?.querySelector(`.chat-todo-subtask-group[data-parent-id="${parentId}"]`);if(sg&&!sg.children.length)sg.remove();},250);
+      autoCheckParent(listId,parentId);
+    }
+  }else{
+    chatTodoStore.set(listId,items.filter(i=>i.id!==itemId));
+  }
+  updateChatTodoHeader(listId);
 }
 
-function editChatTodo(listId,itemId,el){
+function editChatTodo(listId,itemId,el,parentId){
   const items=chatTodoStore.get(listId);
   if(!items)return;
-  const item=items.find(i=>i.id===itemId);
+  const item=findTodoItem(items,itemId,parentId);
   if(!item)return;
   const input=document.createElement('input');
   input.type='text';input.value=item.text;
   input.className='chat-todo-edit-input';
+  let committed=false;
   const commit=()=>{
+    if(committed)return;committed=true;
     const val=input.value.trim();
-    if(val)item.text=val;
-    reRenderChatTodo(listId);
+    if(val){item.text=val;el.textContent=val;}
+    else el.textContent=item.text;
+    syncChatTodosToStorage(listId);
   };
   input.onblur=commit;
-  input.onkeydown=e=>{if(e.key==='Enter')commit();if(e.key==='Escape')reRenderChatTodo(listId);};
+  input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();input.blur();}if(e.key==='Escape'){input.value=item.text;input.blur();}};
   el.textContent='';
   el.appendChild(input);
   input.focus();input.select();
 }
 
 function addChatTodo(listId){
+  const el=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
+  if(!el)return;
+  const container=el.querySelector('.chat-todo-items');
+  if(!container)return;
+  const row=document.createElement('div');
+  row.className='chat-todo-row adding';
+  row.innerHTML=`<button class="chat-todo-check"><span></span></button><input class="chat-todo-edit-input" type="text" placeholder="Type task name…"><button class="chat-todo-del" style="opacity:1" title="Cancel">✕</button>`;
+  container.appendChild(row);
+  const input=row.querySelector('input');
+  let committed=false;
+  const commit=()=>{
+    if(committed)return;committed=true;
+    const val=input.value.trim();
+    if(val){
+      const items=chatTodoStore.get(listId)||[];
+      const newId=listId+'_'+Date.now().toString(36);
+      const newItem={id:newId,text:val,done:false,subtasks:[]};
+      items.push(newItem);
+      row.outerHTML=renderTodoRowHTML(listId,newItem,false);
+      updateChatTodoHeader(listId);
+    }else{
+      row.classList.add('removing');
+      setTimeout(()=>row.remove(),200);
+    }
+  };
+  input.addEventListener('blur',commit);
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){e.preventDefault();input.blur();}
+    if(e.key==='Escape'){input.value='';input.blur();}
+  });
+  row.querySelector('.chat-todo-del').addEventListener('click',()=>{input.value='';input.blur();});
+  requestAnimationFrame(()=>input.focus());
+}
+
+function addSubtask(listId,parentId){
+  const el=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
+  if(!el)return;
   const items=chatTodoStore.get(listId);
   if(!items)return;
-  const newId=listId+'_'+Date.now().toString(36);
-  items.push({id:newId,text:'New task',done:false});
-  reRenderChatTodo(listId);
-  // Auto-focus edit on the new item
-  setTimeout(()=>{
-    const row=document.querySelector(`.chat-todo[data-list-id="${listId}"] .chat-todo-row[data-item-id="${newId}"] .chat-todo-text`);
-    if(row)editChatTodo(listId,newId,row);
-  },50);
+  const parent=items.find(i=>i.id===parentId);
+  if(!parent)return;
+  if(!parent.subtasks)parent.subtasks=[];
+  let subGroup=el.querySelector(`.chat-todo-subtask-group[data-parent-id="${parentId}"]`);
+  if(!subGroup){
+    subGroup=document.createElement('div');
+    subGroup.className='chat-todo-subtask-group';
+    subGroup.dataset.parentId=parentId;
+    const parentRow=el.querySelector(`.chat-todo-row[data-item-id="${parentId}"]`);
+    if(parentRow)parentRow.after(subGroup);
+  }
+  const row=document.createElement('div');
+  row.className='chat-todo-row subtask adding';
+  row.innerHTML=`<button class="chat-todo-check"><span></span></button><input class="chat-todo-edit-input" type="text" placeholder="Type subtask…"><button class="chat-todo-del" style="opacity:1" title="Cancel">✕</button>`;
+  subGroup.appendChild(row);
+  const input=row.querySelector('input');
+  let committed=false;
+  const commit=()=>{
+    if(committed)return;committed=true;
+    const val=input.value.trim();
+    if(val){
+      const newId=parentId+'_s'+Date.now().toString(36);
+      const newSub={id:newId,text:val,done:false};
+      parent.subtasks.push(newSub);
+      row.outerHTML=renderTodoRowHTML(listId,newSub,true,parentId);
+      updateChatTodoHeader(listId);
+    }else{
+      row.classList.add('removing');
+      setTimeout(()=>{row.remove();if(!subGroup.children.length)subGroup.remove();},200);
+    }
+  };
+  input.addEventListener('blur',commit);
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){e.preventDefault();input.blur();}
+    if(e.key==='Escape'){input.value='';input.blur();}
+  });
+  row.querySelector('.chat-todo-del').addEventListener('click',()=>{input.value='';input.blur();});
+  requestAnimationFrame(()=>input.focus());
 }
 
 function fmt(text){
@@ -1954,7 +2120,7 @@ function fmt(text){
       const items=JSON.parse(raw);
       if(Array.isArray(items)){
         const listId='tl_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
-        chatTodoStore.set(listId,items.map((it,i)=>({id:listId+'_'+i,text:it.text||'',done:!!it.done})));
+        chatTodoStore.set(listId,items.map((it,i)=>({id:listId+'_'+i,text:it.text||'',done:!!it.done,subtasks:(it.subtasks||[]).map((sub,j)=>({id:listId+'_'+i+'_s'+j,text:sub.text||'',done:!!sub.done}))})));
         blocks.push(renderChatTodoList(listId));
         return `%%%BLOCK${blocks.length-1}%%%`;
       }
@@ -2234,32 +2400,104 @@ async function openFiles(){
   ).join('')||'<div style="color:var(--text-muted);font-size:11px">No workspace files found.</div>';
 }
 
-async function openFileHub(){
-  document.getElementById('fileHubModal').classList.add('open');
-  await refreshFileHub();
+// ─── File Browser ─────────────────────────────────
+function openFileBrowser(){
+  document.getElementById('fileBrowser').classList.add('open');
+  document.getElementById('fileBrowserOverlay').classList.add('open');
+  refreshFileBrowser();
 }
-
-async function refreshFileHub(){
-  const uploadsEl=document.getElementById('hubUploads');
-  const artEl=document.getElementById('hubArtifacts');
-  const wsEl=document.getElementById('hubWorkspace');
-  if(!uploadsEl||!artEl||!wsEl)return;
-
-  uploadsEl.innerHTML=uploadedHistory.length
-    ?uploadedHistory.slice(0,40).map(u=>`<div class="hub-item"><div class="left"><div class="name">${esc(u.name)}</div><div class="meta">${esc(u.mime||'file')} · ${new Date(u.when).toLocaleString()}</div></div></div>`).join('')
-    :'<div style="color:var(--text-muted);font-size:11px">No uploads yet.</div>';
-
-  artEl.innerHTML=artifactStore.length
-    ?artifactStore.slice(0,80).map(a=>`<div class="hub-item"><div class="left"><div class="name">${esc(a.title||a.path||'Artifact')}</div><div class="meta">${esc(a.path||a.action||'Generated content')}</div></div><button onclick="openArtifact('${a.id}')">Open</button></div>`).join('')
-    :'<div style="color:var(--text-muted);font-size:11px">No generated files yet.</div>';
-
+function closeFileBrowser(){
+  document.getElementById('fileBrowser').classList.remove('open');
+  document.getElementById('fileBrowserOverlay').classList.remove('open');
+}
+function switchFileTab(tab,btn){
+  document.querySelectorAll('.fb-tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.fb-panel').forEach(p=>p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(tab==='chat'?'fbChat':'fbWorkspace').classList.add('active');
+  if(tab==='chat')refreshChatFiles();else refreshWorkspaceFiles();
+}
+async function refreshFileBrowser(){
+  refreshWorkspaceFiles();
+  refreshChatFiles();
+}
+async function refreshWorkspaceFiles(){
+  const el=document.getElementById('fbWorkspace');
+  if(!el)return;
   try{
-    const r=await fetch('/api/files');
+    const r=await fetch('/api/user-files');
     const d=await r.json();
-    wsEl.innerHTML=(d.files||[]).slice(0,120).map(f=>`<div class="hub-item"><div class="left"><div class="name">${esc(f.path)}</div><div class="meta">${Number(f.size||0).toLocaleString()} chars</div></div><button onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">Open</button></div>`).join('')||'<div style="color:var(--text-muted);font-size:11px">No workspace files found.</div>';
-  }catch{
-    wsEl.innerHTML='<div style="color:var(--text-muted);font-size:11px">Could not load workspace files.</div>';
-  }
+    const files=d.files||[];
+    if(!files.length){el.innerHTML='<div class="fb-empty">No files yet. The AI will create files here as you work.</div>';return;}
+    const folders={};
+    files.forEach(f=>{const fld=f.folder||'';if(!folders[fld])folders[fld]=[];folders[fld].push(f);});
+    let html='';
+    const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
+    for(const fld of sortedFolders){
+      if(!folders[fld])continue;
+      if(fld){
+        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon">📁</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
+      }
+      for(const f of folders[fld]){
+        const ext=(f.name.split('.').pop()||'').toLowerCase();
+        const icon=ext==='md'?'📝':ext==='json'?'📋':ext==='txt'?'📄':ext==='yaml'||ext==='yml'?'⚙':'📄';
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">${icon}</span><span class="fb-file-name">${esc(f.name)}</span><span class="fb-file-size">${formatFileSize(f.size)}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete">✕</button></div>`;
+      }
+      if(fld)html+=`</div></div>`;
+    }
+    el.innerHTML=html;
+  }catch{el.innerHTML='<div class="fb-empty">Could not load files.</div>';}
+}
+function formatFileSize(bytes){
+  if(bytes<1024)return bytes+'B';
+  if(bytes<1048576)return(bytes/1024).toFixed(1)+'KB';
+  return(bytes/1048576).toFixed(1)+'MB';
+}
+async function refreshChatFiles(){
+  const el=document.getElementById('fbChat');
+  if(!el)return;
+  if(!curChat){el.innerHTML='<div class="fb-empty">Open a chat to see its files.</div>';return;}
+  const chat=allChats.find(c=>c.id===curChat);
+  // We need full chat data with generated_files
+  try{
+    const r=await apiFetch(`/api/chats/${curChat}`);
+    if(!r.ok){el.innerHTML='<div class="fb-empty">Could not load chat.</div>';return;}
+    const data=await r.json();
+    const genFiles=data.generated_files||[];
+    const uploads=(data.messages||[]).filter(m=>m.file_name).map(m=>({name:m.file_name,when:m.timestamp}));
+    let html='';
+    if(genFiles.length){
+      html+='<div class="fb-section-title">Generated Files</div>';
+      for(const f of genFiles){
+        const name=f.path.split('/').pop()||f.path;
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">✨</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
+      }
+    }
+    if(uploads.length){
+      html+='<div class="fb-section-title">Uploaded Files</div>';
+      for(const u of uploads){
+        html+=`<div class="fb-file"><span class="fb-file-icon">📎</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
+      }
+    }
+    if(!html)html='<div class="fb-empty">No files in this chat yet.</div>';
+    el.innerHTML=html;
+  }catch{el.innerHTML='<div class="fb-empty">Could not load chat files.</div>';}
+}
+async function createUserFolder(){
+  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});
+  if(!name?.trim())return;
+  await fetch('/api/user-files/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:name.trim()})});
+  refreshWorkspaceFiles();
+  showToast('Folder created.','success');
+}
+async function deleteUserFile(encodedPath,isFolder){
+  const path=decodeURIComponent(encodedPath);
+  const type=isFolder?'folder and all its contents':'file';
+  const ok=await _dlg({title:`Delete ${type}?`,msg:`Are you sure you want to delete "${path}"?`,icon:'⚠️',iconType:'warn',confirmText:'Delete',cancelText:'Cancel'});
+  if(!ok)return;
+  await fetch('/api/user-files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+  refreshWorkspaceFiles();
+  showToast('Deleted.','success');
 }
 
 async function openWorkspaceFile(encodedPath){
@@ -2273,9 +2511,90 @@ async function openWorkspaceFile(encodedPath){
     const ext=(title.split('.').pop()||'').toLowerCase();
     const codeExts=new Set(['py','js','ts','tsx','jsx','css','html','json','md','yaml','yml','sql','sh','ps1','java','cpp','c','rs','go','php','rb']);
     openCanvas(d.content||'',title,codeExts.has(ext),{openPanel:true,sourcePath:path});
+    closeFileBrowser();
   }catch{
     showToast('Could not open file.','error');
   }
+}
+
+// ─── Chat Settings Drawer ──────────────────────────
+function openChatDrawer(){
+  if(!curChat){showToast('Open a chat first.','info');return;}
+  document.getElementById('chatDrawer').classList.add('open');
+  document.getElementById('chatDrawerOverlay').classList.add('open');
+  loadChatDrawer();
+}
+function closeChatDrawer(){
+  document.getElementById('chatDrawer').classList.remove('open');
+  document.getElementById('chatDrawerOverlay').classList.remove('open');
+}
+async function loadChatDrawer(){
+  try{
+    const r=await apiFetch(`/api/chats/${curChat}`);
+    if(!r.ok)return;
+    const chat=await r.json();
+    document.getElementById('chatInstructions').value=chat.custom_instructions||'';
+    // Render pinned files
+    const pinnedEl=document.getElementById('pinnedFilesList');
+    const pinned=chat.pinned_files||[];
+    pinnedEl.innerHTML=pinned.length
+      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>📄 ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">✕</button></div>`;}).join('')
+      :'<div class="fb-empty">No pinned files.</div>';
+    // Populate folder select
+    const sel=document.getElementById('chatFolderSelect');
+    const foldersR=await fetch('/api/folders');
+    const foldersD=await foldersR.json();
+    const folders=foldersD.folders||[];
+    sel.innerHTML='<option value="">No folder</option>'+folders.map(f=>`<option value="${esc(f)}"${chat.folder===f?' selected':''}>${esc(f)}</option>`).join('');
+  }catch{}
+}
+async function saveChatInstructions(){
+  const val=document.getElementById('chatInstructions').value;
+  await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({custom_instructions:val})});
+  showToast('Instructions saved.','success');
+}
+async function openPinFilePicker(){
+  try{
+    const r=await fetch('/api/user-files');
+    const d=await r.json();
+    const files=d.files||[];
+    if(!files.length){showToast('No files to pin.','info');return;}
+    const list=files.map(f=>f.path).join('\n');
+    const chosen=await _dlg({title:'Pin a file',msg:'Available: '+files.map(f=>f.path).join(', '),icon:'📌',iconType:'info',inputLabel:'File path',inputDefault:files[0]?.path||'',inputPlaceholder:'e.g. notes/research/topic.md',confirmText:'Pin',cancelText:'Cancel'});
+    if(!chosen?.trim())return;
+    // Fetch current chat to get existing pins
+    const cr=await apiFetch(`/api/chats/${curChat}`);
+    const chat=await cr.json();
+    const pinned=chat.pinned_files||[];
+    const path=chosen.trim();
+    if(pinned.some(p=>(typeof p==='string'?p:p.path)===path)){showToast('Already pinned.','info');return;}
+    pinned.push(path);
+    await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned_files:pinned})});
+    loadChatDrawer();
+    showToast('File pinned.','success');
+  }catch{showToast('Could not pin file.','error');}
+}
+async function unpinFile(encodedPath){
+  const path=decodeURIComponent(encodedPath);
+  const cr=await apiFetch(`/api/chats/${curChat}`);
+  const chat=await cr.json();
+  const pinned=(chat.pinned_files||[]).filter(p=>(typeof p==='string'?p:p.path)!==path);
+  await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned_files:pinned})});
+  loadChatDrawer();
+  showToast('File unpinned.','success');
+}
+async function moveChatToFolder(folder){
+  await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});
+  await refreshChats();
+  showToast(folder?`Moved to ${folder}.`:'Removed from folder.','success');
+}
+async function createAndMoveFolder(){
+  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create & Move',cancelText:'Cancel'});
+  if(!name?.trim())return;
+  await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:name.trim()})});
+  await refreshChats();
+  loadChatDrawer();
+  showToast(`Moved to ${name.trim()}.`,'success');
 }
 
 // ─── Image Gen ────────────────────────────────────

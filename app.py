@@ -135,6 +135,12 @@ LEGACY_DEFAULT_GOOGLE_CLIENT_ID = "253818541787-cal4ulgrb5otqjj8htg55l8c6gvl750o
 IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                 ".nexus_history", ".nexus_data", "static", "templates"}
 IGNORED_FILES = {"nexus.py", "app.py", "requirements.txt", ".env", ".gitignore"}
+# Server-side files hidden from the user file browser
+SERVER_FILES = {"app.py", "requirements.txt", "Procfile", "render.yaml",
+                "NEXUS_INSTRUCTIONS.md", "KAIRO_INSTRUCTIONS.md", "nexus_INSTRUCTIONS.md",
+                ".env", ".gitignore", ".nexus_session_secret"}
+SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
+               ".nexus_history", ".nexus_data", "static", "templates", "logos"}
 MAX_CONTEXT_CHARS = 900_000
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_CREATOR_ORIGIN_STORY = "I built Nexus after my brother shared AI ideas that inspired me to create this workspace."
@@ -862,28 +868,37 @@ mindmap
 
 13. Interactive Todo Lists — whenever the user asks for a to-do list, task list, checklist, or you think a to-do list would be useful, output one using this format:
 ```todolist
-[{{"text":"First task","done":false}},{{"text":"Second task","done":true}},{{"text":"Third task","done":false}}]
+[{{"text":"First task","done":false,"subtasks":[{{"text":"Sub-step A","done":false}},{{"text":"Sub-step B","done":true}}]}},{{"text":"Second task","done":true}},{{"text":"Third task","done":false}}]
 ```
-Each item needs "text" (string) and "done" (boolean). The user will be able to check off, edit, and delete items interactively right in the chat. Use this format any time tasks/checklists are relevant. If the user says they completed something, you can output an updated list with done:true on the completed items.
+Each item needs "text" (string) and "done" (boolean). Items can optionally have "subtasks" (array of {{"text":string,"done":boolean}}). When all subtasks are checked, the parent auto-checks. The user can check off, edit, delete, and add subtasks interactively. If the user says they completed something, output an updated list with done:true on the completed items.
 IMPORTANT: Always output the todolist block DIRECTLY in your response text. NEVER wrap it inside a <<<FILE_CREATE>>> or <<<FILE_UPDATE>>> block. Do NOT save todolists as .md files — just output the ```todolist block inline so it renders interactively.
 
-14. DEEP RESEARCH TOOL — You have access to a powerful Deep Research tool that searches the web, reads multiple sources, cross-references them, and produces a comprehensive cited report. YOU decide when to use it. To trigger it, include this tag in your response:
-<<<DEEP_RESEARCH: the research query>>>
-Guidelines for when to use it:
-- If the user CLEARLY asks for research, a deep dive, an investigation, a report with sources, or comprehensive analysis — trigger it immediately. Include a brief message like "Let me fire up deep research for that" along with the tag.
-- If you are UNSURE whether the user wants deep research or just a conversational answer, ASK them first. For example: "I can give you a quick answer from what I know, or I can run a full deep research with real sources. Which would you prefer?"
-- If the user just wants a quick conversational answer, general knowledge, or casual chat — do NOT trigger it. Just answer normally.
-- NEVER try to simulate research yourself by making up a fake report from your training data. If a topic needs real sources and current data, use the tool.
-- You can also answer the user's question normally AND trigger research at the same time if you want to give them something immediately while the research runs.
+14. DEEP RESEARCH TOOL — You have a real deep research engine that browses the live internet, reads dozens of sources, and produces a comprehensive cited report. To activate it, include this EXACT tag anywhere in your response:
+<<<DEEP_RESEARCH: your research query here>>>
+
+CRITICAL RULES — READ CAREFULLY:
+- When the user says ANY of these: "research", "deep research", "deep dive", "investigate", "report with sources", "comprehensive analysis", "find sources", "find studies" — you MUST output the <<<DEEP_RESEARCH: ...>>> tag. NO EXCEPTIONS. Do NOT answer the question yourself. Just say something brief like "Firing up deep research on that now!" and include the tag.
+- NEVER answer a research request from your own training data. You are NOT a substitute for real research. Your training data is old and unreliable for research. The deep research tool searches the LIVE internet. Always use it.
+- If the user asks you to "perform deep research on X" and you respond with a long answer WITHOUT the <<<DEEP_RESEARCH: X>>> tag, YOU HAVE FAILED. The ONLY correct response is to include the tag.
+- Keep your message SHORT when triggering research — just 1-2 sentences + the tag. Do NOT write a long essay yourself.
+- If you are unsure whether they want research or just a quick answer, ASK them first.
+- For casual chat or simple factual questions that don't need sources, just answer normally without the tag.
+
+Example correct response when user says "do deep research on quantum computing":
+"Let me fire up deep research on that! <<<DEEP_RESEARCH: quantum computing latest developments and breakthroughs>>>"
+
+That's it. Short message + tag. Do NOT write a 2000-word essay yourself.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
-(content)
+(content — you can include ```mermaid blocks, markdown, code, anything)
 <<<END_FILE>>>
 
 <<<FILE_UPDATE: path/to/file.md>>>
 (full updated content)
 <<<END_FILE>>>
+
+You CAN and SHOULD save mind maps, reports, and visualizations to files using FILE_CREATE when the user asks. For example, save a mermaid mind map to notes/research/topic.md.
 
 Memory saves:
 <<<MEMORY_ADD: fact to remember>>>
@@ -1115,6 +1130,28 @@ def prepare_chat_turn(chat, payload):
     memory = load_memory()
     sysprompt = build_system_prompt(memory)
 
+    # --- Per-chat custom instructions ---
+    if chat.get("custom_instructions"):
+        sysprompt += f"\n\n[CHAT-SPECIFIC INSTRUCTIONS]\n{chat['custom_instructions']}"
+
+    # --- Per-chat pinned files context ---
+    pinned = chat.get("pinned_files") or []
+    if pinned:
+        pinned_ctx = []
+        for pf in pinned:
+            path = pf if isinstance(pf, str) else pf.get("path", "")
+            if not path:
+                continue
+            fp = WORKSPACE / Path(path).as_posix()
+            if fp.exists() and fp.is_file():
+                try:
+                    content = fp.read_text(encoding="utf-8")[:50000]
+                    pinned_ctx.append(f"=== PINNED FILE: {path} ===\n{content}")
+                except Exception:
+                    pass
+        if pinned_ctx:
+            ws = "[PINNED FILES]\n" + "\n\n".join(pinned_ctx) + "\n\n" + ws
+
     # --- Chat history: summarize old messages if conversation is long ---
     messages = chat["messages"]
     if len(messages) > 20:
@@ -1177,6 +1214,16 @@ def finalize_chat_response(chat, ctx, raw_response):
         "files_modified": executed,
         "memory_added": new_facts or None,
     })
+    # Track generated files on the chat object for per-chat file listing
+    if executed:
+        chat_files = chat.get("generated_files") or []
+        existing = {f["path"] for f in chat_files}
+        for f in executed:
+            if f["path"] not in existing:
+                chat_files.append({"path": f["path"], "action": f["action"],
+                                   "when": datetime.datetime.now().isoformat()})
+                existing.add(f["path"])
+        chat["generated_files"] = chat_files
     save_chat(chat)
     # Track token usage for guests (estimate: 1 token ≈ 4 chars)
     if session.get("guest") and not session.get("user_id"):
@@ -1969,7 +2016,7 @@ def patch_chat(chat_id):
     c, reason = load_chat(chat_id)
     if not c: return jsonify({"error": f"Chat not found ({reason})"}), 404
     d = request.get_json()
-    for f in ("title", "folder"):
+    for f in ("title", "folder", "custom_instructions", "pinned_files"):
         if f in d: c[f] = d[f]
     if "model" in d:
         settings = load_settings()
@@ -2014,6 +2061,9 @@ def chat_message(chat_id):
         return jsonify({"error": f"API error: {err}", "files": []})
 
     resp, research_query = extract_research_trigger(resp)
+    # Safety net: if user clearly asked for research and AI forgot the tag, auto-trigger
+    if not research_query and _detect_research_intent(ctx["user_text"]):
+        research_query = ctx["user_text"]
     clean, executed, new_facts = finalize_chat_response(chat, ctx, resp)
     result = {"reply": clean, "files": executed, "memory_added": new_facts}
     if research_query:
@@ -2142,6 +2192,9 @@ def chat_message_stream(chat_id):
             raw_text = "".join(pieces)
             # Check if AI triggered deep research
             raw_text, research_query = extract_research_trigger(raw_text)
+            # Safety net: if user clearly asked for research and AI forgot the tag, auto-trigger
+            if not research_query and _detect_research_intent(ctx["user_text"]):
+                research_query = ctx["user_text"]
             clean, executed, new_facts = finalize_chat_response(chat, ctx, raw_text)
             done_payload = {
                 "type": "done",
@@ -2279,6 +2332,57 @@ def list_files_route():
     return jsonify({"files": [{"path": p, "size": len(c), "preview": c[:200],
         "folder": str(Path(p).parent) if str(Path(p).parent) != "." else ""}
         for p, c in sorted(files.items())]})
+
+@app.route("/api/user-files")
+@require_auth_or_guest
+def list_user_files():
+    """Return only user-facing files (notes, projects, etc.) in a tree structure."""
+    tree = []
+    for root, dirs, fnames in os.walk(WORKSPACE):
+        dirs[:] = [d for d in sorted(dirs) if d not in SERVER_DIRS]
+        rel_root = Path(root).relative_to(WORKSPACE)
+        for fn in sorted(fnames):
+            if fn.startswith(".") or fn in SERVER_FILES:
+                continue
+            fp = Path(root) / fn
+            rp = str(rel_root / fn) if str(rel_root) != "." else fn
+            try:
+                size = fp.stat().st_size
+            except Exception:
+                size = 0
+            tree.append({"path": rp, "name": fn, "size": size,
+                         "folder": str(rel_root) if str(rel_root) != "." else ""})
+    return jsonify({"files": tree})
+
+@app.route("/api/user-files/folder", methods=["POST"])
+@require_auth
+def create_user_folder():
+    """Create a custom folder in the workspace."""
+    d = request.get_json() or {}
+    name = (d.get("path") or "").strip()
+    if not name or ".." in name or name.startswith("/"):
+        return jsonify({"error": "Invalid folder name"}), 400
+    clean = Path(name).as_posix()
+    fp = WORKSPACE / clean
+    fp.mkdir(parents=True, exist_ok=True)
+    return jsonify({"ok": True, "path": clean})
+
+@app.route("/api/user-files/delete", methods=["POST"])
+@require_auth
+def delete_user_file():
+    d = request.get_json() or {}
+    path = (d.get("path") or "").strip()
+    if not path or ".." in path or path.startswith("/"):
+        return jsonify({"error": "Invalid path"}), 400
+    fp = WORKSPACE / Path(path).as_posix()
+    if not fp.exists():
+        return jsonify({"error": "Not found"}), 404
+    if fp.is_dir():
+        import shutil
+        shutil.rmtree(fp)
+    else:
+        fp.unlink()
+    return jsonify({"ok": True})
 
 @app.route("/api/files/content")
 @require_auth_or_guest

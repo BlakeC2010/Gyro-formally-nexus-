@@ -73,7 +73,8 @@
   <div class="topbar">
     <div class="topbar-left">
       <button class="btn-menu" onclick="toggleSB()">☰</button>
-      <button class="tb-btn" onclick="openFileHub()" title="Files">📁</button>
+      <button class="tb-btn" onclick="openFileBrowser()" title="Files">📁</button>
+      <button class="tb-btn" onclick="openChatDrawer()" title="Chat Settings">🔧</button>
       <span class="topbar-title" id="topTitle">Nexus</span>
     </div>
     <div class="topbar-right">
@@ -431,24 +432,56 @@
 </div>
 </div>
 
-<!-- File Hub -->
-<div class="ov" id="fileHubModal">
-<div class="modal" style="width:760px;max-width:95vw">
-  <div class="mh"><h3>📁 Files</h3><button class="mx" onclick="closeM('fileHubModal')">✕</button></div>
-  <div class="mb">
-    <p class="st">Queued Uploads</p>
-    <p class="hint">Files attached in the current composer but not yet sent.</p>
-    <div id="hubUploads" class="hub-list"></div>
-    <hr>
-    <p class="st">Generated / Modified Files</p>
-    <p class="hint">Files touched by AI responses. Click to open in Canvas.</p>
-    <div id="hubArtifacts" class="hub-list"></div>
-    <hr>
-    <p class="st">Workspace Files</p>
-    <p class="hint">Project files available to Nexus.</p>
-    <div id="hubWorkspace" class="hub-list"></div>
+<!-- File Browser Panel -->
+<div class="file-browser-overlay" id="fileBrowserOverlay" onclick="closeFileBrowser()"></div>
+<div class="file-browser" id="fileBrowser">
+  <div class="fb-head">
+    <h3>📁 Files</h3>
+    <div class="fb-actions">
+      <button class="fb-btn" onclick="createUserFolder()" title="New folder">+ Folder</button>
+      <button class="fb-btn" onclick="closeFileBrowser()">✕</button>
+    </div>
+  </div>
+  <div class="fb-tabs">
+    <button class="fb-tab active" data-tab="workspace" onclick="switchFileTab('workspace',this)">Workspace</button>
+    <button class="fb-tab" data-tab="chat" onclick="switchFileTab('chat',this)">This Chat</button>
+  </div>
+  <div class="fb-body" id="fbBody">
+    <div class="fb-panel active" id="fbWorkspace"></div>
+    <div class="fb-panel" id="fbChat"></div>
   </div>
 </div>
+
+<!-- Chat Settings Drawer -->
+<div class="chat-drawer-overlay" id="chatDrawerOverlay" onclick="closeChatDrawer()"></div>
+<div class="chat-drawer" id="chatDrawer">
+  <div class="cd-head">
+    <h3>⚙ Chat Settings</h3>
+    <button class="fb-btn" onclick="closeChatDrawer()">✕</button>
+  </div>
+  <div class="cd-body">
+    <div class="cd-section">
+      <label class="cd-label">Custom Instructions</label>
+      <p class="cd-hint">Give the AI special instructions for this chat only.</p>
+      <textarea id="chatInstructions" class="cd-textarea" placeholder="e.g. Always respond in Spanish, Focus on technical details, You are a fitness coach..." rows="4"></textarea>
+      <button class="cd-save" onclick="saveChatInstructions()">Save Instructions</button>
+    </div>
+    <div class="cd-section">
+      <label class="cd-label">Pinned Files</label>
+      <p class="cd-hint">Files always included as context for this chat.</p>
+      <div id="pinnedFilesList" class="cd-pinned-list"></div>
+      <button class="cd-add-file" onclick="openPinFilePicker()">+ Pin a file</button>
+    </div>
+    <div class="cd-section">
+      <label class="cd-label">Move to Folder</label>
+      <div class="cd-folder-row">
+        <select id="chatFolderSelect" class="cd-select" onchange="moveChatToFolder(this.value)">
+          <option value="">No folder</option>
+        </select>
+        <button class="cd-save" onclick="createAndMoveFolder()">+ New</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="/static/script.js?v=__CACHE_BUST__"></script>
