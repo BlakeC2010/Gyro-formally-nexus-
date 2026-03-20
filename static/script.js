@@ -307,20 +307,44 @@ function typewriterEffect(el,text,speed=46){
   tick();
 }
 
+function getLocalTimeGreeting(){
+  const hour=new Date().getHours();
+  const uname=(curUser?.name||'').split(' ')[0]||'';
+  const namePart=uname?`, ${uname}`:'';
+  const period=hour<5?'late night':hour<12?'morning':hour<17?'afternoon':hour<21?'evening':'late night';
+  const presets={
+    'late night':[
+      `Burning the midnight oil${namePart}?`,
+      `Late-night focus${namePart}?`,
+      `Quiet hours, clear mind${namePart}.`,
+    ],
+    morning:[
+      `Early start today${namePart}?`,
+      `Morning focus, steady pace${namePart}.`,
+      `Fresh morning energy${namePart}.`,
+    ],
+    afternoon:[
+      `Afternoon rhythm holding up${namePart}?`,
+      `Midday focus check${namePart}.`,
+      `Keeping momentum this afternoon${namePart}?`,
+    ],
+    evening:[
+      `Evening stretch ahead${namePart}.`,
+      `Winding down or diving in${namePart}?`,
+      `Golden hour thoughts${namePart}.`,
+    ],
+  };
+  const options=presets[period]||[`Ready when you are${namePart}.`];
+  return options[Math.floor(Math.random()*options.length)];
+}
+
 async function loadWelcome(force=false){
   const area=document.getElementById('chatArea');
   if(curChat&&!force)return;
-  area.innerHTML=getWelcomeHTML();
-  try{
-    const localHour=new Date().getHours();
-    const r=await fetch(`/api/greeting?hour=${encodeURIComponent(localHour)}`);
-    const d=await r.json();
-    if((!curChat||force)&&d.greeting){
-      area.innerHTML=getWelcomeHTML('\u200b');
-      const greetEl=area.querySelector('.welcome-greeting');
-      if(greetEl)typewriterEffect(greetEl,d.greeting);
-    }
-  }catch{}
+  const greeting=getLocalTimeGreeting();
+  area.innerHTML=getWelcomeHTML('\u200b');
+  const greetEl=area.querySelector('.welcome-greeting');
+  if(greetEl)typewriterEffect(greetEl,greeting);
 }
 
 function updateUserUI(){
