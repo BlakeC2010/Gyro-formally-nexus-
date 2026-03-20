@@ -345,6 +345,56 @@ function renderHomeWidget(w){
   return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Ready when you are.')}</div></div>`;
 }
 
+function buildInstantHomePlan(greeting){
+  const state=loadProductivityState();
+  const todos=(state.todos||[]).filter(t=>!t.done).slice(0,5);
+  const visions=(state.visions||[]).slice(0,1);
+  const chats=(allChats||[]).slice(0,5);
+  const cal=(calendarEvents||[]).slice(0,4);
+  const widgets=[];
+
+  if(chats.length){
+    widgets.push({
+      type:'recent',
+      size:'medium',
+      title:'Recent chats',
+      items:chats.map(c=>({id:c.id,title:c.title||'Untitled'})),
+    });
+  }
+  if(todos.length){
+    widgets.push({
+      type:'todos',
+      size:'medium',
+      title:'Priority tasks',
+      subtitle:`${todos.length} open`,
+      items:todos,
+    });
+  }
+  if(cal.length){
+    widgets.push({
+      type:'calendar',
+      size:'medium',
+      title:'Upcoming schedule',
+      items:cal,
+    });
+  }
+  if(visions.length){
+    const v=visions[0];
+    widgets.push({
+      type:'vision',
+      size:'small',
+      title:'Vision target',
+      text:(v.title||'').trim(),
+      meta:(v.when||'').trim(),
+    });
+  }
+
+  return {
+    heading:(greeting?`${greeting.replace(/[?.!]$/, '')}.`:'What would you like to work on?'),
+    widgets,
+  };
+}
+
 function getWelcomeHTML(greeting,homePlan){
   const displayGreeting=greeting!==undefined?greeting:getLocalTimeGreeting();
   const heading=homePlan?.heading?esc(homePlan.heading):'What would you like to work on?';
@@ -409,12 +459,6 @@ async function precomputeHomeWidgets(allowLiveApply=true,greeting=''){
     if(!resolved.heading&&!Array.isArray(resolved.widgets))return;
     saveCachedHomePlan(resolved);
     if(!allowLiveApply)return;
-    if(curChat)return;
-    if(!isWelcomeScreenVisible())return;
-    const area=document.getElementById('chatArea');
-    if(!area)return;
-    const g=greeting||getLocalTimeGreeting();
-    area.innerHTML=getWelcomeHTML(g,resolved);
   }catch{}
   finally{homeWidgetRefreshInFlight=false;}
 }
@@ -422,8 +466,7 @@ async function precomputeHomeWidgets(allowLiveApply=true,greeting=''){
 function startHomeWidgetPrecomputeLoop(){
   if(homeWidgetRefreshTimer)return;
   homeWidgetRefreshTimer=window.setInterval(()=>{
-    const canLiveApply=hasCachedHomePlan();
-    precomputeHomeWidgets(canLiveApply);
+    precomputeHomeWidgets(false);
   },180000);
 }
 
@@ -482,10 +525,9 @@ async function loadWelcome(force=false){
   const area=document.getElementById('chatArea');
   if(curChat&&!force)return;
   const greeting=getLocalTimeGreeting();
-  const cachedPlan=loadCachedHomePlan()||{};
-  area.innerHTML=getWelcomeHTML(greeting,cachedPlan);
-  const canLiveApply=hasCachedHomePlan();
-  precomputeHomeWidgets(canLiveApply,greeting);
+  const instantPlan=buildInstantHomePlan(greeting);
+  area.innerHTML=getWelcomeHTML(greeting,instantPlan);
+  precomputeHomeWidgets(false,greeting);
 }
 
 async function fetchHomeWidgetsPlan(){
