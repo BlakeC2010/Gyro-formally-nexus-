@@ -295,7 +295,12 @@ function showToast(message,type='info'){
   toast.className=`toast ${type}`;
   toast.textContent=message;
   wrap.appendChild(toast);
-  window.setTimeout(()=>{toast.style.opacity='0';toast.style.transform='translateX(20px)';toast.style.transition='all .3s';setTimeout(()=>toast.remove(),300)},2500);
+  window.setTimeout(()=>{
+    toast.style.transition='all .35s var(--ease)';
+    toast.style.opacity='0';
+    toast.style.transform='translateX(24px) scale(.95)';
+    setTimeout(()=>toast.remove(),350);
+  },2500);
 }
 
 function setStatus(message){
@@ -1047,6 +1052,9 @@ async function selectModel(id,label,provider,skipUpdate=false){
   if(drop)drop.classList.remove('show');
   if(id===currentModel)return;
   currentModel=id;
+  const cmsEl=document.getElementById('cmsCurrent');
+  cmsEl.classList.add('switching');
+  setTimeout(()=>cmsEl.classList.remove('switching'),350);
   document.getElementById('cmsCurrentIcon').innerHTML=logoImg(provider);
   document.getElementById('cmsCurrentText').textContent=label;
   if(!skipUpdate){
@@ -1393,8 +1401,22 @@ async function sendMessage(){
   const targetChatId=curChat;
   const w=document.querySelector('#chatArea .welcome');
   if(w){
-    w.style.animation='slideOut .3s var(--ease-out) forwards';
-    setTimeout(()=>{if(w.parentNode)w.remove();},280);
+    // Choreographed exit: widgets shrink first, then hero fades
+    const widgets=w.querySelectorAll('.wl-widget');
+    const hero=w.querySelector('.wl-hero');
+    widgets.forEach((el,i)=>{
+      el.style.transition=`all .25s var(--ease) ${i*0.03}s`;
+      el.style.opacity='0';
+      el.style.transform='translateY(-10px) scale(.96)';
+    });
+    if(hero){
+      hero.style.transition='all .3s var(--ease) .1s';
+      hero.style.opacity='0';
+      hero.style.transform='translateY(-14px)';
+    }
+    w.style.transition='all .35s var(--ease) .15s';
+    w.style.opacity='0';
+    setTimeout(()=>{if(w.parentNode)w.remove();},400);
   }
   const files=[...pendingFiles];
   addMsg('user',text,[],{fileNames:files.map(f=>f.name),files});
@@ -1431,7 +1453,7 @@ async function sendMessage(){
 
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
-  msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase"> Thinking...</span></div></div>';
+  msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .4s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase"> Thinking...</span></div></div>';
   area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
   startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
@@ -1497,6 +1519,17 @@ async function sendMessage(){
               area.scrollTop=area.scrollHeight;
             }
           }else if(data.type==='done'){
+            // Morph thinking indicator into response
+            const thinkIndicator=contentEl.querySelector('.think-active');
+            if(thinkIndicator){
+              thinkIndicator.style.transition='all .25s var(--ease)';
+              thinkIndicator.style.opacity='0';
+              thinkIndicator.style.transform='translateY(-6px) scale(.97)';
+              thinkIndicator.style.maxHeight='0';
+              thinkIndicator.style.padding='0';
+              thinkIndicator.style.margin='0';
+            }
+            await new Promise(r=>setTimeout(r,200));
             let finalHTML='';
             let displayReply=data.reply||'';
             if(displayReply.includes('<<<THINKING>>>')&&displayReply.includes('<<<END_THINKING>>>')){
@@ -1526,7 +1559,15 @@ async function sendMessage(){
             finalHTML+=renderArtifactCards(artifactIds,'ready');
             if(data.memory_added?.length)finalHTML+=`<div class="mops">🧠 Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
             if(canRender()){
+              contentEl.style.opacity='0';
+              contentEl.style.transform='translateY(6px)';
               contentEl.innerHTML=finalHTML;
+              // Animate content in
+              requestAnimationFrame(()=>{
+                contentEl.style.transition='opacity .35s var(--ease-out), transform .35s var(--ease-out)';
+                contentEl.style.opacity='1';
+                contentEl.style.transform='translateY(0)';
+              });
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
               try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
             }
