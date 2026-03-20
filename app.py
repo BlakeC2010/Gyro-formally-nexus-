@@ -833,23 +833,57 @@ Capabilities:
 5. ROUTE brain dumps — figure out which files to update/create
 6. GENERATE mind maps in ```mermaid blocks
 7. ANALYZE uploaded files
-8. IDENTIFY FRICTION — notice what's slowing the user down and suggest fixes
+8. IDENTIFY FRICTION — notice what's slowing the user down and suggest fixes. You have a Proactive Friction Protocol:
+   - When you notice a project, chat, or task hasn't been touched in days, gently surface it: "Hey, [topic] has been sitting idle for a few days — still on your radar?"
+   - When the user has too many open threads, suggest triaging: "You've got a lot of plates spinning. Want to pick the 1-2 that matter most today?"
+   - When STATUS.md lists friction items, check if they've been resolved; if not, suggest the smallest concrete next step.
+   - Never nag. Frame nudges as "I noticed..." not "You should...". One nudge per conversation max unless asked.
+   - The homepage already surfaces friction widgets — reinforce them conversationally when relevant.
 9. INCLUDE IMAGES — when useful, include images in your responses using markdown: ![description](https://image-url). Use this for explanations, tutorials, diagrams from the web, or when the user asks to see something visual. Find real image URLs from your knowledge or web search results.
 10. ANALYZE YOUTUBE VIDEOS — when the user shares a YouTube link, you can watch/analyze the video content and discuss it in detail. The video is provided to you directly.
-11. Multiple-choice (VERY rarely — only for genuine branching decisions where the user is stuck and there are 2-4 clearly distinct paths that would lead to very different outcomes). DO NOT use choices for:
-   - Asking clarifying questions
-   - Acknowledging a request before doing it
-   - Offering to help in different ways
-   - Any time a direct response works better
-   - Simple greetings or casual messages ("hi", "hey", "how are you", "what's up")
-   - Any message that doesn't involve a real decision with meaningfully different outcomes
-   Default to just answering directly. Choices should be the exception, not the rule. When in doubt, skip them.
+11. Interactive questions — you can ask the user multiple-choice questions they can click to answer (they can also type their own response). Use this when it genuinely helps move the conversation forward:
 
-Multiple-choice format (only when truly needed):
+WHEN TO USE choices:
+- Testing the user's knowledge (quizzes, study questions, knowledge checks)
+- Gathering preferences when there are 2-5 distinct paths ("Which area should we focus on?")
+- Decision points where the options are meaningfully different
+- Breaking down a complex decision into smaller sequential questions
+- When the user asks "test me", "quiz me", or anything that implies interactive Q&A
+- Onboarding / profiling questions ("What's your experience level with X?")
+
+WHEN NOT TO USE choices:
+- Simple greetings or casual messages
+- When a direct answer is clearly better
+- Acknowledging a request before doing it
+- When there's only one obvious path forward
+
+You can ask MULTIPLE questions in sequence — each gets its own interactive block. Use the <<<QUESTION:>>> tag to give each question context.
+
+Format (one question):
+<<<QUESTION: What area interests you most?>>>
 <<<CHOICES>>>
-Option A text
-Option B text
+Option A
+Option B
+Option C
 <<<END_CHOICES>>>
+
+Format (multiple sequential questions):
+<<<QUESTION: First, what's your experience level?>>>
+<<<CHOICES>>>
+Beginner
+Intermediate
+Advanced
+<<<END_CHOICES>>>
+
+<<<QUESTION: And which topic should we focus on?>>>
+<<<CHOICES>>>
+Topic A
+Topic B
+Topic C
+<<<END_CHOICES>>>
+
+You can also use choices WITHOUT a question tag — just <<<CHOICES>>> directly — for simple option lists after your text.
+The user can ALWAYS type their own answer instead of picking an option, so choices are suggestions not constraints.
 
 12. Tool mode prefixes — the user may start a message with a tool prefix:
 - [Use Canvas]: Put ALL code or document content in a single ```language code block so it opens in the side canvas editor. Do NOT add explanation around the code — just the code block with a brief intro line.
@@ -1300,10 +1334,85 @@ def _summarize_messages(old_messages, resolved):
         return "\n".join(f"- {l}" for l in lines[-6:])
 
 
+def _detect_friction_points(chats, todos, profile):
+    """Analyze workspace state and surface friction: stale chats, piling tasks, status friction."""
+    now = datetime.datetime.now()
+    nudges = []
+
+    # --- Stale chats: updated > 3 days ago with real messages ---
+    for c in (chats or []):
+        updated_str = c.get("updated") or c.get("created") or ""
+        msg_count = c.get("message_count", 0) or 0
+        if not updated_str or msg_count < 2:
+            continue
+        try:
+            updated_dt = datetime.datetime.fromisoformat(updated_str)
+            days_stale = (now - updated_dt).days
+            if days_stale >= 3:
+                nudges.append({
+                    "category": "stale_chat",
+                    "message": f"\"{c.get('title','Untitled')}\" — untouched for {days_stale} day{'s' if days_stale!=1 else ''}",
+                    "next_step": "Review where you left off and decide: continue, archive, or close it out.",
+                    "action": {"type": "open_chat", "chat_id": c.get("id", "")},
+                })
+        except Exception:
+            continue
+    # Keep only the top 2 stalest
+    nudges.sort(key=lambda n: -int(''.join(filter(str.isdigit, n["message"])) or 0))
+    stale_nudges = nudges[:2]
+    nudges = stale_nudges
+
+    # --- Piling todos: too many open tasks signals decision paralysis ---
+    pending = [t for t in (todos or []) if not t.get("done")]
+    if len(pending) >= 6:
+        nudges.append({
+            "category": "task_overload",
+            "message": f"{len(pending)} open tasks — time to triage",
+            "next_step": "Pick the 1-2 that actually move the needle today and defer the rest.",
+            "action": {"type": "prompt", "text": "Help me triage my open tasks and pick the top priorities for today"},
+        })
+
+    # --- STATUS.md friction items ---
+    status_path = Path(__file__).parent / "STATUS.md"
+    if status_path.exists():
+        try:
+            raw = status_path.read_text(encoding="utf-8")
+            in_friction = False
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if "friction" in stripped.lower() and stripped.startswith("#"):
+                    in_friction = True
+                    continue
+                if in_friction:
+                    if stripped.startswith("#"):
+                        break
+                    if stripped.startswith("- ") and len(stripped) > 4:
+                        nudges.append({
+                            "category": "status_friction",
+                            "message": stripped[2:].strip(),
+                            "next_step": "Break this into one concrete 15-minute action you can do right now.",
+                            "action": {"type": "prompt", "text": f"I'm stuck on: {stripped[2:].strip()}. What's the smallest concrete step I can take right now?"},
+                        })
+        except Exception:
+            pass
+
+    # --- No active focus set ---
+    focus = (profile.get("current_focus") or "").strip() if profile else ""
+    if not focus and (chats or todos):
+        nudges.append({
+            "category": "no_focus",
+            "message": "No current focus set — easy to drift without a north star",
+            "next_step": "Set a one-line focus for this week in your profile.",
+            "action": {"type": "prompt", "text": "Help me define my current focus for this week"},
+        })
+
+    return nudges[:5]
+
+
 def _widget_has_content(w):
     """Check if a widget has meaningful content to display."""
     wtype = (w.get("type") or "focus").lower()
-    if wtype in ("recent", "calendar", "todos"):
+    if wtype in ("recent", "calendar", "todos", "nudge"):
         items = w.get("items") or []
         return isinstance(items, list) and len(items) > 0
     if wtype in ("vision", "motivation", "focus"):
@@ -1315,6 +1424,17 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_e
     first_name = (user_name or "").split()[0] or "there"
     heading = f"Welcome back, {first_name}."
     widgets = []
+
+    # Proactive friction detection — surface nudges early
+    nudges = _detect_friction_points(chats, todos, profile)
+    if nudges:
+        widgets.append({
+            "type": "nudge",
+            "size": "medium",
+            "title": "Needs your attention",
+            "subtitle": f"{len(nudges)} item{'s' if len(nudges)!=1 else ''}",
+            "items": nudges,
+        })
 
     # Prefer actionable data first.
     if calendar_events:
@@ -1455,9 +1575,13 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
     genai, types = _import_google()
     client = genai.Client(api_key=api_key)
     contents = _google_contents_from_messages(messages, types)
-    cfg = dict(system_instruction=sysprompt, max_output_tokens=16384)
+    cfg = dict(system_instruction=sysprompt)
     if thinking:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=8000)
+        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=16000, include_thoughts=True)
+        cfg["max_output_tokens"] = 65536
+        print(f"  [thinking] Google non-stream: thinking enabled, budget=16000")
+    else:
+        cfg["max_output_tokens"] = 16384
     if web_search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     r = client.models.generate_content(model=model, contents=contents,
@@ -1467,11 +1591,14 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
     try:
         for candidate in (r.candidates or []):
             for part in (candidate.content.parts or []):
-                if getattr(part, "thought", False) and part.text:
+                is_thought = getattr(part, "thought", None)
+                if is_thought and part.text:
+                    print(f"  [thinking] Google: got thought part ({len(part.text)} chars)")
                     result_parts.append(f"<<<THINKING>>>\n{part.text}\n<<<END_THINKING>>>\n")
                 elif part.text:
                     result_parts.append(part.text)
-    except Exception:
+    except Exception as e:
+        print(f"  [thinking] Google: error extracting parts: {e}")
         return r.text
     return "".join(result_parts) if result_parts else (r.text or "")
 
@@ -1479,9 +1606,13 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
     genai, types = _import_google()
     client = genai.Client(api_key=api_key)
     contents = _google_contents_from_messages(messages, types)
-    cfg = dict(system_instruction=sysprompt, max_output_tokens=16384)
+    cfg = dict(system_instruction=sysprompt)
     if thinking:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=8000)
+        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=16000, include_thoughts=True)
+        cfg["max_output_tokens"] = 65536
+        print(f"  [thinking] Google stream: thinking enabled, budget=16000")
+    else:
+        cfg["max_output_tokens"] = 16384
     if web_search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     stream = client.models.generate_content_stream(
@@ -1489,20 +1620,29 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
         contents=contents,
         config=types.GenerateContentConfig(**cfg),
     )
+    _thought_count = 0
     for chunk in stream:
         # Check for thinking parts in candidates
         try:
             for candidate in (chunk.candidates or []):
                 for part in (candidate.content.parts or []):
-                    if getattr(part, "thought", False) and part.text:
+                    is_thought = getattr(part, "thought", None)
+                    if is_thought and part.text:
+                        _thought_count += 1
+                        if _thought_count == 1:
+                            print(f"  [thinking] Google stream: first thought chunk received")
                         yield {"__thinking__": True, "text": part.text}
                         continue
                     if part.text:
                         yield part.text
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError) as e:
+            if thinking and _thought_count == 0:
+                print(f"  [thinking] Google stream: exception in part extraction: {e}")
             text = getattr(chunk, "text", "") or ""
             if text:
                 yield text
+    if thinking:
+        print(f"  [thinking] Google stream: total thought chunks={_thought_count}")
 
 def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
@@ -1546,12 +1686,14 @@ def call_anthropic(api_key, model, sysprompt, messages, base_url=None, thinking=
         if parts: msgs.append({"role": role, "content": parts})
     create_kw = dict(model=model, max_tokens=64000, system=sysprompt, messages=msgs)
     if thinking:
-        create_kw["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+        create_kw["thinking"] = {"type": "enabled", "budget_tokens": 16000}
+        print(f"  [thinking] Anthropic non-stream: thinking enabled, budget=16000")
     r = client.messages.create(**create_kw)
     if thinking:
         parts_out = []
         for block in r.content:
             if block.type == "thinking" and getattr(block, "thinking", None):
+                print(f"  [thinking] Anthropic: got thinking block ({len(block.thinking)} chars)")
                 parts_out.append(f"<<<THINKING>>>\n{block.thinking}\n<<<END_THINKING>>>\n")
             elif block.type == "text" and block.text:
                 parts_out.append(block.text)
@@ -1604,10 +1746,12 @@ def call_anthropic_stream(api_key, model, sysprompt, messages, base_url=None, th
         if msg.get("text"): parts.append({"type": "text", "text": msg["text"]})
         if parts: msgs.append({"role": role, "content": parts})
     if thinking:
+        print(f"  [thinking] Anthropic stream: thinking enabled, budget=16000")
         # Stream with thinking enabled — iterate raw events
+        _thought_count = 0
         with client.messages.stream(
             model=model, max_tokens=64000, system=sysprompt, messages=msgs,
-            thinking={"type": "enabled", "budget_tokens": 8000}
+            thinking={"type": "enabled", "budget_tokens": 16000}
         ) as s:
             current_block_type = None
             for event in s:
@@ -1620,11 +1764,17 @@ def call_anthropic_stream(api_key, model, sysprompt, messages, base_url=None, th
                     if delta:
                         dt = getattr(delta, "type", "")
                         if dt == "thinking_delta":
-                            yield {"__thinking__": True, "text": getattr(delta, "thinking", "")}
+                            text = getattr(delta, "thinking", "") or ""
+                            if text:
+                                _thought_count += 1
+                                if _thought_count == 1:
+                                    print(f"  [thinking] Anthropic stream: first thinking delta")
+                                yield {"__thinking__": True, "text": text}
                         elif dt == "text_delta":
                             yield getattr(delta, "text", "")
                 elif etype == "content_block_stop":
                     current_block_type = None
+        print(f"  [thinking] Anthropic stream: total thinking deltas={_thought_count}")
     else:
         with client.messages.stream(model=model, max_tokens=64000, system=sysprompt, messages=msgs) as stream:
             for text in stream.text_stream:
@@ -2182,6 +2332,7 @@ def chat_message_stream(chat_id):
 
     thinking = ctx.get("thinking", False)
     web_search = ctx.get("web_search", False)
+    print(f"  [stream] thinking={thinking}, web_search={web_search}, provider={ctx['resolved'].get('provider')}, model={ctx['resolved'].get('actual_model')}")
     # For OpenAI (no native thinking), inject thinking instruction into system prompt
     if thinking and ctx["resolved"].get("provider") not in ("google", "anthropic"):
         ctx["sysprompt"] += "\n\n[THINKING MODE ENABLED]\nBefore answering, think through your approach step by step. Wrap ONLY your internal reasoning in <<<THINKING>>> and <<<END_THINKING>>> tags (these will be shown to the user in a collapsible block). Keep thinking concise — brief bullet points only. Then write your actual response AFTER the <<<END_THINKING>>> tag with no tags in it."

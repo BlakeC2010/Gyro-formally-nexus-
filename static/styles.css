@@ -239,7 +239,13 @@ body.light .sidebar{background:var(--bg-raised)}
   animation:genTextPulse 2s ease-in-out infinite;
 }
 @keyframes genTextPulse{0%,100%{opacity:1}50%{opacity:.5}}
-.sb-chat .ct{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:450}
+.sb-chat.unread .ct::before{
+  content:'';display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--accent);margin-right:6px;flex-shrink:0;
+  animation:unreadPop .3s var(--ease-spring-snappy) both;
+}
+@keyframes unreadPop{0%{transform:scale(0)}100%{transform:scale(1)}}
+.sb-chat .ct{flex:1;display:flex;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:450}
 .sb-chat .cd{display:none;background:none;border:none;color:var(--text-muted);font-size:13px;padding:2px 4px;border-radius:var(--r-xs)}
 .sb-chat:hover .cd{display:block}
 .sb-chat .cd:hover{color:var(--red);background:rgba(248,113,113,.06)}
@@ -728,13 +734,30 @@ body.light .chat-area::before{
 @keyframes todoRowIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
 @keyframes todoRowOut{to{opacity:0;transform:translateX(8px);max-height:0;padding-top:0;padding-bottom:0;margin:0;overflow:hidden}}
 
+/* ── Choice / Question Blocks ── */
+.cq-block{margin-top:16px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-deep);overflow:hidden;animation:cqIn .35s var(--ease-spring-snappy) both}
+@keyframes cqIn{from{opacity:0;transform:translateY(8px)}}
+.cq-question{padding:14px 16px 10px;font-size:13.5px;font-weight:600;color:var(--text-primary);line-height:1.5;border-bottom:1px solid var(--border)}
+.cq-opts{display:flex;flex-direction:column;gap:0}
+.cq-opt{display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-bottom:1px solid var(--border);background:none;color:var(--text-primary);font-size:13px;font-weight:450;cursor:pointer;transition:all .18s var(--ease);font-family:var(--font);text-align:left;width:100%}
+.cq-opt:last-child{border-bottom:none}
+.cq-opt:hover{background:var(--bg-hover)}
+.cq-opt:active{background:var(--bg-surface)}
+.cq-opt.cq-selected{background:rgba(99,102,241,.1);color:var(--accent)}
+.cq-opt.cq-selected .cq-letter{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cq-opt:disabled{opacity:.5}
+.cq-letter{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;border:1.5px solid var(--border);font-size:11px;font-weight:700;color:var(--text-muted);flex-shrink:0;transition:all .18s var(--ease)}
+.cq-opt:hover .cq-letter{border-color:var(--accent);color:var(--accent)}
+.cq-text{flex:1;line-height:1.45}
+.cq-custom{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--border);background:var(--bg-surface)}
+.cq-input{flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-deep);color:var(--text-primary);font-size:12px;font-family:var(--font);outline:none;transition:border-color .15s}
+.cq-input:focus{border-color:var(--accent)}
+.cq-input::placeholder{color:var(--text-muted)}
+.cq-send{padding:6px 10px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.cq-send:hover{opacity:.85}
+/* Legacy compat */
 .choice-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-.choice-btn{
-  padding:10px 18px;border-radius:var(--r-sm);
-  border:1px solid var(--border);background:var(--bg-surface);
-  color:var(--text-primary);font-size:13px;font-weight:500;
-  cursor:pointer;transition:all .2s var(--ease-spring);font-family:var(--font);
-}
+.choice-btn{padding:10px 18px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--bg-surface);color:var(--text-primary);font-size:13px;font-weight:500;cursor:pointer;transition:all .2s var(--ease-spring);font-family:var(--font)}
 .choice-btn:hover{background:var(--bg-hover);border-color:var(--border-hover);transform:translateY(-2px);box-shadow:var(--shadow-sm)}
 .choice-btn:active{transform:translateY(0) scale(.97);box-shadow:none;transition-duration:.08s}
 
@@ -888,12 +911,33 @@ body.light .chat-area::before{
 .wl-ac-label{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
 .wl-ac-sub{font-size:11px;color:var(--text-muted);line-height:1.4}
 .wl-cal-list,.wl-todo-list{display:flex;flex-direction:column;gap:8px}
-.wl-cal-item,.wl-todo-item{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep);transition:all .2s var(--ease)}
-.wl-cal-item:hover,.wl-todo-item:hover{border-color:var(--border-hover);background:var(--bg-surface);transform:translateX(2px)}
+.wl-cal-item{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep);transition:all .2s var(--ease)}
+.wl-cal-item:hover{border-color:var(--border-hover);background:var(--bg-surface);transform:translateX(2px)}
+.wl-todo-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep);transition:all .2s var(--ease)}
+.wl-todo-item:hover{border-color:var(--border-hover);background:var(--bg-surface)}
+.wl-todo-item.wl-todo-done .wl-todo-text{text-decoration:line-through;opacity:.5}
+.wl-todo-check{background:none;border:none;cursor:pointer;font-size:14px;color:var(--text-muted);padding:0 2px;transition:color .15s}
+.wl-todo-check:hover{color:var(--accent)}
+.wl-todo-text{flex:1;font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wl-todo-del{background:none;border:none;cursor:pointer;font-size:11px;color:var(--text-muted);padding:2px 4px;border-radius:4px;opacity:0;transition:all .15s}
+.wl-todo-item:hover .wl-todo-del{opacity:1}
+.wl-todo-del:hover{color:var(--red);background:rgba(255,80,80,.1)}
 .wl-cal-title{font-size:13px;color:var(--text-primary);font-weight:600}
 .wl-cal-time{font-size:11px;color:var(--text-muted);margin-top:4px}
 .wl-focus-copy,.wl-vision-main{font-size:14px;color:var(--text-secondary);line-height:1.65}
 .wl-vision-meta{font-size:11px;color:var(--text-muted);margin-top:8px}
+
+/* Nudge / friction widget */
+.wl-nudge-widget{border-left:3px solid var(--accent)}
+.wl-nudge-list{display:flex;flex-direction:column;gap:8px}
+.wl-nudge-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep);transition:all .2s var(--ease);cursor:default}
+.wl-nudge-item:hover{border-color:var(--border-hover);background:var(--bg-surface)}
+.wl-nudge-icon{font-size:16px;line-height:1;flex-shrink:0;margin-top:1px}
+.wl-nudge-body{flex:1;min-width:0}
+.wl-nudge-msg{font-size:13px;color:var(--text-primary);font-weight:500;line-height:1.4}
+.wl-nudge-step{font-size:11.5px;color:var(--text-muted);margin-top:3px;line-height:1.4}
+.wl-nudge-act{flex-shrink:0;padding:4px 12px;font-size:11px;font-weight:600;color:var(--accent);background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);border-radius:8px;cursor:pointer;transition:all .15s;white-space:nowrap}
+.wl-nudge-act:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
 /* ══════════════════════════════════════════════════
    INPUT AREA

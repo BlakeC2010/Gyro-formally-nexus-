@@ -5,6 +5,7 @@ let googleInitDone=false,thinkingEnabled=false,researchEnabled=false,guestAuthMo
 let deepResearchDepth='standard';
 let onboardingChecked=false;
 const runningStreams=new Map();
+const unreadChats=new Set();
 const artifactStore=[];
 const artifactIndex=new Map();
 const mindMapStore=new Map();
@@ -66,8 +67,15 @@ function updateComposerBusyUI(){
 
 function setChatRunning(chatId,state,meta={}){
   if(!chatId)return;
-  if(state)runningStreams.set(chatId,meta);
-  else runningStreams.delete(chatId);
+  if(state){runningStreams.set(chatId,meta);}
+  else{
+    runningStreams.delete(chatId);
+    // If this chat finished in the background, mark it unread
+    if(chatId!==curChat)unreadChats.add(chatId);
+    // Remove background generating indicator if visible
+    const ind=document.getElementById('bg-gen-indicator');
+    if(ind&&curChat===chatId)ind.remove();
+  }
   renderChatList(document.getElementById('chatSearch')?.value||'');
   updateComposerBusyUI();
 }
@@ -378,6 +386,7 @@ function hasWidgetContent(w){
   if(type==='recent')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='calendar')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='todos')return Array.isArray(w.items)&&w.items.length>0;
+  if(type==='nudge')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='vision')return!!(w?.text||'').trim();
   if(type==='motivation')return!!(w?.text||'').trim();
   return true;
@@ -405,8 +414,33 @@ function renderHomeWidget(w){
   if(type==='todos'){
     const items=Array.isArray(w.items)?w.items:[];
     if(!items.length)return'';
-    const body=items.map(i=>`<div class="wl-todo-item">${i.done?'✓':'○'} ${esc(i.text||'')}</div>`).join('');
+    const body=items.map(i=>{
+      const doneClass=i.done?'wl-todo-done':'';
+      const check=i.done?'✓':'○';
+      return `<div class="wl-todo-item ${doneClass}" data-todo-id="${esc(i.id||'')}">`
+        +`<button class="wl-todo-check" onclick="event.stopPropagation();toggleHomeTodo('${esc(i.id||'')}')">${check}</button>`
+        +`<span class="wl-todo-text">${esc(i.text||'')}</span>`
+        +`<button class="wl-todo-del" onclick="event.stopPropagation();deleteHomeTodo('${esc(i.id||'')}')" title="Delete">✕</button>`
+        +`</div>`;
+    }).join('');
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-todo-list">${body}</div></div>`;
+  }
+  if(type==='nudge'){
+    const items=Array.isArray(w.items)?w.items:[];
+    if(!items.length)return'';
+    const body=items.map(i=>{
+      const icon=i.category==='stale_chat'?'⏸':'⚡';
+      const actionAttr=i.action?`data-nudge-action='${esc(JSON.stringify(i.action))}'`:'';
+      return `<div class="wl-nudge-item" ${actionAttr}>`
+        +`<span class="wl-nudge-icon">${icon}</span>`
+        +`<div class="wl-nudge-body">`
+        +`<div class="wl-nudge-msg">${esc(i.message||'')}</div>`
+        +`<div class="wl-nudge-step">${esc(i.next_step||'')}</div>`
+        +`</div>`
+        +`<button class="wl-nudge-act" onclick="event.stopPropagation();handleNudgeAction(this)">Go</button>`
+        +`</div>`;
+    }).join('');
+    return `<div class="${cls} wl-nudge-widget"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-nudge-list">${body}</div></div>`;
   }
   if(type==='vision'){
     const text=(w?.text||'').trim();
@@ -466,15 +500,31 @@ function buildInstantHomePlan(greeting){
     });
   }
 
+  // Proactive friction detection — nudges (pinned first)
+  const nudges=_detectClientFriction();
+  let nudgeWidget=null;
+  if(nudges.length){
+    nudgeWidget={
+      type:'nudge',
+      size:'medium',
+      title:'Needs your attention',
+      subtitle:`${nudges.length} item${nudges.length!==1?'s':''}`,
+      items:nudges,
+    };
+  }
+
   // Shuffle real data widgets
   for(let i=pool.length-1;i>0;i--){
     const j=Math.floor(Math.random()*(i+1));
     [pool[i],pool[j]]=[pool[j],pool[i]];
   }
 
+  // Pin nudge at top, then fill remaining slots
+  const final=nudgeWidget?[nudgeWidget,...pool]:[...pool];
+
   return {
     heading:'What would you like to work on today?',
-    widgets:pool.slice(0,5),
+    widgets:final.slice(0,6),
   };
 }
 
@@ -636,8 +686,14 @@ async function fetchHomeWidgetsPlan(){
   }
 }
 
-function fillMasterPrompt(text){
-  setDraft(normalizeMasterPrompt(text));
+async function fillMasterPrompt(text){
+  const normalized=normalizeMasterPrompt(text);
+  const input=document.getElementById('msgInput');
+  if(!input)return;
+  input.value=normalized;
+  autoResize(input);
+  input.focus();
+  await sendMessage();
 }
 
 function updateUserUI(){
@@ -848,7 +904,8 @@ function renderChatList(filter=''){
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
       const g=isChatRunning(c.id)?' generating':'';
-      html+=`<div class="sb-chat${a}${g}" onclick="openChat('${c.id}')"><span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
+      const u=unreadChats.has(c.id)?' unread':'';
+      html+=`<div class="sb-chat${a}${g}${u}" onclick="openChat('${c.id}')"><span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
@@ -892,6 +949,7 @@ async function newFolder(){
 
 async function openChat(id){
   curChat=id;
+  unreadChats.delete(id);
   const r=await apiFetch(`/api/chats/${id}`);
   if(!r.ok){
     // Chat no longer exists on server — remove from list and go to welcome
@@ -935,6 +993,15 @@ async function openChat(id){
   }else{
     loadWelcome(true);
   }
+  // If this chat has an active stream, show a generating indicator
+  if(isChatRunning(id)){
+    const genDiv=document.createElement('div');
+    genDiv.className='msg kairo';
+    genDiv.id='bg-gen-indicator';
+    genDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
+    area.appendChild(genDiv);
+    area.scrollTop=area.scrollHeight;
+  }
   renderChatList(document.getElementById('chatSearch').value);
   updateComposerBusyUI();
   document.getElementById('msgInput').focus();
@@ -949,12 +1016,12 @@ async function delChat(id){
     if(run?.controller)run.controller.abort();
     runningStreams.delete(id);
     await fetch(`/api/chats/${id}`,{method:'DELETE'});
+    await refreshChats();
     if(curChat===id){
       curChat=null;
       document.getElementById('topTitle').textContent='NEXUS';
       loadWelcome(true);
     }
-    await refreshChats();
     updateComposerBusyUI();
   }catch{
     showToast('Could not delete chat right now.','error');
@@ -1587,10 +1654,49 @@ function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMe
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
 function sendQ(t){document.getElementById('msgInput').value=t;sendMessage()}
 
+function renderChoiceBlock(choices,question){
+  const letters='ABCDEFGH';
+  const qHTML=question?`<div class="cq-question">${esc(question)}</div>`:'';
+  const optsHTML=choices.map((c,i)=>{
+    const letter=letters[i]||String(i+1);
+    const safeText=esc(c.trim()).replace(/'/g,"\\'");
+    return `<button class="cq-opt" onclick="pickChoice(this,'${safeText}')">`
+      +`<span class="cq-letter">${letter}</span>`
+      +`<span class="cq-text">${esc(c.trim())}</span>`
+      +`</button>`;
+  }).join('');
+  return `<div class="cq-block">${qHTML}<div class="cq-opts">${optsHTML}</div>`
+    +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickCustomChoice(this)}"/>`
+    +`<button class="cq-send" onclick="pickCustomChoice(this.previousElementSibling)" title="Send">→</button></div></div>`;
+}
+
+function pickChoice(btn,text){
+  const block=btn.closest('.cq-block');
+  // Mark selected
+  block.querySelectorAll('.cq-opt').forEach(b=>b.classList.remove('cq-selected'));
+  btn.classList.add('cq-selected');
+  // Disable all options
+  block.querySelectorAll('.cq-opt').forEach(b=>{b.disabled=true;b.style.pointerEvents='none';});
+  const customRow=block.querySelector('.cq-custom');
+  if(customRow)customRow.style.display='none';
+  // Send
+  sendQ(text);
+}
+
+function pickCustomChoice(input){
+  const text=(input.value||'').trim();
+  if(!text)return;
+  const block=input.closest('.cq-block');
+  block.querySelectorAll('.cq-opt').forEach(b=>{b.disabled=true;b.style.pointerEvents='none';});
+  const customRow=block.querySelector('.cq-custom');
+  if(customRow)customRow.style.display='none';
+  sendQ(text);
+}
+
 function stripMetaBlocks(text){
   return (text||'')
     .replace(/<<<THINKING>>>[\s\S]*?(<<<END_THINKING>>>|$)/g,'')
-    .replace(/<<<CHOICES>>>[\s\S]*?(<<<END_CHOICES>>>|$)/g,'')
+    .replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES>>>[\s\S]*?(<<<END_CHOICES>>>|$)/g,'')
     .trim();
 }
 
@@ -1728,7 +1834,7 @@ async function openArtifact(id){
 async function sendMessage(){
   const input=document.getElementById('msgInput');const text=input.value.trim();
   if(!text&&!pendingFiles.length)return;
-  if(curChat&&isChatRunning(curChat)){showToast('This chat is still generating. Open a new chat or wait.','info');return;}
+  if(curChat&&isChatRunning(curChat)){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
   if(!curChat){
     try{
@@ -1880,6 +1986,7 @@ async function sendMessage(){
         try{
           const data=JSON.parse(line);
           if(data.type==='thinking_delta'){
+            if(!isThinking)console.log('[NEXUS] thinking_delta received — thinking panel activating');
             isThinking=true;
             thinkText+=data.text;
             if(canRender()){
@@ -1956,17 +2063,17 @@ async function sendMessage(){
             }
             // Strip thinking tags from reply if still present
             displayReply=displayReply.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'').trim();
-            let choices=[];
-            const choiceMatch=displayReply.match(/<<<CHOICES>>>\n([\s\S]*?)<<<END_CHOICES>>>/);
-            if(choiceMatch){
-              choices=choiceMatch[1].trim().split('\n').filter(c=>c.trim());
-              displayReply=displayReply.replace(/<<<CHOICES>>>[\s\S]*?<<<END_CHOICES>>>/,'').trim();
+            // Parse all choice blocks (supports multiple sequential questions)
+            const choiceBlockRe=/(?:<<<QUESTION:(.*?)>>>\n)?<<<CHOICES>>>\n([\s\S]*?)<<<END_CHOICES>>>/g;
+            let choiceBlockMatch;
+            const choiceBlocks=[];
+            while((choiceBlockMatch=choiceBlockRe.exec(displayReply))!==null){
+              choiceBlocks.push({question:(choiceBlockMatch[1]||'').trim(),choices:choiceBlockMatch[2].trim().split('\n').filter(c=>c.trim())});
             }
+            displayReply=displayReply.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
             finalHTML+=fmt(displayReply);
-            if(choices.length){
-              finalHTML+='<div class="choice-grid">';
-              for(const c of choices)finalHTML+=`<button class="choice-btn" onclick="sendQ('${esc(c.trim()).replace(/'/g,"\\'")}');this.parentElement.remove()">${esc(c.trim())}</button>`;
-              finalHTML+='</div>';
+            for(const cb of choiceBlocks){
+              if(cb.choices.length)finalHTML+=renderChoiceBlock(cb.choices,cb.question);
             }
             const artifactIds=registerArtifactsFromReply(displayReply,data.files||[]);
             if(data.files?.length){
@@ -2009,6 +2116,10 @@ async function sendMessage(){
             }
             refreshChats();
             setStatus('Done. Ask a follow-up or start something new.');
+            // If user navigated away and back, reload the chat so they see the response
+            if(curChat===targetChatId&&!msgDiv.isConnected){
+              openChat(targetChatId);
+            }
           }else if(data.type==='error'){
             if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">${esc(data.error)}</div>`;
           }
@@ -2060,19 +2171,19 @@ function addMsg(role,text,files,extra={}){
     displayText=parts.slice(1).join('<<<END_THINKING>>>').trim();
     html+=renderThinkBlock(thinkPart);
   }
-  let choices=[];
-  const choiceMatch=displayText.match(/<<<CHOICES>>>\n([\s\S]*?)<<<END_CHOICES>>>/);
-  if(choiceMatch){
-    choices=choiceMatch[1].trim().split('\n').filter(c=>c.trim());
-    displayText=displayText.replace(/<<<CHOICES>>>[\s\S]*?<<<END_CHOICES>>>/,'').trim();
+  // Parse all choice blocks (supports multiple sequential questions)
+  const choiceBlockRe2=/(?:<<<QUESTION:(.*?)>>>\n)?<<<CHOICES>>>\n([\s\S]*?)<<<END_CHOICES>>>/g;
+  let cbm2;
+  const cBlocks=[];
+  while((cbm2=choiceBlockRe2.exec(displayText))!==null){
+    cBlocks.push({question:(cbm2[1]||'').trim(),choices:cbm2[2].trim().split('\n').filter(c=>c.trim())});
   }
+  displayText=displayText.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
   html+=fmt(displayText);
-  if(choices.length&&role==='kairo'){
-    html+='<div class="choice-grid">';
-    for(const c of choices){
-      html+=`<button class="choice-btn" onclick="sendQ('${esc(c.trim()).replace(/'/g,"\\'")}');this.parentElement.remove()">${esc(c.trim())}</button>`;
+  if(cBlocks.length&&role==='kairo'){
+    for(const cb of cBlocks){
+      if(cb.choices.length)html+=renderChoiceBlock(cb.choices,cb.question);
     }
-    html+='</div>';
   }
   let artifactIds=[];
   if(role==='kairo')artifactIds=registerArtifactsFromReply(displayText,files||[]);
@@ -3226,6 +3337,7 @@ function addTodoItem(){
   saveProductivityState(state);
   input.value='';
   renderProductivityHub();
+  refreshHomeWidgets();
 }
 
 function toggleTodoItem(id){
@@ -3235,6 +3347,7 @@ function toggleTodoItem(id){
   item.done=!item.done;
   saveProductivityState(state);
   renderProductivityHub();
+  refreshHomeWidgets();
 }
 
 function deleteTodoItem(id){
@@ -3242,6 +3355,80 @@ function deleteTodoItem(id){
   state.todos=state.todos.filter(t=>t.id!==id);
   saveProductivityState(state);
   renderProductivityHub();
+  refreshHomeWidgets();
+}
+
+function toggleHomeTodo(id){
+  const state=loadProductivityState();
+  const item=state.todos.find(t=>t.id===id);
+  if(!item)return;
+  item.done=!item.done;
+  saveProductivityState(state);
+  refreshHomeWidgets();
+}
+
+function deleteHomeTodo(id){
+  const state=loadProductivityState();
+  state.todos=state.todos.filter(t=>t.id!==id);
+  saveProductivityState(state);
+  refreshHomeWidgets();
+}
+
+function refreshHomeWidgets(){
+  if(!curChat)loadWelcome(true);
+}
+
+function handleNudgeAction(btn){
+  const item=btn.closest('.wl-nudge-item');
+  if(!item)return;
+  try{
+    const action=JSON.parse(item.dataset.nudgeAction||'{}');
+    if(action.type==='open_chat'&&action.chat_id){
+      openChat(action.chat_id);
+    }else if(action.type==='prompt'&&action.text){
+      fillMasterPrompt(action.text);
+    }
+  }catch{}
+}
+
+function _detectClientFriction(){
+  const nudges=[];
+  const now=Date.now();
+  // Stale chats: updated > 3 days ago with real messages
+  for(const c of (allChats||[])){
+    const updated=c.updated||c.created||'';
+    const msgCount=c.message_count||0;
+    if(!updated||msgCount<2)continue;
+    try{
+      const days=Math.floor((now-new Date(updated).getTime())/(86400000));
+      if(days>=3){
+        nudges.push({
+          category:'stale_chat',
+          message:`"${c.title||'Untitled'}" — untouched for ${days} day${days!==1?'s':''}`,
+          next_step:'Review where you left off and decide: continue, archive, or close it out.',
+          action:{type:'open_chat',chat_id:c.id||''},
+        });
+      }
+    }catch{}
+  }
+  nudges.sort((a,b)=>{
+    const da=parseInt((a.message.match(/(\d+)\s*day/)||[])[1]||'0');
+    const db=parseInt((b.message.match(/(\d+)\s*day/)||[])[1]||'0');
+    return db-da;
+  });
+  const stale=nudges.slice(0,2);
+  // Task overload
+  const state=loadProductivityState();
+  const pending=(state.todos||[]).filter(t=>!t.done);
+  if(pending.length>=6){
+    stale.push({
+      category:'task_overload',
+      message:`${pending.length} open tasks — time to triage`,
+      next_step:'Pick the 1-2 that actually move the needle today and defer the rest.',
+      action:{type:'prompt',text:'Help me triage my open tasks and pick the top priorities for today'},
+    });
+  }
+  return stale.slice(0,5);
 }
 
 function addVisionItem(){
