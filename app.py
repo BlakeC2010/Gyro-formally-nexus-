@@ -1080,6 +1080,17 @@ def _summarize_messages(old_messages, resolved):
         return "\n".join(f"- {l}" for l in lines[-6:])
 
 
+def _widget_has_content(w):
+    """Check if a widget has meaningful content to display."""
+    wtype = (w.get("type") or "focus").lower()
+    if wtype in ("recent", "calendar", "todos"):
+        items = w.get("items") or []
+        return isinstance(items, list) and len(items) > 0
+    if wtype in ("vision", "motivation", "focus"):
+        text = (w.get("text") or "").strip()
+        return bool(text)
+    return True
+
 def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_events):
     first_name = (user_name or "").split()[0] or "there"
     heading = f"Welcome back, {first_name}."
@@ -1140,6 +1151,7 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_e
             "text": "Add tasks, connect your calendar, or start a chat to make this dashboard uniquely yours.",
         }]
 
+    widgets = [w for w in widgets if _widget_has_content(w)]
     return {"heading": heading, "widgets": widgets[:4]}
 
 
@@ -1205,6 +1217,9 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions, calendar_events)
         out = json.loads(txt)
         widgets = out.get("widgets") if isinstance(out, dict) else None
         if not isinstance(widgets, list) or not widgets:
+            return None
+        widgets = [w for w in widgets if _widget_has_content(w)]
+        if not widgets:
             return None
         return {
             "heading": str(out.get("heading") or f"Welcome back, {(user_name or 'there').split()[0]}.")[:120],

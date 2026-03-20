@@ -292,6 +292,16 @@ function buildMasterPromptCards(){
   return getMasterPrompts().map(a=>`<div class="wl-action-card" onclick="fillMasterPrompt('${a.q.replace(/'/g,"\\'")}')"><span class="wl-ac-icon">${a.icon}</span><span class="wl-ac-label">${a.label}</span><span class="wl-ac-sub">Editable master prompt</span></div>`).join('');
 }
 
+function hasWidgetContent(w){
+  const type=(w?.type||'focus').toLowerCase();
+  if(type==='recent')return Array.isArray(w.items)&&w.items.length>0;
+  if(type==='calendar')return Array.isArray(w.items)&&w.items.length>0;
+  if(type==='todos')return Array.isArray(w.items)&&w.items.length>0;
+  if(type==='vision')return!!(w?.text||'').trim();
+  if(type==='motivation')return!!(w?.text||'').trim();
+  return true;
+}
+
 function renderHomeWidget(w){
   const type=(w?.type||'focus').toLowerCase();
   const size=(w?.size||'medium').toLowerCase();
@@ -301,26 +311,32 @@ function renderHomeWidget(w){
 
   if(type==='recent'){
     const items=Array.isArray(w.items)?w.items:[];
-    const body=items.length?items.map(i=>`<div class="wl-recent-item" onclick="openChat('${esc(i.id||'')}')"><span class="wl-ri-title">${esc(i.title||'Untitled')}</span></div>`).join(''):'<div class="wl-empty">No recent chats yet.</div>';
+    if(!items.length)return'';
+    const body=items.map(i=>`<div class="wl-recent-item" onclick="openChat('${esc(i.id||'')}')"><span class="wl-ri-title">${esc(i.title||'Untitled')}</span></div>`).join('');
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-recent-list">${body}</div></div>`;
   }
   if(type==='calendar'){
     const items=Array.isArray(w.items)?w.items:[];
-    const body=items.length?items.map(i=>`<div class="wl-cal-item"><div class="wl-cal-title">${esc(i.summary||'Untitled event')}</div><div class="wl-cal-time">${esc(i.when||'Upcoming')}</div></div>`).join(''):'<div class="wl-empty">Connect Google Calendar to show upcoming events.</div>';
+    if(!items.length)return'';
+    const body=items.map(i=>`<div class="wl-cal-item"><div class="wl-cal-title">${esc(i.summary||'Untitled event')}</div><div class="wl-cal-time">${esc(i.when||'Upcoming')}</div></div>`).join('');
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-cal-list">${body}</div></div>`;
   }
   if(type==='todos'){
     const items=Array.isArray(w.items)?w.items:[];
-    const body=items.length?items.map(i=>`<div class="wl-todo-item">${i.done?'✓':'○'} ${esc(i.text||'')}</div>`).join(''):'<div class="wl-empty">No todos yet. Add one in Productivity Hub.</div>';
+    if(!items.length)return'';
+    const body=items.map(i=>`<div class="wl-todo-item">${i.done?'✓':'○'} ${esc(i.text||'')}</div>`).join('');
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-todo-list">${body}</div></div>`;
   }
   if(type==='vision'){
-    const text=esc(w?.text||'Set a meaningful target and break it into action.');
+    const text=(w?.text||'').trim();
+    if(!text)return'';
     const meta=w?.meta?`<div class="wl-vision-meta">${esc(w.meta)}</div>`:'';
-    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-vision-main">${text}</div>${meta}</div>`;
+    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-vision-main">${esc(text)}</div>${meta}</div>`;
   }
   if(type==='motivation'){
-    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Momentum first. Start with the smallest next action.')}</div></div>`;
+    const text=(w?.text||'').trim();
+    if(!text)return'';
+    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(text)}</div></div>`;
   }
   return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Ready when you are.')}</div></div>`;
 }
@@ -329,8 +345,9 @@ function getWelcomeHTML(greeting,homePlan){
   const displayGreeting=greeting!==undefined?greeting:getLocalTimeGreeting();
   const heading=homePlan?.heading?esc(homePlan.heading):'What would you like to work on?';
   const aiWidgets=Array.isArray(homePlan?.widgets)?homePlan.widgets:[];
-  const widgetCards=aiWidgets.length
-    ?aiWidgets.map(renderHomeWidget).join('')
+  const renderedWidgets=aiWidgets.filter(hasWidgetContent).map(renderHomeWidget).filter(Boolean).join('');
+  const widgetCards=renderedWidgets
+    ?renderedWidgets
     :`<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Start something</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
 
   return `<div class="welcome">
