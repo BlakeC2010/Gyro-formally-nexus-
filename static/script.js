@@ -416,22 +416,16 @@ function getWelcomeHTML(greeting,homePlan){
   const heading=homePlan?.heading?esc(homePlan.heading):'What would you like to work on?';
   const aiWidgets=Array.isArray(homePlan?.widgets)?homePlan.widgets:[];
   const validWidgets=pickWidgetsForGrid(aiWidgets.filter(hasWidgetContent),5);
-  let widgetCards='';
-  
-  if(validWidgets.length>0){
-    widgetCards=validWidgets.map(renderHomeWidget).filter(Boolean).join('');
-  }
-  
-  if(!widgetCards){
-    widgetCards=`<div class="wl-widget wl-size-small"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
-  }
+  const baseCards=validWidgets.map(renderHomeWidget).filter(Boolean).join('');
+  const promptsCard=`<div class="wl-widget wl-size-small"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
+  const widgetCards=baseCards+promptsCard;
 
   return `<div class="welcome">
     <div class="wl-hero">
       <h1 class="welcome-greeting">${displayGreeting}</h1>
       <p class="welcome-sub">${heading}</p>
     </div>
-    <div class="wl-grid">${widgetCards}<div class="wl-widget wl-size-small"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div></div>
+    <div class="wl-grid">${widgetCards}</div>
   </div>`;
 }
 
