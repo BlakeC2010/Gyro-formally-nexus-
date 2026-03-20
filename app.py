@@ -354,8 +354,12 @@ def _cur_user():
 def _load_oauth():
     if not FIREBASE_ENABLED:
         return _load_json(DATA_DIR / "oauth.json", {})
-    snap = db.collection("config").document("oauth").get()
-    return snap.to_dict() if snap.exists else {}
+    try:
+        snap = db.collection("config").document("oauth").get()
+        return snap.to_dict() if snap.exists else {}
+    except Exception as e:
+        print(f"  [!] Firestore _load_oauth failed: {e}")
+        return {}
 
 def _save_oauth(cfg):
     if not FIREBASE_ENABLED:
@@ -1794,7 +1798,10 @@ def save_profile_onboarding():
 
 @app.route("/api/oauth-config")
 def get_oauth_cfg():
-    cfg = _load_oauth()
+    try:
+        cfg = _load_oauth()
+    except Exception:
+        cfg = {}
     return jsonify({"google_client_id": _effective_google_client_id(cfg),
                     "github_available": False,
                     "apple_available": False})
