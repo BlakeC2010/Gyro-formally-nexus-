@@ -495,9 +495,18 @@ body.light .chat-area::before{
   margin:0 0 14px;
 }
 .welcome-sub{color:var(--text-muted);font-size:16px;margin:0;line-height:1.6}
-.wl-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px;width:100%;grid-auto-flow:dense}
+.wl-grid{
+  display:grid;
+  grid-template-columns:repeat(12,minmax(0,1fr));
+  gap:14px;
+  width:100%;
+  grid-auto-flow:dense;
+  grid-auto-rows:minmax(140px,auto);
+  max-height:600px;
+  overflow:hidden;
+}
 .wl-widget{background:var(--bg-surface);border:1px solid var(--border);border-radius:16px;padding:20px 18px;min-height:140px}
-.wl-size-small{grid-column:span 4}
+.wl-size-small{grid-column:span 3}
 .wl-size-medium{grid-column:span 6}
 .wl-size-large{grid-column:span 12}
 .wl-widget-hd{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:16px}

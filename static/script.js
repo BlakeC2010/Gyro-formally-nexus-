@@ -345,17 +345,23 @@ function getWelcomeHTML(greeting,homePlan){
   const displayGreeting=greeting!==undefined?greeting:getLocalTimeGreeting();
   const heading=homePlan?.heading?esc(homePlan.heading):'What would you like to work on?';
   const aiWidgets=Array.isArray(homePlan?.widgets)?homePlan.widgets:[];
-  const renderedWidgets=aiWidgets.filter(hasWidgetContent).map(renderHomeWidget).filter(Boolean).join('');
-  const widgetCards=renderedWidgets
-    ?renderedWidgets
-    :`<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Start something</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
+  const validWidgets=aiWidgets.filter(hasWidgetContent);
+  let widgetCards='';
+  
+  if(validWidgets.length>0){
+    widgetCards=validWidgets.slice(0,6).map(renderHomeWidget).filter(Boolean).join('');
+  }
+  
+  if(!widgetCards){
+    widgetCards=`<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Recent chats</div><div class="wl-recent-list"><div class="wl-empty">No chats yet. Start a new conversation to get rolling.</div></div></div><div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
+  }
 
   return `<div class="welcome">
     <div class="wl-hero">
       <h1 class="welcome-greeting">${displayGreeting}</h1>
       <p class="welcome-sub">${heading}</p>
     </div>
-    <div class="wl-grid">${widgetCards}<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div></div>
+    <div class="wl-grid">${widgetCards}</div>
   </div>`;
 }
 

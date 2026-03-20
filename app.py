@@ -1152,7 +1152,7 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_e
         }]
 
     widgets = [w for w in widgets if _widget_has_content(w)]
-    return {"heading": heading, "widgets": widgets[:4]}
+    return {"heading": heading, "widgets": widgets[:6]}
 
 
 def _ai_home_widgets(user_name, profile, chats, todos, visions, calendar_events):
