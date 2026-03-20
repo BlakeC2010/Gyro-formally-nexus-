@@ -450,42 +450,37 @@ function buildInstantHomePlan(greeting){
     });
   }
 
-  const fillers=[
-    {type:'motivation',size:'small',title:'Quick win',text:'Do one 10-minute task to build momentum.'},
-    {type:'motivation',size:'small',title:'Focus',text:'Choose one priority for this session.'},
-    {type:'motivation',size:'small',title:'Next action',text:'Write your next step in one sentence.'},
-    {type:'motivation',size:'small',title:'Keep moving',text:'Small progress beats perfect planning.'},
-    {type:'motivation',size:'small',title:'Start here',text:'Pick a master prompt to begin.'},
-  ];
-
-  const candidates=[...pool,...fillers];
-  for(let i=candidates.length-1;i>0;i--){
+  // Shuffle real data widgets
+  for(let i=pool.length-1;i>0;i--){
     const j=Math.floor(Math.random()*(i+1));
-    [candidates[i],candidates[j]]=[candidates[j],candidates[i]];
+    [pool[i],pool[j]]=[pool[j],pool[i]];
   }
-  const widgets=candidates.slice(0,5);
 
   return {
-    heading:(greeting?`${greeting.replace(/[?.!]$/, '')}.`:'What would you like to work on?'),
-    widgets:widgets.slice(0,5),
+    heading:'What would you like to work on today?',
+    widgets:pool.slice(0,5),
   };
 }
 
 function getWelcomeHTML(greeting,homePlan){
   const displayGreeting=greeting!==undefined?greeting:getLocalTimeGreeting();
-  const heading=homePlan?.heading?esc(homePlan.heading):'What would you like to work on?';
   const aiWidgets=Array.isArray(homePlan?.widgets)?homePlan.widgets:[];
-  const validWidgets=pickWidgetsForGrid(aiWidgets.filter(hasWidgetContent),5);
-  const baseCards=validWidgets.map(renderHomeWidget).filter(Boolean).join('');
-  const promptsCard=`<div class="wl-widget wl-size-small"><div class="wl-widget-hd">Master prompts</div><div class="wl-action-grid">${buildMasterPromptCards()}</div></div>`;
-  const widgetCards=baseCards+promptsCard;
+  const validWidgets=aiWidgets.filter(hasWidgetContent);
+  const dataCards=validWidgets.map(renderHomeWidget).filter(Boolean).join('');
+  const promptCards=buildMasterPromptCards();
+
+  // Only show data section if there are real widgets
+  const dataSection=dataCards?`<div class="wl-data-section"><div class="wl-section-label">Your workspace</div><div class="wl-grid">${dataCards}</div></div>`:'';
 
   return `<div class="welcome">
     <div class="wl-hero">
       <h1 class="welcome-greeting">${displayGreeting}</h1>
-      <p class="welcome-sub">${heading}</p>
+      <p class="welcome-sub">What would you like to work on today?</p>
     </div>
-    <div class="wl-grid">${widgetCards}</div>
+    <div class="wl-prompts-section">
+      <div class="wl-prompts-grid">${promptCards}</div>
+    </div>
+    ${dataSection}
   </div>`;
 }
 
@@ -637,7 +632,7 @@ function updateUserUI(){
   const planEl=document.getElementById('userPlan');
   if(planEl){
     const plan=curUser.plan||'free';
-    const labels={guest:'Guest',free:'Free',pro:'Pro ⚡',max:'Max 👑'};
+    const labels={guest:'Guest',free:'Free',pro:'Pro ⚡',max:'Max 👑',dev:'Dev 🔧'};
     planEl.textContent=labels[plan]||'Free';
     planEl.className='plan-badge '+plan;
   }
@@ -985,6 +980,10 @@ async function loadModels(){
       opt.onclick=()=>{
         if(locked){showUpgradeForModel(m);return;}
         if(unavailable){showToast(m.locked_reason||'Model unavailable','error');return;}
+        if(m.provider!=='google'){
+          showToast('⚠️ '+m.label+' is not available yet. Only Gemini models are currently active.','info');
+          return;
+        }
         selectModel(m.id,m.label,m.provider);
       };
       drop.appendChild(opt);
@@ -1007,11 +1006,11 @@ function showUpgradeForModel(m){
 function openUpgradeModal(){
   const plan=curUser?.plan||'free';
   document.getElementById('upgradeModalSubtitle').textContent='Manage your Nexus plan.';
-  ['Free','Pro','Max'].forEach(p=>{
+  ['Free','Pro','Max','Dev'].forEach(p=>{
     const el=document.getElementById('uplan'+p);
     if(el)el.classList.toggle('current',plan===p.toLowerCase());
   });
-  ['free','pro','max'].forEach(p=>{
+  ['free','pro','max','dev'].forEach(p=>{
     const btn=document.getElementById('upgradeBtn_'+p);
     if(btn)btn.classList.toggle('active',plan===p);
   });
@@ -1019,9 +1018,14 @@ function openUpgradeModal(){
 }
 
 async function applyPlanChange(plan){
-  if(!plan||!['free','pro','max'].includes(plan))return;
+  if(!plan||!['free','pro','max','dev'].includes(plan))return;
   if(isGuest||!curUser){
     showToast('Sign in with Google to change plans.','info');
+    return;
+  }
+  // Warn for non-dev plan changes (payments not available yet)
+  if(plan!=='dev'){
+    showToast('⚠️ Plan purchasing is not available yet. Use the Developer plan for full access.','info');
     return;
   }
   try{
@@ -1033,11 +1037,12 @@ async function applyPlanChange(plan){
     }
     curUser.plan=plan;
     updateUserUI();
-    ['Free','Pro','Max'].forEach(p=>{
+    await loadModels();
+    ['Free','Pro','Max','Dev'].forEach(p=>{
       const el=document.getElementById('uplan'+p);
       if(el)el.classList.toggle('current',plan===p.toLowerCase());
     });
-    ['free','pro','max'].forEach(p=>{
+    ['free','pro','max','dev'].forEach(p=>{
       const btn=document.getElementById('upgradeBtn_'+p);
       if(btn)btn.classList.toggle('active',plan===p);
     });
@@ -1217,7 +1222,69 @@ function openResearchModal(){
   const rq=document.getElementById('researchQuery');
   if(rq&&!rq.value.trim()&&q)rq.value=q;
   document.getElementById('researchDepth').value=deepResearchDepth;
+  // Reset to phase 1
+  document.getElementById('researchPhase1').style.display='';
+  document.getElementById('researchPhase2').style.display='none';
+  document.getElementById('researchPhaseLoading').style.display='none';
+  document.getElementById('researchPlanBtn').disabled=false;
   document.getElementById('researchModal').classList.add('open');
+}
+
+let _researchPlanData=null;
+
+async function generateResearchPlan(){
+  const q=(document.getElementById('researchQuery').value||'').trim();
+  if(!q){showToast('Add a research question first.','info');return;}
+  deepResearchDepth=document.getElementById('researchDepth').value||'standard';
+  const btn=document.getElementById('researchPlanBtn');
+  btn.disabled=true;
+  document.getElementById('researchPhase1').style.display='none';
+  document.getElementById('researchPhaseLoading').style.display='';
+  try{
+    const r=await apiFetch('/api/research/plan',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({query:q,depth:deepResearchDepth})});
+    const d=await r.json();
+    if(!r.ok||d.error){
+      showToast(d.error||'Failed to generate plan.','error');
+      document.getElementById('researchPhase1').style.display='';
+      document.getElementById('researchPhaseLoading').style.display='none';
+      btn.disabled=false;
+      return;
+    }
+    _researchPlanData={query:q,depth:deepResearchDepth,angles:d.angles||[]};
+    // Show plan editor
+    document.getElementById('researchPlanQuery').textContent=q;
+    const planText=(d.angles||[]).map((a,i)=>`${i+1}. ${a}`).join('\n');
+    document.getElementById('researchPlanEditor').value=planText;
+    document.getElementById('researchPhaseLoading').style.display='none';
+    document.getElementById('researchPhase2').style.display='';
+  }catch(e){
+    showToast('Failed to generate plan: '+e.message,'error');
+    document.getElementById('researchPhase1').style.display='';
+    document.getElementById('researchPhaseLoading').style.display='none';
+    btn.disabled=false;
+  }
+}
+
+function backToResearchInput(){
+  document.getElementById('researchPhase2').style.display='none';
+  document.getElementById('researchPhase1').style.display='';
+  document.getElementById('researchPlanBtn').disabled=false;
+}
+
+async function confirmResearchPlan(){
+  if(!_researchPlanData)return;
+  const planText=document.getElementById('researchPlanEditor').value.trim();
+  if(!planText){showToast('Plan cannot be empty.','info');return;}
+  closeM('researchModal');
+  const input=document.getElementById('msgInput');
+  input.value=_researchPlanData.query;
+  deepResearchDepth=_researchPlanData.depth;
+  if(!researchEnabled) toggleResearch();
+  // Pass the plan along through a temporary global
+  window._pendingResearchPlan=planText;
+  await sendMessage();
+  window._pendingResearchPlan=null;
 }
 
 async function startResearchFromModal(){
@@ -1233,13 +1300,21 @@ async function startResearchFromModal(){
   await sendMessage();
 }
 
-async function runDeepResearch(query,contentEl,area){
-  const depth=(document.getElementById('researchDepth')?.value)||deepResearchDepth||'standard';
-  deepResearchDepth=depth;
+let _currentResearchJobId=null;
+let _currentResearchReader=null;
 
-  const stepNames=['Plan','Search','Read','Analyze','Cross-Ref','Write','Review','Export'];
-  const stepIcons=['📋','🔍','📖','🧠','🔗','✍️','✅','📄'];
+async function cancelCurrentResearch(){
+  if(!_currentResearchJobId)return;
+  try{await apiFetch(`/api/research/cancel/${_currentResearchJobId}`,{method:'POST'})}catch(e){}
+}
+
+async function runDeepResearch(query,contentEl,area,planText){
+  const depth=deepResearchDepth||'standard';
+
+  const stepNames=['Plan','Search','Read','Analyze','Gap Fill','Cross-Ref','Write','Review','Cite','Export'];
+  const stepIcons=['📋','🔍','📖','🧠','🔎','🔗','✍️','✅','📑','📄'];
   let currentPct=0, currentStep=0, lastMessage='Preparing research pipeline...';
+  let wasCancelled=false;
 
   const renderProgressBar=()=>{
     const stepsHtml=stepNames.map((name,i)=>{
@@ -1269,15 +1344,18 @@ async function runDeepResearch(query,contentEl,area){
           <span class="research-activity-dot"></span>
           <span>${esc(lastMessage)}</span>
         </div>
-      </div>`;
+      </div>
+      <button class="research-stop-btn" onclick="cancelCurrentResearch()" title="Stop research">■ Stop</button>`;
     area.scrollTop=area.scrollHeight;
   };
 
   renderProgressBar();
 
+  const bodyObj={query,depth};
+  if(planText)bodyObj.plan=planText;
   const response=await fetch('/api/research',{
     method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({query,depth})
+    body:JSON.stringify(bodyObj)
   });
   if(!response.ok){
     const d=await response.json().catch(()=>({error:'Failed to start research.'}));
@@ -1285,6 +1363,7 @@ async function runDeepResearch(query,contentEl,area){
   }
 
   const reader=response.body.getReader();
+  _currentResearchReader=reader;
   const decoder=new TextDecoder();
   let buffer='';
 
@@ -1300,12 +1379,21 @@ async function runDeepResearch(query,contentEl,area){
       let evt=null;
       try{evt=JSON.parse(line)}catch(e){continue}
 
-      if(evt.type==='progress'){
+      if(evt.type==='job_id'){
+        _currentResearchJobId=evt.job_id;
+      }else if(evt.type==='progress'){
         lastMessage=evt.message||'Working...';
         if(typeof evt.pct==='number') currentPct=evt.pct;
         if(typeof evt.current_step==='number') currentStep=evt.current_step-1;
         if(currentStep<0)currentStep=0;
         renderProgressBar();
+      }else if(evt.type==='cancelled'){
+        wasCancelled=true;
+        contentEl.innerHTML=`
+          <div class="research-badge">⏹ Research stopped · ${esc(depth)}</div>
+          <div style="margin-top:10px;color:var(--text-secondary)">Research was cancelled.</div>
+          <button class="research-regen-btn" onclick="regenerateResearch('${esc(query).replace(/'/g,"\\'")}')">🔄 Regenerate</button>`;
+        setStatus('Research cancelled.');
       }else if(evt.type==='done'){
         currentPct=100;
         currentStep=stepNames.length;
@@ -1321,6 +1409,7 @@ async function runDeepResearch(query,contentEl,area){
           <div class="research-actions">${dl.join('')}</div>
           ${srcHtml?`<div class="research-summary"><strong>Top sources</strong><ol style="margin:8px 0 0 18px">${srcHtml}</ol></div>`:''}
           <div style="margin-top:10px">${fmt(report.slice(0,32000))}</div>
+          <button class="research-regen-btn" onclick="regenerateResearch('${esc(query).replace(/'/g,"\\'")}')">🔄 Regenerate</button>
         `;
         setStatus('Research complete. You can download the report.');
       }else if(evt.type==='error'){
@@ -1328,6 +1417,15 @@ async function runDeepResearch(query,contentEl,area){
       }
     }
   }
+  _currentResearchJobId=null;
+  _currentResearchReader=null;
+}
+
+function regenerateResearch(query){
+  const input=document.getElementById('msgInput');
+  input.value=query;
+  if(!researchEnabled) toggleResearch();
+  sendMessage();
 }
 
 // ─── Messaging ────────────────────────────────────
@@ -1482,8 +1580,10 @@ async function sendMessage(){
     msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"></div>';
     area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
     const contentEl=msgDiv.querySelector('.msg-content');
+    const planText=window._pendingResearchPlan||null;
+    window._pendingResearchPlan=null;
     try{
-      await runDeepResearch(text,contentEl,area);
+      await runDeepResearch(text,contentEl,area,planText);
       await refreshChats();
     }catch(e){
       contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;

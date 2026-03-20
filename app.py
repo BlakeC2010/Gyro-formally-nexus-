@@ -503,8 +503,8 @@ def model_access(model_id, settings):
             return True, "", "server"
         return False, f"No {provider} API key configured on this server.", ""
 
-    # Pro-tier model — requires pro/max plan
-    if plan in ("pro", "max"):
+    # Pro-tier model — requires pro/max/dev plan
+    if plan in ("pro", "max", "dev"):
         server_key = _load_server_key(provider)
         if server_key:
             return True, "", "server"
@@ -1752,8 +1752,8 @@ def set_name():
 @require_auth
 def update_plan():
     plan = (request.get_json() or {}).get("plan", "").strip()
-    if plan not in ("free", "pro", "max"):
-        return jsonify({"error": "Invalid plan. Must be: free, pro, or max"}), 400
+    if plan not in ("free", "pro", "max", "dev"):
+        return jsonify({"error": "Invalid plan. Must be: free, pro, max, or dev"}), 400
     uid = session.get("user_id")
     if uid:
         _update_user_field(uid, plan=plan)
@@ -2542,29 +2542,58 @@ def _generate_research_pdf(title, report_md, sources, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pdf.output(str(output_path))
 
-def _run_research_job(job_id, query, depth, resolved):
+def _run_research_job(job_id, query, depth, resolved, user_plan=None):
     """Background thread: multi-step deep research pipeline with deep thinking."""
     job = _research_jobs[job_id]
 
     def push(evt_type, **kw):
         job["events"].append({"type": evt_type, **kw})
 
-    depth_cfg = {
-        "quick":    {"sub_q": 4,  "searches_per_q": 2, "urls_per_q": 4,  "max_fetch": 12,  "detail": "concise but insightful", "analysis_words": "300-500", "report_min": 1500, "max_report_tokens": 6144},
-        "standard": {"sub_q": 6,  "searches_per_q": 3, "urls_per_q": 5,  "max_fetch": 20,  "detail": "thorough and comprehensive", "analysis_words": "400-700", "report_min": 3000, "max_report_tokens": 10000},
-        "deep":     {"sub_q": 10, "searches_per_q": 4, "urls_per_q": 7,  "max_fetch": 35,  "detail": "exhaustive, deeply analytical, and authoritative", "analysis_words": "500-900", "report_min": 5000, "max_report_tokens": 14000},
-    }.get(depth, {"sub_q": 6, "searches_per_q": 3, "urls_per_q": 5, "max_fetch": 20, "detail": "thorough and comprehensive", "analysis_words": "400-700", "report_min": 3000, "max_report_tokens": 10000})
+    def is_cancelled():
+        return job.get("cancelled", False)
 
-    total_steps = 8
+    depth_cfg = {
+        "quick":    {"sub_q": 5,  "searches_per_q": 2, "urls_per_q": 5,  "max_fetch": 15,  "detail": "concise but insightful", "analysis_words": "300-500", "report_min": 2000, "max_report_tokens": 8000},
+        "standard": {"sub_q": 8,  "searches_per_q": 3, "urls_per_q": 6,  "max_fetch": 25,  "detail": "thorough and comprehensive", "analysis_words": "400-700", "report_min": 4000, "max_report_tokens": 12000},
+        "deep":     {"sub_q": 12, "searches_per_q": 5, "urls_per_q": 8,  "max_fetch": 45,  "detail": "exhaustive, deeply analytical, and authoritative", "analysis_words": "600-1000", "report_min": 7000, "max_report_tokens": 16000},
+    }.get(depth, {"sub_q": 8, "searches_per_q": 3, "urls_per_q": 6, "max_fetch": 25, "detail": "thorough and comprehensive", "analysis_words": "400-700", "report_min": 4000, "max_report_tokens": 12000})
+
+    total_steps = 10
     try:
         # ══════════════════════════════════════════════════════════════
         # STEP 1: Deep Query Analysis & Research Planning
         # ══════════════════════════════════════════════════════════════
-        push("progress", step="planning", pct=2, total_steps=total_steps, current_step=1,
+        push("progress", step="planning", pct=1, total_steps=total_steps, current_step=1,
              message="Analyzing research topic and formulating investigation strategy...")
 
-        plan = _research_ai_call(
-            f"""You are a senior research strategist. Deeply analyze this research topic and create a comprehensive research plan.
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
+        # Use user-provided plan if available
+        user_plan_text = user_plan or ""
+        if user_plan_text.strip():
+            # Parse user plan directly
+            sub_questions = []
+            search_queries = {}
+            angle_idx = 0
+            for line in user_plan_text.split("\n"):
+                s = line.strip()
+                m = re.match(r"^\s*\d+[.)]\s+(.+)", s)
+                if m:
+                    sq = m.group(1).strip()
+                    # Check for search queries after a pipe or dash
+                    if " | " in sq or " — " in sq:
+                        parts = re.split(r"\s*[|—]\s*", sq)
+                        sq = parts[0].strip()
+                        search_queries[angle_idx] = [p.strip().strip('"\'') for p in parts[1:] if p.strip()]
+                    sub_questions.append(sq)
+                    angle_idx += 1
+            sub_questions = (sub_questions or [query])[:depth_cfg["sub_q"] + 4]  # allow user to add extra
+            push("progress", step="planning", pct=5, total_steps=total_steps, current_step=1,
+                 message=f"Using your custom plan: {len(sub_questions)} investigation angles.")
+        else:
+            plan = _research_ai_call(
+                f"""You are a senior research strategist. Deeply analyze this research topic and create a comprehensive research plan.
 
 RESEARCH TOPIC: {query}
 
@@ -2573,6 +2602,8 @@ Think step by step:
 2. What domains of knowledge does this span?
 3. What are the key tensions, debates, or open questions?
 4. What would a world-class researcher investigate?
+5. What primary sources and data would be most valuable?
+6. What interdisciplinary connections exist?
 
 Now produce EXACTLY this output format:
 
@@ -2589,37 +2620,42 @@ Angle 2: "query1" | "query2" | "query3"
 
 KEY_TERMS:
 <comma-separated list of key technical terms, names, and concepts to watch for>""",
-            resolved, max_tokens=1500
-        )
+                resolved, max_tokens=2000
+            )
 
-        # Parse sub-questions
-        sub_questions = []
-        search_queries = {}
-        in_angles = False
-        in_strategy = False
-        angle_idx = 0
-        for line in plan.split("\n"):
-            s = line.strip()
-            if "RESEARCH_ANGLES" in s:
-                in_angles = True; in_strategy = False; continue
-            if "SEARCH_STRATEGY" in s:
-                in_angles = False; in_strategy = True; continue
-            if "KEY_TERMS" in s:
-                in_angles = False; in_strategy = False; continue
-            if in_angles:
-                m = re.match(r"^\s*\d+[.)]\s+(.+)", s)
-                if m:
-                    sub_questions.append(m.group(1).strip())
-            if in_strategy:
-                m = re.match(r"^\s*(?:Angle\s*)?\d+[.):]\s*(.*)", s)
-                if m and angle_idx < len(sub_questions):
-                    queries = [q.strip().strip('"').strip("'") for q in m.group(1).split("|") if q.strip()]
-                    search_queries[angle_idx] = queries[:depth_cfg["searches_per_q"]]
-                    angle_idx += 1
+            # Parse sub-questions
+            sub_questions = []
+            search_queries = {}
+            in_angles = False
+            in_strategy = False
+            angle_idx = 0
+            for line in plan.split("\n"):
+                s = line.strip()
+                if "RESEARCH_ANGLES" in s:
+                    in_angles = True; in_strategy = False; continue
+                if "SEARCH_STRATEGY" in s:
+                    in_angles = False; in_strategy = True; continue
+                if "KEY_TERMS" in s:
+                    in_angles = False; in_strategy = False; continue
+                if in_angles:
+                    m = re.match(r"^\s*\d+[.)]\s+(.+)", s)
+                    if m:
+                        sub_questions.append(m.group(1).strip())
+                if in_strategy:
+                    m = re.match(r"^\s*(?:Angle\s*)?\d+[.):]\s*(.*)", s)
+                    if m and angle_idx < len(sub_questions):
+                        queries = [q.strip().strip('"').strip("'") for q in m.group(1).split("|") if q.strip()]
+                        search_queries[angle_idx] = queries[:depth_cfg["searches_per_q"]]
+                        angle_idx += 1
 
-        sub_questions = (sub_questions or [query])[:depth_cfg["sub_q"]]
-        push("progress", step="planning", pct=8, total_steps=total_steps, current_step=1,
-             message=f"Research plan ready: {len(sub_questions)} investigation angles identified.")
+            sub_questions = (sub_questions or [query])[:depth_cfg["sub_q"]]
+
+        push("progress", step="planning", pct=7, total_steps=total_steps, current_step=1,
+             message=f"Research plan ready: {len(sub_questions)} investigation angles identified.",
+             plan_angles=sub_questions)
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
 
         # ══════════════════════════════════════════════════════════════
         # STEP 2: Multi-Query Web Search
@@ -2629,13 +2665,18 @@ KEY_TERMS:
         search_done = 0
 
         for sq_idx, sq in enumerate(sub_questions):
+            if is_cancelled():
+                push("cancelled"); job["status"] = "cancelled"; return
+
             queries = search_queries.get(sq_idx, [sq])
             if not queries:
                 queries = [sq]
             for search_q in queries:
+                if is_cancelled():
+                    push("cancelled"); job["status"] = "cancelled"; return
                 search_done += 1
-                pct = 8 + int((search_done / total_searches) * 20)
-                push("progress", step="searching", pct=min(pct, 28), total_steps=total_steps, current_step=2,
+                pct = 7 + int((search_done / total_searches) * 18)
+                push("progress", step="searching", pct=min(pct, 25), total_steps=total_steps, current_step=2,
                      message=f"Searching [{search_done}/{total_searches}]: {search_q[:75]}...")
                 for r in _ddg_search(search_q, max_results=depth_cfg["urls_per_q"]):
                     if r["url"] and r["url"] not in seen_urls:
@@ -2646,16 +2687,19 @@ KEY_TERMS:
 
         # Also search the main query directly
         search_done += 1
-        push("progress", step="searching", pct=28, total_steps=total_steps, current_step=2,
+        push("progress", step="searching", pct=25, total_steps=total_steps, current_step=2,
              message=f"Searching main topic: {query[:75]}...")
-        for r in _ddg_search(query, max_results=6):
+        for r in _ddg_search(query, max_results=8):
             if r["url"] and r["url"] not in seen_urls:
                 seen_urls.add(r["url"])
                 r["sub_question"] = query
                 all_results.append(r)
 
-        push("progress", step="searching", pct=30, total_steps=total_steps, current_step=2,
+        push("progress", step="searching", pct=27, total_steps=total_steps, current_step=2,
              message=f"Found {len(all_results)} unique sources across {search_done} searches.")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
 
         # ══════════════════════════════════════════════════════════════
         # STEP 3: Source Content Extraction
@@ -2663,9 +2707,11 @@ KEY_TERMS:
         fetched = []
         fetch_total = min(len(all_results), depth_cfg["max_fetch"])
         for idx, result in enumerate(all_results[:fetch_total]):
+            if is_cancelled():
+                push("cancelled"); job["status"] = "cancelled"; return
             url = result["url"]
-            pct = 30 + int(((idx + 1) / fetch_total) * 15)
-            push("progress", step="fetching", pct=min(pct, 45), total_steps=total_steps, current_step=3,
+            pct = 27 + int(((idx + 1) / fetch_total) * 13)
+            push("progress", step="reading", pct=min(pct, 40), total_steps=total_steps, current_step=3,
                  message=f"Reading source [{idx+1}/{fetch_total}]: {result.get('title', url)[:60]}...")
             text = _fetch_url_text(url)
             if text and len(text) > 150:
@@ -2677,16 +2723,21 @@ KEY_TERMS:
                 if r.get("snippet") and len(r["snippet"]) > 80:
                     fetched.append({**r, "text": r["snippet"]})
 
-        push("progress", step="fetching", pct=45, total_steps=total_steps, current_step=3,
+        push("progress", step="reading", pct=40, total_steps=total_steps, current_step=3,
              message=f"Successfully extracted content from {len(fetched)} sources.")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
 
         # ══════════════════════════════════════════════════════════════
         # STEP 4: Deep Analysis Per Source (with reasoning)
         # ══════════════════════════════════════════════════════════════
         source_analyses = []
         for idx, src in enumerate(fetched):
-            pct = 45 + int(((idx + 1) / len(fetched)) * 20)
-            push("progress", step="analyzing", pct=min(pct, 65), total_steps=total_steps, current_step=4,
+            if is_cancelled():
+                push("cancelled"); job["status"] = "cancelled"; return
+            pct = 40 + int(((idx + 1) / len(fetched)) * 16)
+            push("progress", step="analyzing", pct=min(pct, 56), total_steps=total_steps, current_step=4,
                  message=f"Deep analyzing [{idx+1}/{len(fetched)}]: {(src.get('title') or src['url'])[:55]}...")
 
             analysis = _research_ai_call(
@@ -2709,7 +2760,7 @@ Perform deep thinking analysis:
 6. GAPS: What questions does this raise or leave unanswered?
 
 Write {depth_cfg['analysis_words']} words of detailed analysis.""",
-                resolved, max_tokens=1200
+                resolved, max_tokens=1500
             )
             if analysis and "[AI error" not in analysis:
                 source_analyses.append({
@@ -2720,19 +2771,102 @@ Write {depth_cfg['analysis_words']} words of detailed analysis.""",
                     "analysis": analysis,
                 })
 
-        push("progress", step="analyzing", pct=65, total_steps=total_steps, current_step=4,
+        push("progress", step="analyzing", pct=56, total_steps=total_steps, current_step=4,
              message=f"Deep analysis complete: {len(source_analyses)} sources thoroughly analyzed.")
 
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
         # ══════════════════════════════════════════════════════════════
-        # STEP 5: Cross-Reference & Synthesis Thinking
+        # STEP 5: Gap Analysis & Supplemental Search
         # ══════════════════════════════════════════════════════════════
-        push("progress", step="cross-referencing", pct=67, total_steps=total_steps, current_step=5,
-             message="Cross-referencing findings and identifying patterns...")
+        push("progress", step="gap-analysis", pct=57, total_steps=total_steps, current_step=5,
+             message="Identifying knowledge gaps and searching for missing information...")
 
         analyses_block = "\n\n".join(
             f"### Source {i+1}: {s['title']}\nURL: {s['url']}\nSub-question: {s['sub_question']}\n{s['analysis']}"
             for i, s in enumerate(source_analyses)
         )
+
+        gap_result = _research_ai_call(
+            f"""You are a research quality analyst. Review everything we've found so far and identify CRITICAL GAPS.
+
+RESEARCH TOPIC: {query}
+INVESTIGATION ANGLES: {'; '.join(sub_questions)}
+
+SOURCE ANALYSES SO FAR:
+{analyses_block[:16000]}
+
+Identify:
+1. Which investigation angles have WEAK or NO coverage from our sources?
+2. What critical facts, statistics, or perspectives are MISSING?
+3. What specific additional searches would fill these gaps?
+
+Output EXACTLY:
+GAP_SEARCHES:
+1. "<specific search query to fill gap 1>"
+2. "<specific search query to fill gap 2>"
+3. "<specific search query to fill gap 3>"
+(list 2-5 gap-filling searches, or "NONE" if coverage is sufficient)""",
+            resolved, max_tokens=800
+        )
+
+        # Do supplemental searches for gaps
+        gap_searches = []
+        for line in (gap_result or "").split("\n"):
+            m = re.match(r'^\s*\d+[.)]\s*"?([^"]+)"?\s*$', line.strip())
+            if m and m.group(1).strip().upper() != "NONE":
+                gap_searches.append(m.group(1).strip())
+
+        if gap_searches and not is_cancelled():
+            for gi, gsq in enumerate(gap_searches[:4]):
+                if is_cancelled():
+                    break
+                push("progress", step="gap-analysis", pct=57 + int(((gi+1)/len(gap_searches[:4]))*5),
+                     total_steps=total_steps, current_step=5,
+                     message=f"Gap search [{gi+1}/{len(gap_searches[:4])}]: {gsq[:65]}...")
+                for r in _ddg_search(gsq, max_results=5):
+                    if r["url"] and r["url"] not in seen_urls:
+                        seen_urls.add(r["url"])
+                        text = _fetch_url_text(r["url"])
+                        if text and len(text) > 150:
+                            analysis = _research_ai_call(
+                                f"""Quickly extract key facts from this source relevant to: {query}
+SOURCE: {r.get('title','')} — {r['url']}
+CONTENT: {text[:5000]}
+
+List the most important facts, data points, and insights. Be concise but thorough.""",
+                                resolved, max_tokens=600
+                            )
+                            if analysis and "[AI error" not in analysis:
+                                source_analyses.append({
+                                    "title": r.get("title", ""),
+                                    "url": r["url"],
+                                    "snippet": r.get("snippet", ""),
+                                    "sub_question": gsq,
+                                    "analysis": analysis,
+                                })
+
+        push("progress", step="gap-analysis", pct=63, total_steps=total_steps, current_step=5,
+             message=f"Gap analysis complete. Total sources: {len(source_analyses)}.")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
+        # Rebuild analyses block with supplemental sources
+        analyses_block = "\n\n".join(
+            f"### Source {i+1}: {s['title']}\nURL: {s['url']}\nSub-question: {s['sub_question']}\n{s['analysis']}"
+            for i, s in enumerate(source_analyses)
+        )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 6: Cross-Reference & Synthesis Thinking
+        # ══════════════════════════════════════════════════════════════
+        push("progress", step="cross-referencing", pct=64, total_steps=total_steps, current_step=6,
+             message="Cross-referencing findings and identifying patterns...")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
 
         cross_ref = _research_ai_call(
             f"""You are synthesizing research findings. Deeply analyze ALL source analyses below and produce a synthesis framework.
@@ -2749,20 +2883,27 @@ Produce:
 3. KEY THEMES: What are the 5-8 major themes that emerge across all sources?
 4. EVIDENCE STRENGTH: Which findings have the strongest evidence? Which are speculative?
 5. NARRATIVE ARC: What story do these findings tell when woven together?
-6. REPORT OUTLINE: Create a detailed section-by-section outline for the final report, with bullet points of what should go in each section.
+6. SURPRISING DISCOVERIES: Any unexpected findings that challenge conventional wisdom?
+7. REPORT OUTLINE: Create a detailed section-by-section outline for the final report, with bullet points of what should go in each section.
 
 Be thorough and analytical.""",
-            resolved, max_tokens=3000
+            resolved, max_tokens=4000
         )
 
-        push("progress", step="cross-referencing", pct=72, total_steps=total_steps, current_step=5,
+        push("progress", step="cross-referencing", pct=70, total_steps=total_steps, current_step=6,
              message="Cross-referencing complete. Preparing report structure...")
 
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
         # ══════════════════════════════════════════════════════════════
-        # STEP 6: Multi-Pass Report Writing
+        # STEP 7: Multi-Pass Report Writing
         # ══════════════════════════════════════════════════════════════
-        push("progress", step="writing", pct=74, total_steps=total_steps, current_step=6,
+        push("progress", step="writing", pct=71, total_steps=total_steps, current_step=7,
              message="Writing comprehensive research report (pass 1: core content)...")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
 
         report_md = _research_ai_call(
             f"""You are an expert research writer producing a {depth_cfg['detail']} research report.
@@ -2781,6 +2922,9 @@ STRUCTURE (use markdown headers):
 # {query}
 ## Executive Summary
 (250-400 words synthesizing the most important findings, conclusions, and implications)
+
+## Key Takeaways
+(Bullet list of 5-8 most important takeaways)
 
 ## Background & Context
 (Set the stage — why this topic matters, historical context, scope of the issue)
@@ -2828,9 +2972,12 @@ QUALITY REQUIREMENTS:
         if not report_md or "[AI error" in report_md:
             report_md = f"# Research Report: {query}\n\n*Error generating report. Sources analyzed below.*\n\n" + "".join(f"- [{s['title']}]({s['url']})\n" for s in source_analyses)
 
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
         # Pass 2: Enhancement (for standard and deep)
         if depth in ("standard", "deep") and report_md and "[AI error" not in report_md:
-            push("progress", step="writing", pct=82, total_steps=total_steps, current_step=6,
+            push("progress", step="writing", pct=80, total_steps=total_steps, current_step=7,
                  message="Enhancing report (pass 2: depth and polish)...")
             enhanced = _research_ai_call(
                 f"""You are a senior editor reviewing and enhancing a research report. Your job is to significantly improve it.
@@ -2846,10 +2993,11 @@ ENHANCEMENT INSTRUCTIONS:
 2. Strengthen the executive summary to be more impactful
 3. Add transitional sentences between sections for better flow
 4. Ensure every section has sufficient depth (no section should be less than 150 words)
-5. Add a "Key Takeaways" bullet list after the Executive Summary
+5. Make sure the Key Takeaways are punchy and memorable
 6. Make sure the Recommendations section is concrete and actionable
 7. Improve the conclusion to be memorable and forward-looking
 8. Fix any logical gaps or unsupported claims
+9. Add relevant comparisons, analogies, or frameworks that make the content more accessible
 
 Output the COMPLETE enhanced report in markdown. Do not truncate or abbreviate — write the full report.""",
                 resolved, max_tokens=depth_cfg["max_report_tokens"]
@@ -2857,13 +3005,41 @@ Output the COMPLETE enhanced report in markdown. Do not truncate or abbreviate �
             if enhanced and "[AI error" not in enhanced and len(enhanced) > len(report_md) * 0.7:
                 report_md = enhanced
 
-        push("progress", step="writing", pct=88, total_steps=total_steps, current_step=6,
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
+        # Pass 3: Deep polish for deep mode
+        if depth == "deep" and report_md and "[AI error" not in report_md:
+            push("progress", step="writing", pct=84, total_steps=total_steps, current_step=7,
+                 message="Final polish pass (pass 3: expert review)...")
+            polished = _research_ai_call(
+                f"""You are a world-class editor doing a final polish on a research report. Focus on:
+1. Ensure no section feels rushed or superficial
+2. Add nuance where claims are too absolute
+3. Ensure the narrative flows logically from start to finish
+4. Check that evidence properly supports all major claims
+5. Add a "Future Outlook" subsection before the Conclusion if one doesn't exist
+6. Make the writing style engaging and authoritative
+
+REPORT:
+{report_md[:22000]}
+
+Output the COMPLETE polished report. Do not truncate.""",
+                resolved, max_tokens=depth_cfg["max_report_tokens"]
+            )
+            if polished and "[AI error" not in polished and len(polished) > len(report_md) * 0.7:
+                report_md = polished
+
+        push("progress", step="writing", pct=87, total_steps=total_steps, current_step=7,
              message="Report writing complete.")
 
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
         # ══════════════════════════════════════════════════════════════
-        # STEP 7: Fact-Check Pass
+        # STEP 8: Fact-Check & Quality Review
         # ══════════════════════════════════════════════════════════════
-        push("progress", step="fact-checking", pct=89, total_steps=total_steps, current_step=7,
+        push("progress", step="reviewing", pct=88, total_steps=total_steps, current_step=8,
              message="Running fact-check and quality review...")
 
         quality_check = _research_ai_call(
@@ -2880,7 +3056,7 @@ Check for:
 
 If you find issues, list them briefly. If the report is solid, say "QUALITY: PASS".
 Then provide a one-paragraph "Research Limitations" section that should be appended to the report.""",
-            resolved, max_tokens=800
+            resolved, max_tokens=1000
         )
 
         # Append limitations if provided
@@ -2891,13 +3067,34 @@ Then provide a one-paragraph "Research Limitations" section that should be appen
                 report_md += "\n\n---\n\n"
             report_md += f"## {limitations}"
 
-        push("progress", step="fact-checking", pct=92, total_steps=total_steps, current_step=7,
+        push("progress", step="reviewing", pct=92, total_steps=total_steps, current_step=8,
              message="Quality review complete.")
 
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
         # ══════════════════════════════════════════════════════════════
-        # STEP 8: PDF & File Generation
+        # STEP 9: Source Attribution
         # ══════════════════════════════════════════════════════════════
-        push("progress", step="pdf", pct=93, total_steps=total_steps, current_step=8,
+        push("progress", step="citing", pct=93, total_steps=total_steps, current_step=9,
+             message="Compiling source attributions...")
+
+        # Append a Sources section to the report
+        if source_analyses:
+            report_md += "\n\n---\n\n## Sources & References\n\n"
+            for idx, src in enumerate(source_analyses, 1):
+                report_md += f"{idx}. [{src['title'] or 'Untitled'}]({src['url']})\n"
+
+        push("progress", step="citing", pct=95, total_steps=total_steps, current_step=9,
+             message="Source citations added.")
+
+        if is_cancelled():
+            push("cancelled"); job["status"] = "cancelled"; return
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 10: PDF & File Generation
+        # ══════════════════════════════════════════════════════════════
+        push("progress", step="exporting", pct=96, total_steps=total_steps, current_step=10,
              message="Generating PDF and Markdown reports...")
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2907,8 +3104,7 @@ Then provide a one-paragraph "Research Limitations" section that should be appen
         rdir   = WORKSPACE / "notes" / "research"
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / md_fn).write_text(
-            f"# {query}\n\n{report_md}\n\n---\n\n## Sources\n\n" +
-            "".join(f"- [{s['title']}]({s['url']})\n" for s in source_analyses),
+            f"# {query}\n\n{report_md}",
             encoding="utf-8"
         )
         pdf_ok = False
@@ -2916,10 +3112,10 @@ Then provide a one-paragraph "Research Limitations" section that should be appen
             _generate_research_pdf(query, report_md, source_analyses, rdir / pdf_fn)
             pdf_ok = True
         except Exception as pdf_err:
-            push("progress", step="pdf", pct=96, total_steps=total_steps, current_step=8,
+            push("progress", step="exporting", pct=98, total_steps=total_steps, current_step=10,
                  message=f"PDF note: {pdf_err} — markdown saved.")
 
-        push("progress", step="pdf", pct=100, total_steps=total_steps, current_step=8,
+        push("progress", step="exporting", pct=100, total_steps=total_steps, current_step=10,
              message="All files generated successfully.")
 
         push("done",
@@ -2937,12 +3133,103 @@ Then provide a one-paragraph "Research Limitations" section that should be appen
         job["status"] = "error"
 
 
+@app.route("/api/research/plan", methods=["POST"])
+@require_auth_or_guest
+def research_plan():
+    """Generate a research plan without executing. Returns the plan for user review."""
+    d = request.get_json() or {}
+    query = (d.get("query") or "").strip()
+    depth = d.get("depth", "standard")
+    if not query:
+        return jsonify({"error": "Query required"}), 400
+    if depth not in ("quick", "standard", "deep"):
+        depth = "standard"
+
+    depth_cfg = {
+        "quick":    {"sub_q": 5},
+        "standard": {"sub_q": 8},
+        "deep":     {"sub_q": 12},
+    }.get(depth, {"sub_q": 8})
+
+    settings = load_settings()
+    available_model = None
+    for mid in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+        mi = MODELS.get(mid, {})
+        api_key, _ = resolve_provider_key(settings, mi.get("provider","google"))
+        if api_key:
+            available_model = mid
+            break
+    if not available_model:
+        available_model = DEFAULT_MODEL
+    resolved = {
+        "provider": MODELS[available_model]["provider"],
+        "actual_model": available_model,
+        "api_key": resolve_provider_key(settings, MODELS[available_model]["provider"])[0],
+        "base_url": None,
+    }
+    if not resolved["api_key"]:
+        return jsonify({"error": "No AI API key configured. Add a key in Settings first."}), 400
+
+    plan_text = _research_ai_call(
+        f"""You are a senior research strategist. Deeply analyze this research topic and create a comprehensive research plan.
+
+RESEARCH TOPIC: {query}
+
+Think step by step:
+1. What is being asked? What are the core concepts?
+2. What domains of knowledge does this span?
+3. What are the key tensions, debates, or open questions?
+4. What would a world-class researcher investigate?
+5. What primary sources and data would be most valuable?
+
+Produce a clear plan with investigation angles the user can review and edit.
+Format your response as a numbered list of specific research angles/sub-questions to investigate.
+Each line should be one numbered investigation angle. Write exactly {depth_cfg['sub_q']} angles.
+
+Example format:
+1. How has X evolved over the past decade and what key milestones defined its trajectory?
+2. What are the current leading approaches to Y and how do they compare?
+...""",
+        resolved, max_tokens=1500
+    )
+
+    # Parse into structured angles
+    angles = []
+    for line in (plan_text or "").split("\n"):
+        m = re.match(r"^\s*\d+[.)]\s+(.+)", line.strip())
+        if m:
+            angles.append(m.group(1).strip())
+
+    if not angles:
+        angles = [query]
+
+    return jsonify({
+        "ok": True,
+        "query": query,
+        "depth": depth,
+        "angles": angles,
+        "raw_plan": plan_text,
+    })
+
+
+@app.route("/api/research/cancel/<job_id>", methods=["POST"])
+@require_auth_or_guest
+def cancel_research(job_id):
+    """Cancel a running research job."""
+    job = _research_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    job["cancelled"] = True
+    return jsonify({"ok": True})
+
+
 @app.route("/api/research", methods=["POST"])
 @require_auth_or_guest
 def start_research():
     d = request.get_json() or {}
     query = (d.get("query") or "").strip()
     depth = d.get("depth", "standard")
+    user_plan = (d.get("plan") or "").strip()  # User-confirmed/edited plan text
     if not query:
         return jsonify({"error": "Query required"}), 400
     if depth not in ("quick", "standard", "deep"):
@@ -2969,13 +3256,14 @@ def start_research():
         return jsonify({"error": "No AI API key configured. Add a key in Settings first."}), 400
 
     job_id = str(uuid.uuid4())[:12]
-    _research_jobs[job_id] = {"status": "running", "events": [], "created": datetime.datetime.now().isoformat()}
-    _threading.Thread(target=_run_research_job, args=(job_id, query, depth, resolved), daemon=True).start()
+    _research_jobs[job_id] = {"status": "running", "events": [], "cancelled": False, "created": datetime.datetime.now().isoformat()}
+    _threading.Thread(target=_run_research_job, args=(job_id, query, depth, resolved, user_plan or None), daemon=True).start()
 
     import time as _time
 
     @stream_with_context
     def generate():
+        yield json.dumps({"type": "job_id", "job_id": job_id}) + "\n"
         sent = 0
         while True:
             job = _research_jobs.get(job_id, {})
@@ -2983,7 +3271,7 @@ def start_research():
             while sent < len(evts):
                 yield json.dumps(evts[sent]) + "\n"
                 sent += 1
-            if job.get("status") in ("done", "error") and sent >= len(evts):
+            if job.get("status") in ("done", "error", "cancelled") and sent >= len(evts):
                 break
             _time.sleep(0.25)
         # Clean up old jobs (keep last 20)
