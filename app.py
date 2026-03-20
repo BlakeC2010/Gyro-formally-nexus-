@@ -176,9 +176,6 @@ app.secret_key = _get_secret()
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_NAME"] = "nexus_session"
-# Secure cookie when running behind HTTPS (Render, etc.)
-if os.environ.get("RENDER") or os.environ.get("SESSION_COOKIE_SECURE"):
-    app.config["SESSION_COOKIE_SECURE"] = True
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 
@@ -275,7 +272,8 @@ def require_auth_or_guest(f):
     @wraps(f)
     def dec(*args, **kw):
         if not session.get("user_id") and not session.get("guest"):
-            return jsonify({"error": "Not authenticated"}), 401
+            keys = list(session.keys())
+            return jsonify({"error": f"Not authenticated (session has no user_id or guest flag, keys={keys})"}), 401
         return f(*args, **kw)
     return dec
 

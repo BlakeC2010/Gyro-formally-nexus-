@@ -125,6 +125,18 @@ async function tryAutoResume(){
   return false;
 }
 
+// Wrap API fetch: on 401, try auto-resume once and retry
+async function apiFetch(url, opts={}){
+  let r=await fetch(url,opts);
+  if(r.status===401 && !apiFetch._resuming){
+    apiFetch._resuming=true;
+    const ok=await tryAutoResume();
+    apiFetch._resuming=false;
+    if(ok) r=await fetch(url,opts);
+  }
+  return r;
+}
+
 // ─── Init ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',async()=>{
   if(!localStorage.getItem('nexus_theme_override')){
@@ -802,7 +814,7 @@ async function submitOnboarding(){
 function toggleSB(){document.getElementById('sidebar').classList.toggle('closed')}
 
 async function refreshChats(){
-  const r=await fetch('/api/chats');const d=await r.json();
+  const r=await apiFetch('/api/chats');const d=await r.json();
   allChats=d.chats||[];
   saveCachedChats(allChats);
   renderChatList();
@@ -864,7 +876,7 @@ async function newFolder(){
 
 async function openChat(id){
   curChat=id;
-  const r=await fetch(`/api/chats/${id}`);
+  const r=await apiFetch(`/api/chats/${id}`);
   if(!r.ok){
     // Chat no longer exists on server — remove from list and go to welcome
     showToast('Chat not found. It may have been deleted.','info');
@@ -1366,7 +1378,18 @@ async function sendMessage(){
   const input=document.getElementById('msgInput');const text=input.value.trim();
   if(!text&&!pendingFiles.length)return;
   if(curChat&&isChatRunning(curChat)){showToast('This chat is still generating. Open a new chat or wait.','info');return;}
-  if(!curChat)await createChat(pendingFolder||'');
+  // Force-create a new chat if none exists (don't rely on createChat guard)
+  if(!curChat){
+    try{
+      const cr=await apiFetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:pendingFolder||''})});
+      const cc=await cr.json();
+      if(cc.error){showToast('Could not create chat: '+cc.error,'error');return;}
+      curChat=cc.id;
+      pendingFolder='';
+      document.getElementById('topTitle').textContent=cc.title||'New Chat';
+      refreshChats();
+    }catch(e){showToast('Failed to create chat: '+e.message,'error');return;}
+  }
   const targetChatId=curChat;
   const w=document.querySelector('#chatArea .welcome');
   if(w){
@@ -1415,7 +1438,7 @@ async function sendMessage(){
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
 
   try{
-    const response=await fetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
+    const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({message:text,files,thinking:thinkingEnabled}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
