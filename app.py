@@ -46,17 +46,32 @@ def _init_firebase():
                 if line.strip().startswith("FIREBASE_STORAGE_BUCKET="):
                     bucket = line.split("=", 1)[1].strip().strip('"\'')
     opts = {"storageBucket": bucket} if bucket else {}
+
+    cred = None
+    # 1) Service account JSON file on disk (local dev)
     if sa_path.exists():
         cred = credentials.Certificate(str(sa_path))
+    # 2) Service account JSON passed as an environment variable (cloud deploys)
+    elif os.environ.get("FIREBASE_SERVICE_ACCOUNT", "").strip():
+        try:
+            sa_dict = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+            cred = credentials.Certificate(sa_dict)
+        except Exception as e:
+            print(f"  [!] FIREBASE_SERVICE_ACCOUNT env var invalid ({e})")
+    # 3) Application Default Credentials (GCP environments)
     elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
         cred = credentials.ApplicationDefault()
-    else:
+
+    if cred is None:
         print("  [!] Firebase not configured - using local file storage (.nexus_data/).")
+        print("      To persist data across deploys, set the FIREBASE_SERVICE_ACCOUNT")
+        print("      environment variable to your Firebase service account JSON.")
         return
     try:
         firebase_admin.initialize_app(cred, opts)
         db = firestore.client()
         FIREBASE_ENABLED = True
+        print("  [✓] Firebase connected — data will persist across deploys.")
     except Exception as e:
         print(f"  [!] Firebase init failed ({e}) - using local file storage.")
 
