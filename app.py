@@ -176,6 +176,9 @@ app.secret_key = _get_secret()
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_NAME"] = "nexus_session"
+# Secure cookie when running behind HTTPS (Render, etc.)
+if os.environ.get("RENDER") or os.environ.get("SESSION_COOKIE_SECURE"):
+    app.config["SESSION_COOKIE_SECURE"] = True
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 
@@ -616,28 +619,37 @@ def list_chats():
     return chats
 
 def load_chat(cid):
-    if not _safe_id(cid): return None
+    if not _safe_id(cid): return None, "invalid_id"
     if session.get("guest") and not session.get("user_id"):
         state = _guest_runtime_state() or {}
         chat = (state.get("chats") or {}).get(cid)
         if chat:
-            return chat
+            return chat, None
         # Fallback: try loading from disk
         guest_id = session.get("guest_id")
         if guest_id:
             disk_chat = _load_json(_guest_dir(guest_id) / "chats" / f"{cid}.json", None)
             if disk_chat:
                 state.setdefault("chats", {})[cid] = disk_chat
-            return disk_chat
-        return None
+                return disk_chat, None
+            return None, f"guest_chat_missing|guest_id={guest_id}|chat_id={cid}"
+        return None, "no_guest_id_in_session"
     uid = session.get("user_id")
-    if not uid: return None
+    if not uid:
+        has_guest = session.get("guest", False)
+        return None, f"no_user_id|guest={has_guest}|session_keys={list(session.keys())}"
     if not FIREBASE_ENABLED:
-        return _load_json(_local_user_dir(uid) / "chats" / f"{cid}.json", None)
+        path = _local_user_dir(uid) / "chats" / f"{cid}.json"
+        data = _load_json(path, None)
+        if data:
+            return data, None
+        return None, f"file_missing|uid={uid}|path={path}|exists={path.exists()}|dir_exists={path.parent.exists()}"
     col = _chats_col()
-    if not col: return None
+    if not col: return None, "no_firestore_collection"
     snap = col.document(cid).get()
-    return snap.to_dict() if snap.exists else None
+    if snap.exists:
+        return snap.to_dict(), None
+    return None, f"firestore_doc_missing|uid={uid}|chat_id={cid}"
 
 def save_chat(c):
     if session.get("guest") and not session.get("user_id"):
@@ -1870,15 +1882,15 @@ def new_chat():
 @app.route("/api/chats/<chat_id>")
 @require_auth_or_guest
 def get_chat(chat_id):
-    c = load_chat(chat_id)
-    if not c: return jsonify({"error": "Not found"}), 404
+    c, reason = load_chat(chat_id)
+    if not c: return jsonify({"error": f"Chat not found ({reason})"}), 404
     return jsonify(c)
 
 @app.route("/api/chats/<chat_id>", methods=["PATCH"])
 @require_auth_or_guest
 def patch_chat(chat_id):
-    c = load_chat(chat_id)
-    if not c: return jsonify({"error": "Not found"}), 404
+    c, reason = load_chat(chat_id)
+    if not c: return jsonify({"error": f"Chat not found ({reason})"}), 404
     d = request.get_json()
     for f in ("title", "folder"):
         if f in d: c[f] = d[f]
@@ -1903,8 +1915,8 @@ def chat_message(chat_id):
     if session.get("guest") and not session.get("user_id"):
         if _guest_tokens_used() >= GUEST_TOKEN_LIMIT:
             return jsonify({"reply": "You've reached your daily token limit for guest access. Sign in with Google for unlimited access!", "files": [], "guest_limit": True})
-    chat = load_chat(chat_id)
-    if not chat: return jsonify({"error": "Not found"}), 404
+    chat, reason = load_chat(chat_id)
+    if not chat: return jsonify({"error": f"Chat not found ({reason})"}), 404
     ctx, err_resp, status = prepare_chat_turn(chat, request.get_json() or {})
     if err_resp:
         return err_resp, status
@@ -1921,8 +1933,8 @@ def chat_message(chat_id):
     except Exception as e:
         err = str(e)
         if any(w in err.lower() for w in ("429", "quota", "rate")):
-            return jsonify({"reply": "Rate limit hit. Wait a moment.", "files": []})
-        return jsonify({"reply": f"API error: {err}", "files": []})
+            return jsonify({"error": f"Rate limit hit — wait a moment and try again. ({err[:120]})", "files": []})
+        return jsonify({"error": f"API error: {err}", "files": []})
 
     clean, executed, new_facts = finalize_chat_response(chat, ctx, resp)
     return jsonify({"reply": clean, "files": executed, "memory_added": new_facts})
@@ -1933,9 +1945,9 @@ def chat_message_stream(chat_id):
     if session.get("guest") and not session.get("user_id"):
         if _guest_tokens_used() >= GUEST_TOKEN_LIMIT:
             return jsonify({"reply": "You've reached your daily token limit for guest access. Sign in with Google for unlimited access!", "files": [], "guest_limit": True})
-    chat = load_chat(chat_id)
+    chat, reason = load_chat(chat_id)
     if not chat:
-        return jsonify({"error": "Not found"}), 404
+        return jsonify({"error": f"Chat not found ({reason})"}), 404
 
     payload = request.get_json() or {}
     ctx, err_resp, status = prepare_chat_turn(chat, payload)
@@ -1994,7 +2006,7 @@ def chat_message_stream(chat_id):
         except Exception as e:
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
-                yield event({"type": "error", "error": "Rate limit hit. Wait a moment."})
+                yield event({"type": "error", "error": f"Rate limit hit \u2014 wait a moment and try again. ({err[:200]})"})
             else:
                 yield event({"type": "error", "error": f"API error: {err}"})
 

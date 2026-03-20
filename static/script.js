@@ -1521,7 +1521,8 @@ async function sendMessage(){
       if(canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
     }else{
       stopThinkingPhrases();
-      if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">Connection error. Is the server running?</div>`;
+      const errDetail=e.message||'Unknown error';
+      if(canRender())contentEl.innerHTML=`<div style=\"color:var(--red)\">Connection error: ${esc(errDetail)}<br><small>Is the server running? Check your network.</small></div>`;
     }
   }finally{
     setChatRunning(targetChatId,false);
