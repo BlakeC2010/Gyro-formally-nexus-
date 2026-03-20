@@ -5,7 +5,7 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io
+import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io, time
 import urllib.request, urllib.parse
 from pathlib import Path
 from functools import wraps
@@ -133,6 +133,7 @@ MODELS = {
 app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+_BOOT_TS = str(int(time.time()))
 
 # In-memory guest runtime state (never persisted)
 GUEST_RUNTIME = {}
@@ -1396,7 +1397,9 @@ def generate_image_google(api_key, prompt):
 
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    html = open(os.path.join("static", "index.html"), encoding="utf-8").read()
+    html = html.replace("__CACHE_BUST__", _BOOT_TS)
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.after_request
 def add_no_cache_headers(resp):
