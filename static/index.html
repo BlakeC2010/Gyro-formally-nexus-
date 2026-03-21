@@ -19,7 +19,7 @@
 <div id="loginPage" class="login-page">
 <div class="login-card">
   <div class="login-orb"></div>
-  <h1>gyro</h1>
+  <h1>Gyro</h1>
   <div class="subtitle">AI Workspace</div>
   <div class="intro">Sign in to access your personal AI assistant with memory, tools, and multi-model support.</div>
   <div class="login-err" id="loginErr"></div>
@@ -29,6 +29,7 @@
   </div>
   <div class="divider">or</div>
   <button onclick="guestLogin()" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text-secondary);font-size:13px;cursor:pointer;transition:all .15s;">Continue without an account</button>
+  <div class="login-privacy">🔒 Your privacy matters. Gyro does not collect, sell, or share any of your personal data without your explicit consent. Your conversations stay yours.</div>
 </div>
 </div>
 
@@ -40,7 +41,7 @@
 <!-- ── Sidebar ── -->
 <aside class="sidebar" id="sidebar">
   <div class="sb-head">
-    <div class="sb-brand"><img src="/static/logos/gyro.svg" alt="Gyro" class="sb-logo"><span class="sb-title">Gyro</span></div>
+    <div class="sb-brand" onclick="goHome()" style="cursor:pointer"><img src="/static/logos/gyro.svg" alt="Gyro" class="sb-logo"><span class="sb-title">Gyro</span></div>
     <button class="sb-x" onclick="toggleSB()">✕</button>
   </div>
   <div class="sb-actions">
@@ -129,11 +130,11 @@
               <div class="plus-divider"></div>
               <div class="plus-header">Modes</div>
               <div class="plus-item plus-toggle" id="thinkMenuItem" onclick="toggleThinking();closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></span><span class="pi-label">Thinking</span><span class="pi-badge" id="thinkMenuBadge">OFF</span></div>
-              <div class="plus-item plus-toggle" id="researchMenuItem" onclick="toggleResearch();closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span><span class="pi-label">Research</span><span class="pi-badge" id="researchMenuBadge">OFF</span></div>
               <div class="plus-divider"></div>
               <div class="plus-header">Tools</div>
               <div class="plus-item" onclick="activateTool('canvas');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span class="pi-label">Canvas</span></div>
               <div class="plus-item" onclick="activateTool('search');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span><span class="pi-label">Google Search</span></div>
+              <div class="plus-item" onclick="activateTool('research');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span><span class="pi-label">Deep Research</span></div>
 
               <div class="plus-item disabled" onclick="event.stopPropagation()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></span><span class="pi-label">Image Generation</span><span class="pi-badge">SOON</span></div>
 
@@ -153,29 +154,51 @@
       <div class="canvas-head">
         <div class="ch-left">
           <span class="ch-title" id="canvasTitle">Document</span>
-          <span class="ch-mode" id="canvasMode">PROSE</span>
+          <span class="ch-lang" id="canvasLang"></span>
         </div>
         <div class="ch-actions">
-          <button class="ch-btn" onclick="copyCanvas()" title="Copy">Copy</button>
-          <button class="ch-btn" onclick="downloadCanvas()" title="Download">Save</button>
-          <button class="ch-btn" onclick="sendCanvasToAI()" title="Ask AI to edit">AI Edit</button>
-          <button class="ch-btn" onclick="closeCanvas()" title="Close">✕</button>
+          <button class="ch-btn" id="canvasRunBtn" onclick="runCanvasCode()" title="Run / Preview" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+          <button class="ch-btn" onclick="copyCanvas()" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          <button class="ch-btn" onclick="downloadCanvas()" title="Download file"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+          <button class="ch-btn" onclick="closeCanvas()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
         </div>
       </div>
       <div class="canvas-body">
         <div class="canvas-tabs" id="canvasTabs"></div>
-        <textarea class="canvas-editor" id="canvasEditor" placeholder="Start writing or paste content here..." spellcheck="true"></textarea>
-      </div>
-      <div class="canvas-ai-bar">
-        <input type="text" id="canvasAiInput" placeholder="Ask AI to edit this document..." onkeydown="if(event.key==='Enter')canvasAiEdit()">
-        <button onclick="canvasAiEdit()">Apply</button>
+        <div class="canvas-editor-wrap">
+          <textarea class="canvas-editor" id="canvasEditor" placeholder="Start writing or paste content here..." spellcheck="true"></textarea>
+          <div class="canvas-run-output" id="canvasRunOutput" style="display:none">
+            <div class="cro-head"><span>Output</span><button onclick="closeCanvasOutput()">✕</button></div>
+            <div class="cro-body" id="canvasRunBody"></div>
+          </div>
+        </div>
       </div>
       <div class="canvas-footer">
         <div class="cf-info">
           <span id="canvasLines">0 lines</span>
           <span id="canvasChars">0 chars</span>
         </div>
-        <span id="canvasStatus">Ready</span>
+        <div class="cf-right">
+          <span id="canvasStatus">Ready</span>
+          <div class="canvas-presets-wrap">
+            <button class="cf-presets-btn" id="canvasPresetsBtn" onclick="toggleCanvasPresets()" title="Quick edits">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              Edit
+            </button>
+            <div class="canvas-presets-popup" id="canvasPresetsPopup">
+              <button onclick="canvasPresetEdit('shorter')">✂️ Make shorter</button>
+              <button onclick="canvasPresetEdit('longer')">📝 Make longer</button>
+              <button onclick="canvasPresetEdit('emojis')">😊 Add emojis</button>
+              <button onclick="canvasPresetEdit('professional')">👔 More professional</button>
+              <button onclick="canvasPresetEdit('casual')">💬 More casual</button>
+              <button onclick="canvasPresetEdit('fix_grammar')">✅ Fix grammar</button>
+              <button onclick="canvasPresetEdit('simplify')">🧹 Simplify</button>
+              <button onclick="canvasPresetEdit('bullet_points')">📋 To bullet points</button>
+              <button onclick="canvasPresetEdit('add_comments')">💡 Add comments</button>
+              <button onclick="canvasPresetEdit('optimize')">⚡ Optimize code</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -201,15 +224,7 @@
     <div class="kr"><input type="text" id="profileName" placeholder="Your name"><button onclick="saveName()">Save</button></div>
     <div class="kr" style="margin-top:8px"><button onclick="openSetupFromSettings()">Open Setup Wizard</button></div>
     <hr>
-    <p class="st">Calendar</p>
-    <p class="hint">Connect your Google Calendar so upcoming events can appear on your homepage widgets.</p>
-    <div class="kr" style="margin-top:8px">
-      <button id="calendarConnectBtn" onclick="connectGoogleCalendar()">Connect Calendar</button>
-      <button id="calendarDisconnectBtn" onclick="disconnectGoogleCalendar()">Disconnect</button>
-      <button onclick="refreshGoogleCalendarEvents()">Refresh Events</button>
-    </div>
-    <p class="hint" id="calendarStatus" style="margin-top:6px">Calendar not connected.</p>
-    <hr>
+
     <p class="st">Appearance</p>
     <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
       <div>

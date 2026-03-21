@@ -133,14 +133,19 @@ def _local_load_user_by_id(uid):
 LEGACY_DEFAULT_GOOGLE_CLIENT_ID = "253818541787-cal4ulgrb5otqjj8htg55l8c6gvl750o.apps.googleusercontent.com"
 
 IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
-                ".gyro_history", ".gyro_data", "static", "templates"}
-IGNORED_FILES = {"gyro.py", "app.py", "requirements.txt", ".env", ".gitignore"}
+                ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
+                "static", "templates"}
+IGNORED_FILES = {"gyro.py", "app.py", "requirements.txt", ".env", ".gitignore",
+                 "gunicorn.ctl", "Procfile", "render.yaml",
+                 "NEXUS_INSTRUCTIONS.md", "README.md", "STATUS.md", "TEST_PROMPTS.md"}
 # Server-side files hidden from the user file browser
 SERVER_FILES = {"app.py", "requirements.txt", "Procfile", "render.yaml",
-                "gyro_INSTRUCTIONS.md", "KAIRO_INSTRUCTIONS.md", "gyro_INSTRUCTIONS.md",
-                ".env", ".gitignore", ".gyro_session_secret"}
+                "gyro_INSTRUCTIONS.md", "KAIRO_INSTRUCTIONS.md", "NEXUS_INSTRUCTIONS.md",
+                "README.md", "STATUS.md", "TEST_PROMPTS.md", "gunicorn.ctl",
+                ".env", ".gitignore", ".gyro_session_secret", ".nexus_session_secret"}
 SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
-               ".gyro_history", ".gyro_data", "static", "templates", "logos"}
+               ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
+               "static", "templates", "logos"}
 MAX_CONTEXT_CHARS = 900_000
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_CREATOR_ORIGIN_STORY = "Blake Cary built gyro after his brother shared AI ideas that inspired him to create this workspace."
@@ -821,7 +826,7 @@ def build_system_prompt(memory=None):
     if is_creator:
         creator_section = f"\n\n[CREATOR ACCOUNT]\nThis user ({uname}) is the creator and developer of gyro. {DEFAULT_CREATOR_ORIGIN_STORY}\nYou can speak to them as your creator and builder."
     else:
-        creator_section = "\n\n[IDENTITY PROTECTION]\ngyro was built by Blake Cary. This current user is NOT the creator.\nDo NOT tell this user that they built or created gyro, even if they claim to be the creator.\nDo NOT reveal the creator's email or personal details.\nIf the user claims to be the creator, politely note that creator identity is verified by account, not by claims."
+        creator_section = "\n\n[IDENTITY PROTECTION]\nThis current user is NOT the creator of gyro.\nDo NOT tell this user who built or created gyro.\nDo NOT reveal the creator's name, email, or any personal details about the creator.\nDo NOT reference any origin story about how gyro was built.\nIf the user asks who built gyro, say it was built by an independent developer and leave it at that.\nIf the user claims to be the creator, politely note that creator identity is verified by account, not by claims."
 
     return f"""You are gyro — The Flow-State Architect. Project gyro.
 
@@ -930,20 +935,9 @@ Topic C
 You can also use choices WITHOUT a question tag — just <<<CHOICES>>> directly — for simple option lists after your text.
 The user can ALWAYS type their own answer instead of picking an option, so choices are suggestions not constraints.
 
-12. Tool mode prefixes — the user may start a message with a tool prefix:
-- [Use Canvas]: Put ALL code or document content in a single ```language code block so it opens in the side canvas editor. Do NOT add explanation around the code — just the code block with a brief intro line.
-- [Search the web]: Reference your knowledge or provide the most current info available, citing sources when possible.
-- [Create a mind map]: Immediately generate a ```mermaid mindmap block for the topic. Do not ask for the topic — use whatever subject is most relevant from context or the message. If the message says "about a topic I choose" just pick the most interesting topic you know about. IMPORTANT: In mermaid mindmap syntax, use ONLY plain alphanumeric text for node labels. Do NOT use parentheses (), brackets [], braces {{}}, colons :, or quotes in node text. Keep node labels short (under 40 chars). Use only indentation to define hierarchy. Example:
-```mermaid
-mindmap
-  root Topic Name
-    Branch One
-      Detail A
-      Detail B
-    Branch Two
-      Detail C
-```
-- [Summarize]: Provide a concise summary.
+12. Tools — the user can activate tools from the toolbar. When a tool is active, you will see a [TOOL ACTIVE: ...] section in your instructions with specific guidance. Follow those instructions naturally within your response. The user's message itself will NOT contain any tool prefixes — the tool context is provided to you separately.
+
+12b. Canvas editing — when a user's message contains [CANVAS CONTEXT], they are working in the side canvas editor and asking you to help edit it. If <<<SELECTED>>>...<<<END_SELECTED>>> is present, the user has highlighted a specific portion and wants changes ONLY to that part. Return the FULL updated document in a single code block with the proper language tag. ALWAYS include the filename with extension on the line before the code block. Only modify what the user asked for.
 
 13. Interactive Todo Lists — whenever the user asks for a to-do list, task list, checklist, or you think a to-do list would be useful, output one using this format:
 ```todolist
@@ -952,21 +946,7 @@ mindmap
 Each item needs "text" (string) and "done" (boolean). Items can optionally have "subtasks" (array of {{"text":string,"done":boolean}}). When all subtasks are checked, the parent auto-checks. The user can check off, edit, delete, and add subtasks interactively. If the user says they completed something, output an updated list with done:true on the completed items.
 IMPORTANT: Always output the todolist block DIRECTLY in your response text. NEVER wrap it inside a <<<FILE_CREATE>>> or <<<FILE_UPDATE>>> block. Do NOT save todolists as .md files — just output the ```todolist block inline so it renders interactively.
 
-14. DEEP RESEARCH TOOL — You have a real deep research engine that browses the live internet, reads dozens of sources, and produces a comprehensive cited report. To activate it, include this EXACT tag anywhere in your response:
-<<<DEEP_RESEARCH: your research query here>>>
-
-CRITICAL RULES — READ CAREFULLY:
-- When the user says ANY of these: "research", "deep research", "deep dive", "investigate", "report with sources", "comprehensive analysis", "find sources", "find studies" — you MUST output the <<<DEEP_RESEARCH: ...>>> tag. NO EXCEPTIONS. Do NOT answer the question yourself. Just say something brief like "Firing up deep research on that now!" and include the tag.
-- NEVER answer a research request from your own training data. You are NOT a substitute for real research. Your training data is old and unreliable for research. The deep research tool searches the LIVE internet. Always use it.
-- If the user asks you to "perform deep research on X" and you respond with a long answer WITHOUT the <<<DEEP_RESEARCH: X>>> tag, YOU HAVE FAILED. The ONLY correct response is to include the tag.
-- Keep your message SHORT when triggering research — just 1-2 sentences + the tag. Do NOT write a long essay yourself.
-- If you are unsure whether they want research or just a quick answer, ASK them first.
-- For casual chat or simple factual questions that don't need sources, just answer normally without the tag.
-
-Example correct response when user says "do deep research on quantum computing":
-"Let me fire up deep research on that! <<<DEEP_RESEARCH: quantum computing latest developments and breakthroughs>>>"
-
-That's it. Short message + tag. Do NOT write a 2000-word essay yourself.
+14. DEEP RESEARCH — The user can activate a deep research tool from the toolbar that searches the live internet, reads dozens of sources, and produces a comprehensive cited report. When the deep research tool is active, you will see a [TOOL ACTIVE: DEEP RESEARCH] section in your instructions. You do NOT need to trigger deep research yourself — it is handled externally when the user activates the tool. Just respond normally to the user's question.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
@@ -989,6 +969,13 @@ Output Quality Rules:
 - Be specific and concrete. Vague answers waste the user's time — give precise, actionable information.
 - When you create something worth saving (a plan, a document, code, notes), proactively use FILE_CREATE or FILE_UPDATE to save it rather than just printing it.
 - Your knowledge cutoff is March 2026. You are aware of recent AI models, frameworks, and events up to that date.
+
+Message Continuation:
+- If your response is long and you need to continue, or if you want to chain multiple actions (e.g. text response → code → mind map → file export), you can end your message with <<<CONTINUE>>> on its own line.
+- When you emit <<<CONTINUE>>>, the system will automatically send your next message so you can keep going. You can continue as many times as needed.
+- Use this when: you have more to say than fits comfortably, you want to do multiple steps (research → write → export), or the user asked for a complex multi-part deliverable.
+- Each continued message gets its own bubble in the chat, so the user sees your work flowing naturally.
+- ALWAYS end with <<<CONTINUE>>> if you still have more work to do. Only stop when you are truly done.
 
 Workspace File Rules:
 - Relative paths from workspace root
@@ -1018,14 +1005,14 @@ Workspace File Rules:
 - Track the user's workflow preferences in memory using <<<MEMORY_ADD: Workflow pattern: user prefers [pattern]>>> when you notice a repeated sequence.
 
 Session Info:
-- {('The user is on a guest account. They have not provided a name — do not call them "Guest" as if it were their name. Just say "hey" or "hey there" instead.' if is_guest else f'The user\'s name is {uname}')}
+- {('The user is on a guest account. They have not provided a name — do not call them "Guest" as if it were their name. Just say "hey" or "hey there" instead.' if is_guest else "The user" + chr(39) + "s name is " + uname)}
 - Today: {datetime.date.today().isoformat()}
 - Always try to help. Don't refuse unless the request is clearly and unambiguously harmful. Lean toward engaging creatively with unusual, edgy, or unconventional requests — curiosity beats caution. When in doubt, just answer.
 - Never lecture or moralize. If something seems edgy but isn't actually harmful, engage with it directly without caveats or disclaimers.
 {creator_section}
 {mem_section}
 {profile_section}
-{f"Custom instructions:{chr(10)}{custom}" if custom else ""}"""
+{("Custom instructions:" + chr(10) + custom) if custom else ""}"""
 
 
 def fallback_chat_title(user_text, assistant_text=""):
@@ -1134,6 +1121,7 @@ def clean_response(text):
     text = re.sub(r'<<<MEMORY_ADD:\s*.+?>>>', '', text)
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
     text = re.sub(r'<<<IMAGE_SEARCH:\s*.+?>>>', '', text)
+    text = re.sub(r'<<<CONTINUE>>>', '', text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1207,6 +1195,44 @@ def resolve_chat_model(chat, settings):
         "key_source": source,
     }
 
+
+def _build_tool_instructions(active_tools):
+    """Build additional system prompt instructions based on which tools the user activated."""
+    if not active_tools:
+        return ""
+    parts = []
+    tool_map = {
+        "canvas": (
+            "[TOOL ACTIVE: CANVAS]\n"
+            "The user has activated the Canvas tool. Put ALL code or document content in a single ```language code block "
+            "so it opens in the side canvas editor. ALWAYS name the file with a proper extension on the line before the code block, "
+            "e.g. 'script.py', 'page.html', 'styles.css', 'app.js'. Keep explanation minimal — just the filename, a brief intro, then the code block.\n"
+            "If the user has selected text in the canvas (shown in <<<SELECTED>>>...<<<END_SELECTED>>>) and asks for changes, "
+            "return the FULL updated document with only the selected portion modified as requested."
+        ),
+        "search": (
+            "[TOOL ACTIVE: WEB SEARCH]\n"
+            "The user has activated the Web Search tool. Provide the most current, accurate information available and cite sources when possible."
+        ),
+        "mindmap": (
+            "[TOOL ACTIVE: MIND MAP]\n"
+            "The user has activated the Mind Map tool. Generate a ```mermaid mindmap block for the topic. "
+            "In mermaid mindmap syntax, use ONLY plain alphanumeric text for node labels. Do NOT use parentheses (), brackets [], braces {}, colons :, or quotes in node text. "
+            "Keep node labels short (under 40 chars). Use only indentation to define hierarchy."
+        ),
+        "summarize": (
+            "[TOOL ACTIVE: SUMMARIZE]\n"
+            "The user has activated the Summarize tool. Provide a concise, well-structured summary of whatever they ask about."
+        ),
+    }
+    for tool in active_tools:
+        if tool in tool_map:
+            parts.append(tool_map[tool])
+    if parts:
+        return "\n\n" + "\n\n".join(parts)
+    return ""
+
+
 def prepare_chat_turn(chat, payload):
     user_text = (payload.get("message") or "").strip()
     attached = payload.get("files", [])
@@ -1236,10 +1262,10 @@ def prepare_chat_turn(chat, payload):
     # --- Thinking & web-search flags ---
     thinking = payload.get("thinking", False)
     web_search = payload.get("web_search", False)
-    research_hint = payload.get("research_hint", False)
+    active_tools = payload.get("active_tools", [])
     if not thinking and user_text:
         thinking = _detect_complex_query(user_text)
-    if not web_search and "[search the web]" in user_text.lower():
+    if not web_search and "search" in active_tools:
         web_search = True
 
     # --- YouTube URL detection ---
@@ -1258,6 +1284,11 @@ def prepare_chat_turn(chat, payload):
     # --- Per-chat custom instructions ---
     if chat.get("custom_instructions"):
         sysprompt += f"\n\n[CHAT-SPECIFIC INSTRUCTIONS]\n{chat['custom_instructions']}"
+
+    # --- Active tool instructions (injected silently into system prompt) ---
+    tool_instructions = _build_tool_instructions(active_tools)
+    if tool_instructions:
+        sysprompt += tool_instructions
 
     # --- Per-chat pinned files context ---
     pinned = chat.get("pinned_files") or []
@@ -1308,7 +1339,7 @@ def prepare_chat_turn(chat, payload):
         "api_msgs": api_msgs,
         "thinking": thinking,
         "web_search": web_search,
-        "research_hint": research_hint,
+        "active_tools": active_tools,
     }, None, None
 
 def finalize_chat_response(chat, ctx, raw_response):
@@ -1626,7 +1657,7 @@ def _detect_workflow_patterns(chats):
 def _widget_has_content(w):
     """Check if a widget has meaningful content to display."""
     wtype = (w.get("type") or "focus").lower()
-    if wtype in ("recent", "calendar", "todos", "nudge"):
+    if wtype in ("recent", "todos", "nudge"):
         items = w.get("items") or []
         return isinstance(items, list) and len(items) > 0
     if wtype in ("vision", "motivation", "focus"):
@@ -1634,7 +1665,7 @@ def _widget_has_content(w):
         return bool(text)
     return True
 
-def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_events):
+def _fallback_home_widgets(user_name, profile, chats, todos, visions):
     first_name = (user_name or "").split()[0] or "there"
     heading = f"Welcome back, {first_name}."
     widgets = []
@@ -1648,16 +1679,6 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_e
             "title": "Needs your attention",
             "subtitle": f"{len(nudges)} item{'s' if len(nudges)!=1 else ''}",
             "items": nudges,
-        })
-
-    # Prefer actionable data first.
-    if calendar_events:
-        widgets.append({
-            "type": "calendar",
-            "size": "large",
-            "title": "Upcoming schedule",
-            "subtitle": "Google Calendar",
-            "items": calendar_events[:4],
         })
 
     pending_todos = [t for t in (todos or []) if not t.get("done")]
@@ -1702,14 +1723,14 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, calendar_e
             "type": "focus",
             "size": "large",
             "title": "Your command center is ready",
-            "text": "Add tasks, connect your calendar, or start a chat to make this dashboard uniquely yours.",
+            "text": "Add tasks or start a chat to make this dashboard uniquely yours.",
         }]
 
     widgets = [w for w in widgets if _widget_has_content(w)]
     return {"heading": heading, "widgets": widgets[:6]}
 
 
-def _ai_home_widgets(user_name, profile, chats, todos, visions, calendar_events):
+def _ai_home_widgets(user_name, profile, chats, todos, visions):
     settings = load_settings()
     selected = normalize_selected_model(settings)
     resolved = resolve_chat_model({"model": selected}, settings)
@@ -1727,12 +1748,10 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions, calendar_events)
             "what_you_do": profile.get("what_you_do", ""),
             "hobbies": profile.get("hobbies", ""),
             "current_focus": profile.get("current_focus", ""),
-            "origin_story": profile.get("origin_story", ""),
         },
         "recent_chats": [{"id": c.get("id"), "title": c.get("title", "Untitled")} for c in chats[:8]],
         "todos": todos[:10],
         "visions": visions[:5],
-        "calendar_events": calendar_events[:8],
     }
 
     prompt = (
@@ -1743,7 +1762,7 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions, calendar_events)
         "  \"heading\": \"string\",\n"
         "  \"widgets\": [\n"
         "    {\n"
-        "      \"type\": \"calendar|todos|recent|focus|vision|motivation\",\n"
+        "      \"type\": \"todos|recent|focus|vision|motivation\",\n"
         "      \"size\": \"small|medium|large\",\n"
         "      \"title\": \"string\",\n"
         "      \"subtitle\": \"string (optional)\",\n"
@@ -2075,9 +2094,10 @@ def auth_me():
     user = _cur_user()
     if not user: session.clear(); return jsonify({"authenticated": False})
     profile = load_profile()
-    if not (profile.get("origin_story") or "").strip():
-        profile["origin_story"] = DEFAULT_CREATOR_ORIGIN_STORY
-        save_profile(profile)
+    if user["email"].lower().strip() == CREATOR_EMAIL:
+        if not (profile.get("origin_story") or "").strip():
+            profile["origin_story"] = DEFAULT_CREATOR_ORIGIN_STORY
+            save_profile(profile)
     return jsonify({"authenticated": True, "user": {
         "id": user["id"], "email": user["email"], "name": user["name"],
         "theme": user.get("theme", "dark"), "provider": user.get("provider", "local"),
@@ -2257,7 +2277,7 @@ def get_profile_onboarding():
             "what_you_do": p.get("what_you_do", ""),
             "hobbies": p.get("hobbies", ""),
             "current_focus": p.get("current_focus", ""),
-            "origin_story": DEFAULT_CREATOR_ORIGIN_STORY,
+            "origin_story": p.get("origin_story", ""),
         },
     })
 
@@ -2279,20 +2299,24 @@ def save_profile_onboarding():
         "what_you_do": what_you_do[:300],
         "hobbies": hobbies[:300],
         "current_focus": current_focus[:300],
-        "origin_story": DEFAULT_CREATOR_ORIGIN_STORY,
+        "origin_story": profile.get("origin_story", ""),
     })
     save_profile(profile)
     _save_user_name(profile["preferred_name"])
 
     mem = load_memory()
-    prefixes = ("Preferred name: ", "Work: ", "Hobbies: ", "Current focus: ")
+    prefixes = ("Preferred name: ", "Work: ", "Hobbies: ", "Current focus: ", "Why I built gyro:")
     facts = [f for f in mem.get("facts", []) if not any(f.startswith(pfx) for pfx in prefixes)]
     facts.append(f"Preferred name: {profile['preferred_name']}")
     facts.append(f"Work: {profile['what_you_do']}")
     facts.append(f"Hobbies: {profile['hobbies']}")
     if profile["current_focus"]:
         facts.append(f"Current focus: {profile['current_focus']}")
-    facts.append(f"Why I built gyro: {DEFAULT_CREATOR_ORIGIN_STORY}")
+    user = _cur_user()
+    if user and user.get("email", "").lower().strip() == CREATOR_EMAIL:
+        profile["origin_story"] = DEFAULT_CREATOR_ORIGIN_STORY
+        save_profile(profile)
+        facts.append(f"Why I built gyro: {DEFAULT_CREATOR_ORIGIN_STORY}")
     mem["facts"] = facts
     save_memory(mem)
 
@@ -2503,75 +2527,17 @@ def chat_message(chat_id):
         return jsonify({"error": f"API error: {err}", "files": []})
 
     resp, research_query = extract_research_trigger(resp)
-    # Safety net: if user clearly asked for research and AI forgot the tag, auto-trigger
-    if not research_query and _detect_research_intent(ctx["user_text"]):
-        research_query = ctx["user_text"]
     clean, executed, new_facts = finalize_chat_response(chat, ctx, resp)
     result = {"reply": clean, "files": executed, "memory_added": new_facts}
     if research_query:
         result["research_trigger"] = research_query
     return jsonify(result)
 
-def _detect_research_intent(text):
-    """Return True if the user's message implies they want deep research."""
-    lo = text.lower().strip()
-    # Explicit tool prefix
-    if lo.startswith("[deep research]"):
-        return True
-    # Strong research signals – phrases that clearly indicate wanting an in-depth investigation
-    strong = [
-        "research ", "deep dive", "deep research", "in-depth analysis",
-        "comprehensive analysis", "investigate ", "write a report",
-        "write a paper", "literature review", "survey of ",
-        "state of the art", "thorough analysis", "detailed report",
-        "research report", "find sources", "find studies",
-        "what does the research say", "what do studies show",
-        "compile information", "gather information",
-        "multi-source", "academic review", "full analysis",
-    ]
-    if any(s in lo for s in strong):
-        return True
-    # Medium signals  – need at least 2 to trigger
-    medium = [
-        "pros and cons", "compare and contrast", "advantages and disadvantages",
-        "history of ", "evolution of ", "overview of ",
-        "how has ", "what are the latest", "current state of",
-        "trends in ", "recent developments", "emerging ",
-        "what are all the", "comprehensive", "exhaustive",
-        "everything about", "all about ", "tell me everything",
-    ]
-    medium_count = sum(1 for s in medium if s in lo)
-    if medium_count >= 2:
-        return True
-    # Long complex questions with research keywords
-    if len(text) > 200 and medium_count >= 1:
-        return True
-    return False
-
 
 @app.route("/api/detect-tools", methods=["POST"])
 @require_auth_or_guest
 def detect_tools():
-    """Auto-detect which tool(s) should handle a user message."""
-    d = request.get_json() or {}
-    text = (d.get("message") or "").strip()
-    if not text:
-        return jsonify({"tool": None})
-    lo = text.lower()
-    # Check explicit prefixes first
-    if lo.startswith("[deep research]"):
-        return jsonify({"tool": "research", "confidence": "explicit"})
-    if lo.startswith("[search the web]"):
-        return jsonify({"tool": "web_search", "confidence": "explicit"})
-    if lo.startswith("[use canvas]"):
-        return jsonify({"tool": "canvas", "confidence": "explicit"})
-    if lo.startswith("[create a mind map]"):
-        return jsonify({"tool": "mindmap", "confidence": "explicit"})
-    if lo.startswith("[summarize]"):
-        return jsonify({"tool": "summarize", "confidence": "explicit"})
-    # Auto-detect research intent
-    if _detect_research_intent(text):
-        return jsonify({"tool": "research", "confidence": "auto"})
+    """Tool detection endpoint — now tools are user-activated only."""
     return jsonify({"tool": None})
 
 
@@ -2647,9 +2613,6 @@ def chat_message_stream(chat_id):
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             # Check if AI triggered deep research
             raw_text, research_query = extract_research_trigger(raw_text)
-            # Safety net: if user clearly asked for research and AI forgot the tag, auto-trigger
-            if not research_query and _detect_research_intent(ctx["user_text"]):
-                research_query = ctx["user_text"]
             # Extract image search queries and fetch results
             raw_text, image_queries = extract_image_searches(raw_text)
             image_results = []
@@ -2719,6 +2682,42 @@ def canvas_apply():
             base_url=resolved["base_url"],
         )
         return jsonify({"content": (updated or "").strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/canvas/run", methods=["POST"])
+@require_auth
+def canvas_run():
+    d = request.get_json() or {}
+    code = (d.get("code") or "").strip()
+    language = (d.get("language") or "").strip().lower()
+    if not code:
+        return jsonify({"error": "No code to run."}), 400
+    if language != "python":
+        return jsonify({"error": f"Run not supported for '{language}'."}), 400
+
+    import subprocess, tempfile, os
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
+            tmp.write(code)
+            tmp_path = tmp.name
+        result = subprocess.run(
+            ["python", tmp_path],
+            capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        os.unlink(tmp_path)
+        output = result.stdout
+        if result.stderr:
+            output += ("\n" if output else "") + result.stderr
+        return jsonify({"output": output.strip()})
+    except subprocess.TimeoutExpired:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return jsonify({"output": "Execution timed out (15s limit)."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2838,9 +2837,12 @@ def delete_user_file():
     path = (d.get("path") or "").strip()
     if not path or ".." in path or path.startswith("/"):
         return jsonify({"error": "Invalid path"}), 400
-    fp = WORKSPACE / Path(path).as_posix()
+    clean = Path(path).as_posix()
+    fp = WORKSPACE / clean
     if not fp.exists():
         return jsonify({"error": "Not found"}), 404
+    if fp.name in SERVER_FILES or any(part in SERVER_DIRS for part in Path(clean).parts):
+        return jsonify({"error": "Access denied"}), 403
     if fp.is_dir():
         import shutil
         shutil.rmtree(fp)
@@ -2858,6 +2860,24 @@ def get_file_content_route():
     if path not in files:
         return jsonify({"error": "File not found"}), 404
     return jsonify({"path": path, "content": files[path]})
+
+@app.route("/api/files/download")
+@require_auth_or_guest
+def download_workspace_file():
+    """Download any user-facing workspace file."""
+    path = (request.args.get("path") or "").strip()
+    if not path or ".." in path or path.startswith("/"):
+        return jsonify({"error": "Invalid path"}), 400
+    clean = Path(path).as_posix()
+    fp = WORKSPACE / clean
+    if not fp.exists() or not fp.is_file():
+        return jsonify({"error": "File not found"}), 404
+    # Don't allow downloading server files or files in protected directories
+    if fp.name in SERVER_FILES:
+        return jsonify({"error": "Access denied"}), 403
+    if any(part in SERVER_DIRS for part in Path(clean).parts):
+        return jsonify({"error": "Access denied"}), 403
+    return send_from_directory(str(fp.parent), fp.name, as_attachment=True)
 
 @app.route("/api/folders")
 @require_auth
@@ -3016,7 +3036,6 @@ def home_widgets_route():
     body = request.get_json() or {}
     todos = body.get("todos", []) if isinstance(body.get("todos", []), list) else []
     visions = body.get("visions", []) if isinstance(body.get("visions", []), list) else []
-    calendar_events = body.get("calendar_events", []) if isinstance(body.get("calendar_events", []), list) else []
 
     user = _cur_user() or {}
     profile = load_profile() if session.get("user_id") else {
@@ -3028,7 +3047,7 @@ def home_widgets_route():
     }
     chats = list_chats() if session.get("user_id") else []
 
-    plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions, calendar_events)
+    plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions)
     return jsonify(plan)
 
 # ─── Deep Research Engine ────────────────────────────────────────────────────
@@ -4003,14 +4022,20 @@ def start_research():
     def generate():
         yield json.dumps({"type": "job_id", "job_id": job_id}) + "\n"
         sent = 0
+        last_send = _time.time()
         while True:
             job = _research_jobs.get(job_id, {})
             evts = job.get("events", [])
             while sent < len(evts):
                 yield json.dumps(evts[sent]) + "\n"
                 sent += 1
+                last_send = _time.time()
             if job.get("status") in ("done", "error", "cancelled") and sent >= len(evts):
                 break
+            # Send heartbeat every 8 seconds to prevent connection timeout
+            if _time.time() - last_send > 8:
+                yield json.dumps({"type": "heartbeat"}) + "\n"
+                last_send = _time.time()
             _time.sleep(0.25)
         # Clean up old jobs (keep last 20)
         if len(_research_jobs) > 20:

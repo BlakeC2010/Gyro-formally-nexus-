@@ -1,7 +1,7 @@
 // ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
-let googleInitDone=false,thinkingEnabled=false,researchEnabled=false,guestAuthMode='register';
+let googleInitDone=false,thinkingEnabled=false,guestAuthMode='register';
 let deepResearchDepth='standard';
 let onboardingChecked=false;
 let selectMode=false;
@@ -22,12 +22,9 @@ let _thinkInterval=null;
 const ONB_SKIP_KEY='gyro_onboarding_skipped';
 const ONB_NO_REMIND_KEY='gyro_onboarding_no_remind';
 const ONB_DISMISS_KEY='gyro_onboarding_reminder_dismissed';
-const CALENDAR_STATE_KEY='gyro_calendar_state_v1';
 const HOME_WIDGET_CACHE_KEY='gyro_home_widgets_cache_v1';
 const CHAT_CACHE_KEY='gyro_recent_chats_v1';
-let calendarToken='';
-let calendarTokenClient=null;
-let calendarEvents=[];
+const FOLDER_META_KEY='gyro_folder_meta_v1';
 let homeWidgetRefreshTimer=null;
 let homeWidgetRefreshInFlight=false;
 
@@ -376,7 +373,6 @@ function setDraft(text){
 async function showApp(){
   document.getElementById('loginPage').style.display='none';
   document.getElementById('appPage').classList.add('visible');
-  loadCalendarState();
   allChats=loadCachedChats();
   hideSetupReminder();
   updateUserUI();
@@ -410,16 +406,13 @@ function showChangelogModal(changelog, lastSeen, currentVersion){
   const verEl=document.getElementById('clVersion');
   if(!overlay||!body) return;
   overlay._currentVersion=currentVersion;
+  // Only show the most recent entry
   const latest=changelog[0];
+  if(!latest) return;
   verEl.textContent=`v${latest.version} · ${_fmtChangelogDate(latest.date)}`;
-  // Build entries — mark versions newer than lastSeen
-  let html='';
-  for(const entry of changelog){
-    const isNew=!lastSeen||_versionCompare(entry.version,lastSeen)>0;
-    html+=`<div class="cl-entry${isNew?' cl-entry-new':''}"><div class="cl-entry-head"><span class="cl-entry-ver">v${esc(entry.version)}</span><span class="cl-entry-title">${esc(entry.title)}</span><span class="cl-entry-date">${_fmtChangelogDate(entry.date)}</span></div><ul class="cl-changes">`;
-    for(const c of entry.changes) html+=`<li>${esc(c)}</li>`;
-    html+=`</ul></div>`;
-  }
+  let html=`<div class="cl-entry cl-entry-new"><div class="cl-entry-head"><span class="cl-entry-ver">v${esc(latest.version)}</span><span class="cl-entry-title">${esc(latest.title)}</span><span class="cl-entry-date">${_fmtChangelogDate(latest.date)}</span></div><ul class="cl-changes">`;
+  for(const c of latest.changes) html+=`<li>${esc(c)}</li>`;
+  html+=`</ul></div>`;
   body.innerHTML=html;
   overlay.classList.add('open');
 }
@@ -477,7 +470,6 @@ function buildMasterPromptCards(){
 function hasWidgetContent(w){
   const type=(w?.type||'focus').toLowerCase();
   if(type==='recent')return Array.isArray(w.items)&&w.items.length>0;
-  if(type==='calendar')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='todos')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='nudge')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='vision')return!!(w?.text||'').trim();
@@ -497,12 +489,6 @@ function renderHomeWidget(w){
     if(!items.length)return'';
     const body=items.map(i=>`<div class="wl-recent-item" onclick="openChat('${esc(i.id||'')}')"><span class="wl-ri-title">${esc(i.title||'Untitled')}</span></div>`).join('');
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-recent-list">${body}</div></div>`;
-  }
-  if(type==='calendar'){
-    const items=Array.isArray(w.items)?w.items:[];
-    if(!items.length)return'';
-    const body=items.map(i=>`<div class="wl-cal-item"><div class="wl-cal-title">${esc(i.summary||'Untitled event')}</div><div class="wl-cal-time">${esc(i.when||'Upcoming')}</div></div>`).join('');
-    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-cal-list">${body}</div></div>`;
   }
   if(type==='todos'){
     const items=Array.isArray(w.items)?w.items:[];
@@ -768,9 +754,52 @@ function getLocalTimeGreeting(){
 async function loadWelcome(force=false){
   const area=document.getElementById('chatArea');
   if(curChat&&!force)return;
+  _activeFolderView=null;
   const greeting=getLocalTimeGreeting();
   const instantPlan=buildInstantHomePlan(greeting);
   area.innerHTML=getWelcomeHTML(greeting,instantPlan);
+}
+
+function goHome(){
+  curChat=null;
+  _activeFolderView=null;
+  document.getElementById('topTitle').textContent='New Chat';
+  loadWelcome(true);
+  renderChatList();
+}
+
+/* ─── Folder Meta (emoji, color) stored in localStorage ─── */
+function _loadFolderMeta(){
+  try{return JSON.parse(localStorage.getItem(FOLDER_META_KEY)||'{}');}catch{return {};}
+}
+function _saveFolderMeta(meta){
+  try{localStorage.setItem(FOLDER_META_KEY,JSON.stringify(meta||{}));}catch{}
+}
+function getFolderMeta(folder){
+  const all=_loadFolderMeta();
+  return all[folder]||{};
+}
+function setFolderMeta(folder,patch){
+  const all=_loadFolderMeta();
+  all[folder]={...(all[folder]||{}),...patch};
+  _saveFolderMeta(all);
+}
+function renameFolderMeta(oldName,newName){
+  const all=_loadFolderMeta();
+  if(all[oldName]){all[newName]=all[oldName];delete all[oldName];_saveFolderMeta(all);}
+}
+function deleteFolderMeta(folder){
+  const all=_loadFolderMeta();
+  delete all[folder];
+  _saveFolderMeta(all);
+}
+function getFolderIcon(folder){
+  const m=getFolderMeta(folder);
+  return m.emoji||'📁';
+}
+function getFolderColor(folder){
+  const m=getFolderMeta(folder);
+  return m.color||'';
 }
 
 let _activeFolderView=null;
@@ -781,20 +810,33 @@ function openFolderView(folder){
   const area=document.getElementById('chatArea');
   const chats=allChats.filter(c=>c.folder===folder);
   document.getElementById('topTitle').textContent=folder;
-  const chatListHtml=chats.length?chats.map(c=>`<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
-    +`<span class="fv-chat-icon">💬</span>`
-    +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${c.messages?.length||0} messages</div></div>`
-    +`<span class="fv-chat-arrow">→</span></div>`).join('')
-    :'<div class="fv-empty">No chats in this folder yet. Start a new chat to add one.</div>';
+  const meta=getFolderMeta(folder);
+  const fIcon=meta.emoji||'📁';
+  const fColor=meta.color||'var(--accent)';
+  const chatListHtml=chats.length?chats.map(c=>{
+    const preview=c.messages?.length?`${c.messages.length} messages`:'Empty chat';
+    return `<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
+      +`<span class="fv-chat-icon">💬</span>`
+      +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${preview}</div></div>`
+      +`<span class="fv-chat-arrow">→</span></div>`;
+  }).join('')
+    :'<div class="fv-empty">No chats yet. Start one below.</div>';
   area.innerHTML=`<div class="folder-view">
-    <div class="fv-header">
-      <span class="fv-icon">📁</span>
+    <div class="fv-hero">
+      <div class="fv-hero-icon" style="background:${fColor}20;color:${fColor}">${fIcon}</div>
       <h1 class="fv-title">${esc(folder)}</h1>
-      <button class="fv-edit-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Edit</button>
+      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}</p>
     </div>
-    <div class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''} in this folder</div>
+    <div class="fv-actions">
+      <button class="fv-action-btn fv-action-primary" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Chat
+      </button>
+      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">🎨 Customize</button>
+      <button class="fv-action-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Rename</button>
+      <button class="fv-action-btn fv-action-danger" onclick="deleteFolderAndChats('${esc(folder).replace(/'/g,"\\'")}')">🗑 Delete</button>
+    </div>
     <div class="fv-chat-list">${chatListHtml}</div>
-    <button class="fv-new-chat-btn" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">+ New Chat in ${esc(folder)}</button>
   </div>`;
   renderChatList();
 }
@@ -803,6 +845,7 @@ async function renameFolderFromView(oldName){
   const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
   if(!next?.trim()||next.trim()===oldName)return;
   const newName=next.trim();
+  renameFolderMeta(oldName,newName);
   const chats=allChats.filter(c=>c.folder===oldName);
   for(const c of chats){
     await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:newName})});
@@ -810,6 +853,61 @@ async function renameFolderFromView(oldName){
   await refreshChats();
   openFolderView(newName);
   showToast('Folder renamed.','success');
+}
+
+async function customizeFolder(folder){
+  const meta=getFolderMeta(folder);
+  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','❤️','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊',''];
+  const colors=['','#bf6b3a','#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e91e63','#00bcd4','#ff5722'];
+  const colorNames=['Default','Orange','Red','Amber','Yellow','Green','Teal','Blue','Purple','Pink','Cyan','Deep Orange'];
+  const curEmoji=meta.emoji||'📁';
+  const curColor=meta.color||'';
+  const emojiGrid=emojis.map(e=>{
+    const label=e||'None';
+    const sel=e===curEmoji||(e===''&&!curEmoji)?' fv-cust-sel':'';
+    return `<button class="fv-cust-btn${sel}" onclick="this.closest('.fv-cust-popup').dataset.emoji='${e}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')">${label}</button>`;
+  }).join('');
+  const colorGrid=colors.map((c,i)=>{
+    const sel=c===curColor||(c===''&&!curColor)?' fv-cust-sel':'';
+    const bg=c||'var(--text-muted)';
+    return `<button class="fv-cust-color${sel}" style="background:${bg}" title="${colorNames[i]}" onclick="this.closest('.fv-cust-popup').dataset.color='${c}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-color').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')"></button>`;
+  }).join('');
+
+  const popup=document.createElement('div');
+  popup.className='fv-cust-popup';
+  popup.dataset.emoji=curEmoji;
+  popup.dataset.color=curColor;
+  popup.innerHTML=`
+    <div class="fv-cust-overlay" onclick="this.parentElement.remove()"></div>
+    <div class="fv-cust-modal">
+      <h3>Customize "${esc(folder)}"</h3>
+      <div class="fv-cust-section">
+        <label>Icon</label>
+        <div class="fv-cust-grid">${emojiGrid}</div>
+      </div>
+      <div class="fv-cust-section">
+        <label>Color</label>
+        <div class="fv-cust-grid">${colorGrid}</div>
+      </div>
+      <div class="fv-cust-footer">
+        <button class="fv-cust-cancel" onclick="this.closest('.fv-cust-popup').remove()">Cancel</button>
+        <button class="fv-cust-save" onclick="saveFolderCustomize(this)">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(popup);
+}
+
+function saveFolderCustomize(btn){
+  const popup=btn.closest('.fv-cust-popup');
+  const folder=_activeFolderView;
+  if(!folder){popup.remove();return;}
+  const emoji=popup.dataset.emoji||'';
+  const color=popup.dataset.color||'';
+  setFolderMeta(folder,{emoji,color});
+  popup.remove();
+  renderChatList();
+  openFolderView(folder);
+  showToast('Folder customized.','success');
 }
 
 function loadCachedChats(){
@@ -830,7 +928,6 @@ async function fetchHomeWidgetsPlan(){
   const payload={
     todos:(state.todos||[]).slice(0,10),
     visions:(state.visions||[]).slice(0,6),
-    calendar_events:(calendarEvents||[]).slice(0,8),
   };
   try{
     const r=await fetch('/api/home-widgets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1051,6 +1148,11 @@ function renderChatList(filter=''){
   const f=filter.toLowerCase();
   const fl=(f?allChats.filter(c=>c.title.toLowerCase().includes(f)):allChats);
   const grouped={};fl.forEach(c=>{const fld=c.folder||'';if(!grouped[fld])grouped[fld]=[];grouped[fld].push(c)});
+  // Include empty folders from meta
+  const folderMeta=_loadFolderMeta();
+  for(const fld of Object.keys(folderMeta)){
+    if(fld&&!grouped[fld])grouped[fld]=[];
+  }
   let html='';const seen=new Set();
   for(const fld of ['',...Object.keys(grouped).filter(f=>f).sort()]){
     if(seen.has(fld)||!grouped[fld])continue;seen.add(fld);
@@ -1058,10 +1160,13 @@ function renderChatList(filter=''){
       const fldSel=selectMode&&_isFolderSelected(fld)?' selected':'';
       const chatCount=grouped[fld].length;
       const isCollapsed=_collapsedFolders.has(fld);
+      const fIcon=getFolderIcon(fld);
+      const fColor=getFolderColor(fld);
+      const colorStyle=fColor?` style="color:${fColor}"`:'';
       html+=`<div class="sb-folder${fldSel}${isCollapsed?' collapsed':''}" data-folder="${esc(fld)}" onclick="openFolderView('${esc(fld).replace(/'/g,"\\'")}')">`;  
       if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${_isFolderSelected(fld)?'checked':''} onclick="event.stopPropagation();toggleSelectFolder('${esc(fld)}')">`;
       html+=`<span class="sf-arrow" onclick="event.stopPropagation();toggleFolderCollapse('${esc(fld)}')">${isCollapsed?'▸':'▾'}</span>`;
-      html+=`<span class="sf-icon">📁</span>`;
+      html+=`<span class="sf-icon"${colorStyle}>${fIcon}</span>`;
       html+=`<span class="sf-label">${esc(fld)}</span>`;
       html+=`<span class="sf-count">${chatCount}</span>`;
       html+=`<button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
@@ -1119,7 +1224,15 @@ async function createChat(folder=''){
 
 async function newFolder(){
   const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
-  if(n?.trim())createChat(n.trim());
+  if(!n?.trim())return;
+  const name=n.trim();
+  // Just create the folder entry in meta and add one empty chat to register the folder on the server
+  // Actually - we just need at least one chat with that folder. Create no chat; use a placeholder approach.
+  // To make the folder appear even with 0 chats, we store it in folderMeta and render it in sidebar.
+  setFolderMeta(name,{emoji:'📁',color:''});
+  renderChatList();
+  openFolderView(name);
+  showToast('Folder created.','success');
 }
 function toggleFolderCollapse(folder){
   if(_collapsedFolders.has(folder))_collapsedFolders.delete(folder);
@@ -1131,7 +1244,7 @@ function toggleFolderMenu(btn,folder){
   if(existing){existing.remove();return;}
   const menu=document.createElement('div');
   menu.className='sf-menu';
-  menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="openFolderSettings('${folder.replace(/'/g,"\\'")}')">Settings</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
+  menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="customizeFolder('${folder.replace(/'/g,"\\'")}')">Customize</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
   btn.parentElement.style.position='relative';
   btn.parentElement.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
@@ -1141,6 +1254,7 @@ async function renameFolderFromMenu(oldName){
   document.querySelector('.sf-menu')?.remove();
   const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
   if(!next?.trim()||next.trim()===oldName)return;
+  renameFolderMeta(oldName,next.trim());
   const chats=allChats.filter(c=>c.folder===oldName);
   for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:next.trim()})});}
   await refreshChats();showToast('Folder renamed.','success');
@@ -1158,7 +1272,10 @@ async function deleteFolderFromMenu(folder){
   if(!ok)return;
   const chats=allChats.filter(c=>c.folder===folder);
   for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:''})});}
-  await refreshChats();showToast('Folder removed.','success');
+  deleteFolderMeta(folder);
+  await refreshChats();
+  if(_activeFolderView===folder){goHome();}
+  showToast('Folder removed.','success');
 }
 
 async function deleteFolderAndChats(folder){
@@ -1170,12 +1287,11 @@ async function deleteFolderAndChats(folder){
   if(ids.length){
     await fetch('/api/chats/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
   }
-  if(ids.includes(curChat)){
-    curChat=null;
-    document.getElementById('topTitle').textContent='gyro';
-    loadWelcome(true);
+  deleteFolderMeta(folder);
+  if(ids.includes(curChat)||_activeFolderView===folder){
+    goHome();
   }
-  await refreshChats();showToast(`Folder "${folder}" and ${ids.length} chat${ids.length!==1?'s':''} deleted.`,'success');
+  await refreshChats();showToast(`Folder "${folder}" deleted.`,'success');
 }
 
 // ─── Multi-Select Mode ────────────────────────────
@@ -1218,8 +1334,8 @@ async function deleteSelectedChats(){
   const ids=[...selectedItems];
   await fetch('/api/chats/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
   if(ids.includes(curChat)){
-    curChat=null;
-    document.getElementById('topTitle').textContent='gyro';
+    goHome();
+  } else if(!curChat){
     loadWelcome(true);
   }
   selectedItems.clear();
@@ -1256,6 +1372,8 @@ async function openChat(id){
   _activeFolderView=null;
   curChat=id;
   unreadChats.delete(id);
+  // Auto-close canvas when switching chats
+  closeCanvas();
   const r=await apiFetch(`/api/chats/${id}`);
   if(!r.ok){
     // Chat no longer exists on server — remove from list and go to welcome
@@ -1284,11 +1402,13 @@ async function openChat(id){
     }
   }
   const area=document.getElementById('chatArea');area.innerHTML='';
+  _suppressCanvasAutoOpen=true;
   if(chat.messages?.length){
     for(const m of chat.messages){
       if(m.role==='user')addMsg('user',m.text,[],m);
       else addMsg('kairo',m.text,m.files_modified||[],m);
     }
+    _suppressCanvasAutoOpen=false;
     setTimeout(()=>{
       try{
         Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams());
@@ -1297,6 +1417,7 @@ async function openChat(id){
       }
     },200);
   }else{
+    _suppressCanvasAutoOpen=false;
     loadWelcome(true);
   }
   // If this chat has an active stream, show a generating indicator
@@ -1324,8 +1445,12 @@ async function delChat(id){
     await fetch(`/api/chats/${id}`,{method:'DELETE'});
     await refreshChats();
     if(curChat===id){
-      curChat=null;
-      document.getElementById('topTitle').textContent='gyro';
+      goHome();
+    } else if(_activeFolderView){
+      // Re-render folder view to update the list
+      openFolderView(_activeFolderView);
+    } else if(!curChat){
+      // On homepage — refresh the widget
       loadWelcome(true);
     }
     updateComposerBusyUI();
@@ -1466,13 +1591,9 @@ async function selectModel(id,label,provider,skipUpdate=false){
 
 function refreshModeMenuUI(){
   const thinkItem=document.getElementById('thinkMenuItem');
-  const researchItem=document.getElementById('researchMenuItem');
   const thinkBadge=document.getElementById('thinkMenuBadge');
-  const researchBadge=document.getElementById('researchMenuBadge');
   if(thinkItem)thinkItem.classList.toggle('active',thinkingEnabled);
-  if(researchItem)researchItem.classList.toggle('active',researchEnabled);
   if(thinkBadge)thinkBadge.textContent=thinkingEnabled?'ON':'OFF';
-  if(researchBadge)researchBadge.textContent=researchEnabled?'ON':'OFF';
 }
 
 function toggleThinking(force){
@@ -1579,31 +1700,39 @@ async function pasteFromClipboard(){
   }catch(e){showToast('Clipboard access denied — try Ctrl+V instead','info')}
 }
 
-let activeTools=[];
+let activeTools=new Set();
 
 function activateTool(tool){
-  const input=document.getElementById('msgInput');
-  const toolPrefixes={
-    canvas:'[Use Canvas] ',
-    search:'[Search the web] ',
-    mindmap:'[Create a mind map] ',
-    research:'[Deep Research] ',
-    summarize:'[Summarize] '
-  };
   if(tool==='code'||tool==='imagegen'){showToast('Coming soon!','info');return;}
-  const prefix=toolPrefixes[tool]||'';
-  if(!input.value.startsWith(prefix)){
-    input.value=prefix+input.value;
+  if(activeTools.has(tool)){
+    activeTools.delete(tool);
+    showToast(`${tool.charAt(0).toUpperCase()+tool.slice(1)} tool deactivated`,'info');
+  } else {
+    activeTools.add(tool);
+    showToast(`${tool.charAt(0).toUpperCase()+tool.slice(1)} tool activated`,'success');
   }
-  input.focus();
-  autoResize(input);
-  showToast(`${tool.charAt(0).toUpperCase()+tool.slice(1)} tool activated`,'success');
+  renderToolBadges();
+  document.getElementById('msgInput').focus();
+}
+
+function renderToolBadges(){
+  let wrap=document.getElementById('toolBadges');
+  if(!wrap){
+    const inputRow=document.querySelector('.input-row');
+    if(!inputRow)return;
+    wrap=document.createElement('div');
+    wrap.id='toolBadges';
+    wrap.className='tool-badges';
+    inputRow.parentElement.insertBefore(wrap,inputRow);
+  }
+  if(!activeTools.size){wrap.style.display='none';return;}
+  wrap.style.display='flex';
+  const names={canvas:'Canvas',search:'Web Search',mindmap:'Mind Map',research:'Deep Research',summarize:'Summarize'};
+  wrap.innerHTML=[...activeTools].map(t=>`<span class="tool-badge" onclick="activateTool('${t}')">${names[t]||t} <span class="tb-x">×</span></span>`).join('');
 }
 
 function toggleResearch(){
-  researchEnabled=!researchEnabled;
-  refreshModeMenuUI();
-  showToast(`Research mode ${researchEnabled?'enabled':'disabled'}.`,researchEnabled?'success':'info');
+  activateTool('research');
 }
 
 function openResearchModal(){
@@ -1669,7 +1798,7 @@ async function confirmResearchPlan(){
   const input=document.getElementById('msgInput');
   input.value=_researchPlanData.query;
   deepResearchDepth=_researchPlanData.depth;
-  if(!researchEnabled) toggleResearch();
+  if(!activeTools.has('research')) activateTool('research');
   // Pass the plan along through a temporary global
   window._pendingResearchPlan=planText;
   await sendMessage();
@@ -1683,8 +1812,8 @@ async function startResearchFromModal(){
   closeM('researchModal');
   const input=document.getElementById('msgInput');
   input.value=q;
-  if(!researchEnabled){
-    toggleResearch();
+  if(!activeTools.has('research')){
+    activateTool('research');
   }
   await sendMessage();
 }
@@ -1733,8 +1862,7 @@ async function runDeepResearch(query,contentEl,area,planText){
           <span class="research-activity-dot"></span>
           <span>${esc(lastMessage)}</span>
         </div>
-      </div>
-      <button class="research-stop-btn" onclick="cancelCurrentResearch()" title="Stop research">■ Stop</button>`;
+      </div>`;
     area.scrollTop=area.scrollHeight;
   };
 
@@ -1770,6 +1898,8 @@ async function runDeepResearch(query,contentEl,area,planText){
 
       if(evt.type==='job_id'){
         _currentResearchJobId=evt.job_id;
+      }else if(evt.type==='heartbeat'){
+        // Keep-alive, ignore
       }else if(evt.type==='progress'){
         lastMessage=evt.message||'Working...';
         if(typeof evt.pct==='number') currentPct=evt.pct;
@@ -1813,7 +1943,7 @@ async function runDeepResearch(query,contentEl,area,planText){
 function regenerateResearch(query){
   const input=document.getElementById('msgInput');
   input.value=query;
-  if(!researchEnabled) toggleResearch();
+  if(!activeTools.has('research')) activateTool('research');
   sendMessage();
 }
 
@@ -1861,7 +1991,7 @@ async function startInlineResearchPlan(query,depth){
     _inlineResearchState.planText=planText;
     _inlineResearchState.angles=angles;
 
-    // Show plan preview in chat + open in canvas
+    // Show plan preview in chat with expandable card
     const previewHtml=angles.map((a,i)=>`<div class="ri-angle"><span class="ri-angle-num">${i+1}</span>${esc(a)}</div>`).join('');
     contentEl.innerHTML=`
       <div class="ri-card">
@@ -1870,17 +2000,17 @@ async function startInlineResearchPlan(query,depth){
           <span class="ri-depth">${esc(depth)}</span>
         </div>
         <div class="ri-query">${esc(query)}</div>
-        <div class="ri-angles">${previewHtml}</div>
+        <button class="ri-toggle" id="riTogglePlan" onclick="toggleResearchPlan()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          <span>${angles.length} research angles</span>
+        </button>
+        <div class="ri-angles" id="riAnglesWrap">${previewHtml}</div>
         <div class="ri-actions">
-          <button class="research-btn-back" onclick="cancelInlineResearch()">Cancel</button>
-          <button class="ri-btn-canvas" onclick="editResearchPlanInCanvas()">✏️ Edit in Canvas</button>
-          <button class="research-btn-confirm" onclick="confirmInlineResearchPlan()">Confirm & Start Research →</button>
+          <button class="ri-btn-cancel" onclick="cancelInlineResearch()" title="Cancel">✕</button>
+          <button class="ri-btn-confirm" onclick="confirmInlineResearchPlan()" title="Confirm & Start">✓</button>
         </div>
       </div>`;
     area.scrollTop=area.scrollHeight;
-
-    // Open plan in canvas for editing
-    openCanvas(planText,'Research Plan',false,{sourcePath:'__research_plan__',openPanel:true});
   }catch(e){
     contentEl.innerHTML=`
       <div class="ri-card ri-card-error">
@@ -1894,19 +2024,22 @@ async function startInlineResearchPlan(query,depth){
   }
 }
 
+function toggleResearchPlan(){
+  const wrap=document.getElementById('riAnglesWrap');
+  const btn=document.getElementById('riTogglePlan');
+  if(!wrap||!btn)return;
+  wrap.classList.toggle('expanded');
+  btn.classList.toggle('expanded');
+}
+
 function editResearchPlanInCanvas(){
   if(!_inlineResearchState)return;
-  const tab=canvasTabs.find(t=>t.sourcePath==='__research_plan__');
-  if(tab){
-    switchCanvasTab(tab.id);
-  }else{
-    openCanvas(_inlineResearchState.planText||'','Research Plan',false,{sourcePath:'__research_plan__',openPanel:true});
-  }
+  openCanvas(_inlineResearchState.planText||'','Research Plan',false,{sourcePath:'__research_plan__',openPanel:true});
 }
 
 async function confirmInlineResearchPlan(){
   if(!_inlineResearchState)return;
-  // Read plan from canvas (may have been edited)
+  // Use stored plan text (user can edit via canvas if they opened it)
   const tab=canvasTabs.find(t=>t.sourcePath==='__research_plan__');
   let planText=tab?tab.content:(_inlineResearchState.planText||'');
   if(!planText.trim()){showToast('Plan cannot be empty.','info');return;}
@@ -2040,6 +2173,8 @@ function fmtLive(raw){
   if(!raw)return'<span class="stream-cursor"></span>';
   // Strip meta blocks (thinking/choices tags during stream)
   let t=stripMetaBlocks(raw);
+  // Strip <<<CONTINUE>>> tag from live display
+  t=t.replace(/<<<CONTINUE>>>/g,'');
   if(!t)return'<span class="stream-cursor"></span>';
   let html=t;
   // Escape HTML entities
@@ -2050,6 +2185,12 @@ function fmtLive(raw){
   if(/&lt;&lt;&lt;DEEP_RESEARCH/i.test(html)){
     html=html.replace(/&lt;&lt;&lt;DEEP_RESEARCH[\s\S]*$/,'');
   }
+  // Strip FILE_CREATE / FILE_UPDATE / MEMORY_ADD / IMAGE_SEARCH / CONTINUE tags from live display
+  html=html.replace(/&lt;&lt;&lt;(?:FILE_CREATE|FILE_UPDATE):[\s\S]*?&lt;&lt;&lt;END_FILE&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;(?:FILE_CREATE|FILE_UPDATE):[\s\S]*$/,''); // unclosed
+  html=html.replace(/&lt;&lt;&lt;MEMORY_ADD:[^&]*?&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;IMAGE_SEARCH:[^&]*?&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){
     html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating mind map...</div>');
@@ -2067,6 +2208,10 @@ function fmtLive(raw){
     html=html.replace(/```\w*\n[^]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Writing '+esc(langLabel)+' artifact...</div>');
   }
 
+  // Completed mermaid blocks — show placeholder until fmt() renders the real diagram
+  html=html.replace(/```mermaid\n[\s\S]*?```/g,'<div class="stream-placeholder"><span class="sp-icon">🗺️</span> Mind map ready — rendering...</div>');
+  // Completed todolist blocks — show placeholder until fmt() renders the interactive list
+  html=html.replace(/```todolist\n[\s\S]*?```/g,'<div class="stream-placeholder"><span class="sp-icon">✅</span> Task list ready — rendering...</div>');
   // Completed code blocks: render styled
   html=html.replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>{
     return '<pre class="stream-code"><code>'+c+'</code></pre>';
@@ -2113,32 +2258,41 @@ function registerArtifactsFromReply(reply,filesModified=[]){
   const ids=[];
   let m=null; let idx=1;
   const codeRe=/```(\w*)\n([\s\S]*?)```/g;
+  const codeBlocks=[];
   while((m=codeRe.exec(reply||''))!==null){
     const lang=(m[1]||'text').toLowerCase();
-    if(lang==='todolist')continue;
+    if(lang==='todolist'||lang==='mermaid')continue;
     const content=m[2]||'';
-    const title=lang==='mermaid'?inferMindMapTitle(content,idx++):`${(lang||'code').toUpperCase()} snippet ${idx++}`;
-    ids.push(registerArtifact({title,content,isCode:lang!=='text'&&lang!=='md'&&lang!=='markdown',path:''}));
+    const isCode=lang!=='text'&&lang!=='md'&&lang!=='markdown';
+    // Try to detect a filename from the line before the code block
+    const before=reply.substring(0,m.index).trim();
+    const lastLine=before.split('\n').pop().trim();
+    let title='';
+    const fnMatch=lastLine.match(/`?(\w[\w.-]*\.\w+)`?/);
+    if(fnMatch)title=fnMatch[1];
+    if(!title){
+      const extMap={python:'script.py',py:'script.py',javascript:'script.js',js:'script.js',html:'page.html',css:'styles.css',java:'Main.java',cpp:'main.cpp',c:'main.c',typescript:'script.ts',ts:'script.ts',rust:'main.rs',go:'main.go',ruby:'script.rb',php:'script.php',swift:'main.swift',kotlin:'Main.kt',sql:'query.sql',bash:'script.sh',sh:'script.sh',json:'data.json',yaml:'config.yaml',yml:'config.yml',xml:'data.xml',toml:'config.toml'};
+      title=extMap[lang]||`snippet_${idx}.${lang||'txt'}`;
+    }
+    idx++;
+    ids.push(registerArtifact({title,content,isCode,path:''}));
+    if(isCode)codeBlocks.push({title,content,lang});
   }
   for(const f of(filesModified||[])){
     if(!f?.path)continue;
     ids.push(registerArtifact({title:f.path.split('/').pop()||f.path,path:f.path,content:'',isCode:true,action:f.action||'updated'}));
   }
+  // Auto-open first code block in canvas
+  if(codeBlocks.length>0&&!_suppressCanvasAutoOpen){
+    const first=codeBlocks[0];
+    setTimeout(()=>openCanvas(first.content,first.title,true,{openPanel:true}),100);
+  }
   return [...new Set(ids)];
 }
 
 function renderArtifactCards(ids,state='ready'){
-  if(!ids?.length)return '';
-  return `<div class="artifact-grid">${ids.map(id=>{
-    const a=artifactStore.find(x=>x.id===id);
-    if(!a)return '';
-    const name=esc(a.title||a.path||'Artifact');
-    const sub=esc(a.path||a.action||'Generated file');
-    if(state!=='ready'){
-      return `<div class="artifact-card disabled"><div class="meta"><div class="name">${name}</div><div class="sub">${sub}</div></div><span class="artifact-arrow">…</span></div>`;
-    }
-    return `<div class="artifact-card clickable" role="button" tabindex="0" onclick="openArtifact('${a.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openArtifact('${a.id}')}" title="Open in Canvas"><div class="meta"><div class="name">${name}</div><div class="sub">${sub}</div></div><span class="artifact-arrow">↗</span></div>`;
-  }).join('')}</div>`;
+  // No longer rendering artifact cards — canvas auto-opens instead
+  return '';
 }
 
 async function ensureArtifactContent(artifact){
@@ -2211,19 +2365,16 @@ async function sendMessage(){
   pendingFiles=[];renderPF();
   for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
-  // ── Research when explicitly toggled ──
-  let useResearch=researchEnabled;
-  if(useResearch){
-    researchEnabled=false;
-    refreshModeMenuUI();
-  }
+  // ── Research when explicitly activated via tool ──
+  let useResearch=activeTools.has('research');
 
   if(useResearch){
+    activeTools.delete('research');
+    renderToolBadges();
     if(files.length){showToast('Deep Research ignores attachments for now.','info');}
     const planText=window._pendingResearchPlan||null;
     window._pendingResearchPlan=null;
     if(!planText){
-      // No plan yet — show inline plan card in chat + open in canvas
       startInlineResearchPlan(text,deepResearchDepth);
       return;
     }
@@ -2259,8 +2410,27 @@ async function sendMessage(){
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
 
   try{
+    // Collect active tool names and clear them for next message
+    const toolsForMsg=[...activeTools];
+    activeTools.clear();
+    renderToolBadges();
+
+    // If canvas is open, include canvas context for select-to-edit
+    let messageToSend=text;
+    const cCtx=getCanvasContext();
+    if(cCtx){
+      let canvasPrefix='';
+      if(cCtx.selectedText){
+        canvasPrefix=`[CANVAS CONTEXT — "${cCtx.title}"]\nThe user has selected this portion of the canvas:\n<<<SELECTED>>>\n${cCtx.selectedText}\n<<<END_SELECTED>>>\n\nFull canvas content:\n${cCtx.fullContent}\n\n[USER REQUEST]\n`;
+        canvasSelection=null; // clear after use
+      }else{
+        canvasPrefix=`[CANVAS CONTEXT — "${cCtx.title}"]\nThe canvas currently contains:\n${cCtx.fullContent}\n\n[USER REQUEST]\n`;
+      }
+      messageToSend=canvasPrefix+text;
+    }
+
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:text,files,thinking:thinkingEnabled,research_hint:useResearch}),signal:controller.signal});
+      body:JSON.stringify({message:messageToSend,files,thinking:thinkingEnabled,active_tools:toolsForMsg}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -2410,6 +2580,12 @@ async function sendMessage(){
               choiceBlocks.push({question:(choiceBlockMatch[1]||'').trim(),choices:choiceBlockMatch[2].trim().split('\n').filter(c=>c.trim())});
             }
             displayReply=displayReply.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
+            // Detect <<<CONTINUE>>> tag — AI wants to chain another message
+            let shouldContinue=false;
+            if(displayReply.includes('<<<CONTINUE>>>')){
+              shouldContinue=true;
+              displayReply=displayReply.replace(/<<<CONTINUE>>>/g,'').trim();
+            }
             finalHTML+=fmt(displayReply);
             for(const cb of choiceBlocks){
               if(cb.choices.length)finalHTML+=renderChoiceBlock(cb.choices,cb.question);
@@ -2417,7 +2593,7 @@ async function sendMessage(){
             const artifactIds=registerArtifactsFromReply(displayReply,data.files||[]);
             if(data.files?.length){
               finalHTML+='<div class="fops">';
-              for(const f of data.files)finalHTML+=`<div class="fo">● ${f.action}: ${esc(f.path)}</div>`;
+              for(const f of data.files)finalHTML+=`<div class="fo"><a href="/api/files/download?path=${encodeURIComponent(f.path)}" target="_blank" class="fo-link">⬇ ${f.action}: ${esc(f.path)}</a></div>`;
               finalHTML+='</div>';
             }
             finalHTML+=renderArtifactCards(artifactIds,'ready');
@@ -2461,6 +2637,14 @@ async function sendMessage(){
             }
             refreshChats();
             setStatus('Done. Ask a follow-up or start something new.');
+            // Auto-continue if AI signaled <<<CONTINUE>>>
+            if(shouldContinue){
+              setTimeout(()=>{
+                const inp=document.getElementById('msgInput');
+                inp.value='Continue.';
+                sendMessage();
+              },600);
+            }
             // If user navigated away and back, reload the chat so they see the response
             if(curChat===targetChatId&&!msgDiv.isConnected){
               openChat(targetChatId);
@@ -2532,7 +2716,7 @@ function addMsg(role,text,files,extra={}){
   }
   let artifactIds=[];
   if(role==='kairo')artifactIds=registerArtifactsFromReply(displayText,files||[]);
-  if(files?.length){html+='<div class="fops">';for(const f of files)html+=`<div class="fo">● ${f.action}: ${esc(f.path)}</div>`;html+='</div>'}
+  if(files?.length){html+='<div class="fops">';for(const f of files)html+=`<div class="fo"><a href="/api/files/download?path=${encodeURIComponent(f.path)}" target="_blank" class="fo-link">⬇ ${f.action}: ${esc(f.path)}</a></div>`;html+='</div>'}
   if(artifactIds.length)html+=renderArtifactCards(artifactIds,'ready');
   if(extra.memory_added?.length)html+=`<div class="mops">Remembered: ${extra.memory_added.map(esc).join('; ')}</div>`;
   if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
@@ -2812,7 +2996,9 @@ function fmt(text){
     const mindId='mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
     const title=inferMindMapTitle(restored,blocks.length+1);
     mindMapStore.set(mindId,{title,source:restored});
-    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button type="button" onclick="openMindMapCanvas('${mindId}')">Open in Canvas</button><a class="mm-download" href="#" onclick="return false">Download PNG</a></div><pre class="mermaid">${restored}</pre></div>`);
+    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><a class="mm-download" href="#" onclick="return false">Download PNG</a></div><pre class="mermaid">${restored}</pre></div>`);
+    // Auto-open in canvas so user can interact with it
+    if(!_suppressCanvasAutoOpen) setTimeout(()=>openMindMapCanvas(mindId),150);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   // Interactive todo lists
@@ -2833,7 +3019,8 @@ function fmt(text){
   t=t.replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>{
     const bid=_canvasBlockId++;
     window['_cblk'+bid]=c;
-    blocks.push(`<pre style="background:var(--bg-deep);padding:14px 16px;border-radius:var(--r-sm);overflow-x:auto;font-family:var(--mono);font-size:11.5px;margin:10px 0;border:1px solid var(--border);line-height:1.65"><code>${c}</code></pre><button class="canvas-btn" onclick="openCanvas(window['_cblk${bid}'],'${(l||'Code').replace(/'/g,'')}',true)">✏️ Edit in Canvas</button>`);
+    window['_cblkLang'+bid]=l||'code';
+    blocks.push(`<pre style="background:var(--bg-deep);padding:14px 16px;border-radius:var(--r-sm);overflow-x:auto;font-family:var(--mono);font-size:11.5px;margin:10px 0;border:1px solid var(--border);line-height:1.65"><code>${c}</code></pre>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   // Markdown images: ![alt](url)
@@ -2904,7 +3091,6 @@ async function openSettings(){
     light.style.cssText=(theme==='light'?activeStyle:inactiveStyle)+'padding:7px 14px;font-size:11px;font-weight:500;border:none;cursor:pointer;transition:all .2s;';
   }
   if(curUser)document.getElementById('profileName').value=curUser.name||'';
-  renderCalendarStatus();
   openMemory();
 }
 
@@ -2948,93 +3134,6 @@ async function saveName(){
   await fetch('/api/auth/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
   curUser.name=name;updateUserUI();
   showToast('Profile updated.','success');
-}
-
-function loadCalendarState(){
-  try{
-    const raw=localStorage.getItem(CALENDAR_STATE_KEY);
-    if(!raw)return;
-    const parsed=JSON.parse(raw);
-    calendarEvents=Array.isArray(parsed.events)?parsed.events:[];
-  }catch{
-    calendarEvents=[];
-  }
-}
-
-function saveCalendarState(){
-  const safe={events:(calendarEvents||[]).slice(0,8)};
-  localStorage.setItem(CALENDAR_STATE_KEY,JSON.stringify(safe));
-}
-
-function renderCalendarStatus(){
-  const statusEl=document.getElementById('calendarStatus');
-  const cBtn=document.getElementById('calendarConnectBtn');
-  const dBtn=document.getElementById('calendarDisconnectBtn');
-  if(statusEl){
-    if(calendarToken)statusEl.textContent=`Calendar connected. Showing ${calendarEvents.length} upcoming events.`;
-    else if(calendarEvents.length)statusEl.textContent=`Calendar events cached (${calendarEvents.length}). Reconnect to refresh.`;
-    else statusEl.textContent='Calendar not connected.';
-  }
-  if(cBtn)cBtn.disabled=!!calendarToken;
-  if(dBtn)dBtn.disabled=!calendarToken;
-}
-
-function connectGoogleCalendar(){
-  ensureOAuthConfigLoaded().then(()=>{
-    if(!googleClientId){showToast('Google client ID is missing.','error');return;}
-    if(!window.google?.accounts?.oauth2){showToast('Google OAuth is not available yet.','error');return;}
-    if(!calendarTokenClient){
-      calendarTokenClient=google.accounts.oauth2.initTokenClient({
-        client_id:googleClientId,
-        scope:'https://www.googleapis.com/auth/calendar.readonly',
-        callback:(resp)=>{
-          if(resp?.error){showToast('Calendar connect failed.','error');return;}
-          calendarToken=resp.access_token||'';
-          renderCalendarStatus();
-          refreshGoogleCalendarEvents();
-        }
-      });
-    }
-    calendarTokenClient.requestAccessToken({prompt:'consent'});
-  });
-}
-
-function disconnectGoogleCalendar(){
-  calendarToken='';
-  calendarEvents=[];
-  saveCalendarState();
-  renderCalendarStatus();
-  loadWelcome(true);
-  showToast('Calendar disconnected.','info');
-}
-
-async function refreshGoogleCalendarEvents(){
-  if(!calendarToken){showToast('Connect Google Calendar first.','info');return;}
-  try{
-    const timeMin=encodeURIComponent(new Date().toISOString());
-    const url=`https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=8&timeMin=${timeMin}`;
-    const r=await fetch(url,{headers:{Authorization:`Bearer ${calendarToken}`}});
-    const d=await r.json();
-    if(!r.ok){
-      showToast(d?.error?.message||'Could not load calendar events.','error');
-      return;
-    }
-    calendarEvents=(d.items||[]).map(ev=>{
-      const start=ev.start?.dateTime||ev.start?.date||'';
-      let when='Upcoming';
-      if(start){
-        const dt=new Date(start);
-        if(!Number.isNaN(dt.getTime()))when=dt.toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-      }
-      return {summary:ev.summary||'Untitled event',when};
-    });
-    saveCalendarState();
-    renderCalendarStatus();
-    if(!curChat)loadWelcome(true);
-    showToast('Calendar events updated.','success');
-  }catch{
-    showToast('Could not load calendar events.','error');
-  }
 }
 
 // ─── Memory ───────────────────────────────────────
@@ -3087,7 +3186,6 @@ async function resetData(){
     localStorage.removeItem(ONB_SKIP_KEY);
     localStorage.removeItem(ONB_NO_REMIND_KEY);
     localStorage.removeItem(ONB_DISMISS_KEY);
-    localStorage.removeItem(CALENDAR_STATE_KEY);
     localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
     localStorage.removeItem(CHAT_CACHE_KEY);
     try{localStorage.removeItem('gyro_productivity');}catch{}
@@ -3357,11 +3455,20 @@ async function doGuestAuth(){}
 
 // ─── Canvas ───────────────────────────────────────
 let canvasIsCode=false;
+let canvasSelection=null; // {start,end,text} from user selection in canvas editor
+let _suppressCanvasAutoOpen=false; // true during history load to prevent auto-opening
 
 function renderCanvasTabs(){
   const tabsEl=document.getElementById('canvasTabs');
   if(!tabsEl)return;
   tabsEl.innerHTML=canvasTabs.map(t=>`<button class="canvas-tab ${t.id===activeCanvasTabId?'active':''}" onclick="switchCanvasTab('${t.id}')">${esc(t.title||'Document')}</button>`).join('');
+}
+
+function detectCanvasLang(title){
+  if(!title)return '';
+  const ext=(title.match(/\.(\w+)$/)||[])[1];
+  if(ext)return ext.toLowerCase();
+  return '';
 }
 
 function switchCanvasTab(id){
@@ -3371,17 +3478,24 @@ function switchCanvasTab(id){
   canvasIsCode=!!tab.isCode;
   const panel=document.getElementById('canvasPanel');
   const editor=document.getElementById('canvasEditor');
-  const modeEl=document.getElementById('canvasMode');
+  const langEl=document.getElementById('canvasLang');
   const titleEl=document.getElementById('canvasTitle');
+  const runBtn=document.getElementById('canvasRunBtn');
   editor.value=tab.content||'';
   editor.className=tab.isCode?'canvas-editor code-mode':'canvas-editor';
-  modeEl.textContent=tab.isCode?'CODE':'PROSE';
+  const lang=detectCanvasLang(tab.title);
+  langEl.textContent=lang||( tab.isCode?'code':'');
   titleEl.textContent=tab.title||'Document';
+  // Show run button for Python and HTML
+  const runnable=['py','python','html','htm'].includes(lang);
+  runBtn.style.display=runnable?'flex':'none';
   renderCanvasTabs();
   updateCanvasStats();
+  closeCanvasOutput();
   panel.classList.add('open');
   document.getElementById('canvasResizer').classList.add('visible');
   editor.focus();
+  canvasSelection=null;
   editor.oninput=()=>{
     tab.content=editor.value;
     updateCanvasStats();
@@ -3418,6 +3532,7 @@ function closeCanvas(){
   panel.classList.remove('open');
   panel.style.width='';
   resizer.classList.remove('visible');
+  closeCanvasOutput();
 }
 
 // ─── Canvas drag-to-resize ────────────────────────
@@ -3482,6 +3597,36 @@ function closeCanvas(){
   });
 })();
 
+// ─── Canvas select-to-edit ────────────────────────
+(function initCanvasSelectToEdit(){
+  const editor=document.getElementById('canvasEditor');
+  if(!editor)return;
+  let hintEl=null;
+  function ensureHint(){
+    if(hintEl)return hintEl;
+    hintEl=document.createElement('div');
+    hintEl.className='canvas-selection-hint';
+    hintEl.textContent='Type in chat to edit selection';
+    editor.parentElement.appendChild(hintEl);
+    return hintEl;
+  }
+  editor.addEventListener('mouseup',()=>{
+    const s=editor.selectionStart,e=editor.selectionEnd;
+    if(s!==e){
+      canvasSelection={start:s,end:e,text:editor.value.substring(s,e)};
+      const hint=ensureHint();
+      hint.classList.add('visible');
+      setTimeout(()=>hint.classList.remove('visible'),2500);
+    }else{
+      canvasSelection=null;
+    }
+  });
+  editor.addEventListener('keyup',()=>{
+    const s=editor.selectionStart,e=editor.selectionEnd;
+    if(s===e)canvasSelection=null;
+  });
+})();
+
 function copyCanvas(){
   const text=document.getElementById('canvasEditor').value;
   navigator.clipboard.writeText(text).then(()=>showToast('Copied to clipboard','success'));
@@ -3489,11 +3634,12 @@ function copyCanvas(){
 
 function downloadCanvas(){
   const text=document.getElementById('canvasEditor').value;
-  const ext=canvasIsCode?'.txt':'.md';
-  const title=(document.getElementById('canvasTitle').textContent||'document').replace(/[^a-zA-Z0-9]/g,'_');
+  const rawTitle=document.getElementById('canvasTitle').textContent||'document';
+  const hasExt=/\.\w+$/.test(rawTitle);
+  const fname=hasExt?rawTitle:(rawTitle.replace(/[^a-zA-Z0-9._-]/g,'_')+(canvasIsCode?'.txt':'.md'));
   const blob=new Blob([text],{type:'text/plain'});
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);a.download=title+ext;a.click();
+  a.href=URL.createObjectURL(blob);a.download=fname;a.click();
   URL.revokeObjectURL(a.href);
   showToast('Downloaded','success');
 }
@@ -3506,46 +3652,114 @@ function updateCanvasStats(){
   document.getElementById('canvasChars').textContent=words+' words · '+text.length+' chars';
 }
 
-async function canvasAiEdit(){
-  const input=document.getElementById('canvasAiInput');
-  const instruction=input.value.trim();
-  if(!instruction)return;
-  const content=document.getElementById('canvasEditor').value;
-  const language=canvasIsCode?(document.getElementById('canvasMode').textContent||'CODE'):'text';
+// ─── Canvas presets ───────────────────────────────
+function toggleCanvasPresets(){
+  const popup=document.getElementById('canvasPresetsPopup');
+  popup.classList.toggle('open');
+  if(popup.classList.contains('open')){
+    const close=e=>{if(!popup.contains(e.target)&&e.target.id!=='canvasPresetsBtn'){popup.classList.remove('open');document.removeEventListener('click',close);}};
+    setTimeout(()=>document.addEventListener('click',close),0);
+  }
+}
+
+async function canvasPresetEdit(type){
+  document.getElementById('canvasPresetsPopup').classList.remove('open');
+  const editor=document.getElementById('canvasEditor');
+  const content=editor.value;
+  if(!content.trim()){showToast('Canvas is empty','info');return;}
+  const presetMap={
+    shorter:'Make this significantly shorter and more concise while keeping key information.',
+    longer:'Expand this with more detail, examples, and explanation.',
+    emojis:'Add relevant emojis throughout to make it more expressive and fun.',
+    professional:'Rewrite in a professional, polished tone suitable for business communication.',
+    casual:'Rewrite in a casual, conversational tone.',
+    fix_grammar:'Fix all grammar, spelling, and punctuation errors.',
+    simplify:'Simplify the language to make it easier to understand.',
+    bullet_points:'Convert this into a well-organized bullet point format.',
+    add_comments:'Add helpful code comments explaining what each section does.',
+    optimize:'Optimize this code for better performance and cleaner structure.'
+  };
+  const instruction=presetMap[type]||type;
+  const lang=document.getElementById('canvasLang').textContent||'text';
   document.getElementById('canvasStatus').textContent='AI is editing...';
-  input.value='';
   try{
-    const r=await fetch('/api/canvas/apply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content,instruction,language})});
+    const r=await apiFetch('/api/canvas/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content,instruction,language:lang})});
     const d=await r.json();
-    if(d.error){
-      document.getElementById('canvasStatus').textContent='Edit failed: '+d.error;
-      showToast(d.error,'error');return;
-    }
-    document.getElementById('canvasEditor').value=d.content||'';
+    if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');return;}
+    editor.value=d.content||'';
+    const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
+    if(tab)tab.content=editor.value;
     updateCanvasStats();
     document.getElementById('canvasStatus').textContent='Edit applied';
-    showToast('Canvas updated by AI','success');
+    showToast('Canvas updated','success');
   }catch(e){
     document.getElementById('canvasStatus').textContent='Edit failed';
     showToast('AI edit failed','error');
   }
 }
 
-function sendCanvasToAI(){
-  const content=document.getElementById('canvasEditor').value;
-  if(!content.trim()){showToast('Canvas is empty','info');return;}
-  const input=document.getElementById('msgInput');
-  input.value='Here is my current canvas document. Please review and improve it:\n\n```\n'+content+'\n```';
-  autoResize(input);input.focus();
-  showToast('Canvas content added to chat','info');
+// ─── Canvas run / preview ─────────────────────────
+function closeCanvasOutput(){
+  const el=document.getElementById('canvasRunOutput');
+  if(el)el.style.display='none';
+  const body=document.getElementById('canvasRunBody');
+  if(body)body.innerHTML='';
+}
+
+async function runCanvasCode(){
+  const code=document.getElementById('canvasEditor').value;
+  if(!code.trim()){showToast('Nothing to run','info');return;}
+  const lang=detectCanvasLang(document.getElementById('canvasTitle').textContent||'');
+  const outputEl=document.getElementById('canvasRunOutput');
+  const bodyEl=document.getElementById('canvasRunBody');
+  outputEl.style.display='flex';
+  bodyEl.innerHTML='<span style="color:var(--text-muted)">Running...</span>';
+
+  if(['html','htm'].includes(lang)){
+    // HTML preview via sandboxed iframe
+    const iframe=document.createElement('iframe');
+    iframe.sandbox='allow-scripts';
+    iframe.style.cssText='width:100%;height:100%;border:none;border-radius:var(--r-sm);background:#fff;min-height:220px';
+    bodyEl.innerHTML='';
+    bodyEl.appendChild(iframe);
+    iframe.srcdoc=code;
+    return;
+  }
+
+  if(['py','python'].includes(lang)){
+    try{
+      const r=await apiFetch('/api/canvas/run',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({code,language:'python'})});
+      const d=await r.json();
+      if(d.error){bodyEl.textContent='Error: '+d.error;return;}
+      bodyEl.textContent=d.output||'(no output)';
+    }catch(e){
+      bodyEl.textContent='Failed to run: '+e.message;
+    }
+    return;
+  }
+  bodyEl.textContent='Run not supported for this file type.';
+}
+
+// ─── Canvas: get selection context for main chat ──
+function getCanvasContext(){
+  const panel=document.getElementById('canvasPanel');
+  if(!panel||!panel.classList.contains('open'))return null;
+  const editor=document.getElementById('canvasEditor');
+  const title=document.getElementById('canvasTitle').textContent||'Document';
+  const content=editor.value;
+  if(!content.trim())return null;
+  if(canvasSelection&&canvasSelection.text){
+    return {title,fullContent:content,selectedText:canvasSelection.text,selStart:canvasSelection.start,selEnd:canvasSelection.end};
+  }
+  return {title,fullContent:content,selectedText:null,selStart:null,selEnd:null};
 }
 
 function openMindMapCanvas(mindId){
   const item=mindMapStore.get(mindId);
   if(!item)return;
-  const wrapped=`\`\`\`mermaid\n${item.source}\n\`\`\``;
-  openCanvas(wrapped,item.title,true,{openPanel:true});
+  openCanvas(item.source,(item.title||'mindmap')+'.mmd',true,{openPanel:true});
 }
 
 function mermaidSvgToPngDataUrl(svgEl,scale=2){

@@ -18,6 +18,9 @@ serviceAccount.json
 .gyro_data/
 .gyro_history/
 .gyro_session_secret
+.nexus_data/
+.nexus_history/
+.nexus_session_secret
 
 # Build artifacts
 dist/
