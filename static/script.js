@@ -3044,13 +3044,19 @@ function fmt(text){
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   // Interactive todo lists
+  let _todoBlockIdx=0;
   t=t.replace(/```todolist\n([\s\S]*?)```/g,(_,c)=>{
     const raw=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').trim();
     try{
       const items=JSON.parse(raw);
       if(Array.isArray(items)){
-        const listId='tl_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
+        const chatPrefix=curChat||'nochat';
+        const listId='tl_'+chatPrefix+'_'+(_todoBlockIdx++);
+        // Remove old list with same ID to prevent duplicates
+        const oldEl=document.querySelector(`.chat-todo[data-list-id="${listId}"]`);
+        if(oldEl)oldEl.remove();
         chatTodoStore.set(listId,items.map((it,i)=>({id:listId+'_'+i,text:it.text||'',done:!!it.done,subtasks:(it.subtasks||[]).map((sub,j)=>({id:listId+'_'+i+'_s'+j,text:sub.text||'',done:!!sub.done}))})));
+        syncChatTodosToStorage(listId);
         blocks.push(renderChatTodoList(listId));
         return `%%%BLOCK${blocks.length-1}%%%`;
       }

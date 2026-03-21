@@ -906,6 +906,10 @@ body.light .chat-area::before{
   width:100%;
   animation:gridIn .5s var(--ease-out) .3s both;
 }
+/* Single widget: center and take full width */
+.wl-grid:has(> :only-child){grid-template-columns:1fr}
+/* Two widgets: split evenly */
+.wl-grid:has(> :nth-child(2)):not(:has(> :nth-child(3))){grid-template-columns:repeat(2,1fr)}
 @keyframes gridIn{
   from{opacity:0;transform:translateY(14px)}
   to{opacity:1;transform:translateY(0)}
