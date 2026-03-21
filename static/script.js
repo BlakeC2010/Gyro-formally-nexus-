@@ -2685,8 +2685,28 @@ async function sendMessage(){
               }
             }
 
-            // ── AI-triggered deep research — disabled, research is handled silently ──
-            // research_trigger is no longer auto-started
+            // ── AI-triggered deep research ──
+            if(data.research_trigger&&!choiceBlocks.length){
+              // AI emitted <<<DEEP_RESEARCH: query>>> — launch the real pipeline
+              const rq=data.research_trigger;
+              if(canRender()){
+                contentEl.innerHTML=finalHTML;
+                if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
+              }
+              setChatRunning(targetChatId,false);
+              // Launch the deep research pipeline inline
+              setChatRunning(targetChatId,true,{type:'research'});
+              try{
+                await runDeepResearch(rq,contentEl,document.getElementById('chatArea'));
+                await refreshChats();
+              }catch(e){
+                contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Research failed.')}</div>`;
+                setStatus('Research failed.');
+              }finally{
+                setChatRunning(targetChatId,false);
+              }
+              return;
+            }
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';

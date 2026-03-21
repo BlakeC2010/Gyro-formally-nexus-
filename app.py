@@ -953,18 +953,13 @@ IMPORTANT: Always output the todolist block DIRECTLY in your response text for t
 ALSO: Always save the todo list to a file using <<<FILE_CREATE: notes/todos.md>>> (or an appropriate filename) so it persists across chats and shows up in the workspace. When updating an existing todo list, use <<<FILE_UPDATE: notes/todos.md>>> to keep it current. The file version should be a clean markdown checklist (e.g. "- [ ] Task" / "- [x] Done task"), NOT the JSON format.
 When the user adds items to an existing todo list, output the COMPLETE updated todolist block with ALL items (old + new), not just the new ones. This replaces the previous list in the chat.
 
-15. DEEP RESEARCH — When the [TOOL ACTIVE: DEEP RESEARCH] instruction is present OR the user asks for research/deep dive/in-depth analysis, treat it as a multi-step research project. Before diving in, ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks:
-- What specific aspects to focus on
-- Whether to include mind maps / visualizations
-- Whether to include images
-- What export format (just text, PDF via code execution, saved to file, etc.)
-- Depth level (overview vs. comprehensive deep-dive)
-Once the user answers, execute the research as a MULTI-STEP chain using <<<CONTINUE>>>:
-  Step 1: Write the research content (save to file with FILE_CREATE) → <<<CONTINUE>>>
-  Step 2: Find relevant images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>
-  Step 3: Build mind map(s) with ```mermaid mindmap → <<<CONTINUE>>>
-  Step 4: Generate PDF / final export with <<<CODE_EXECUTE: python>>> if requested
-Do NOT try to do all steps in one message. Chain them with <<<CONTINUE>>>.
+15. DEEP RESEARCH — You have a powerful automated research pipeline that performs REAL web searching, source analysis, cross-referencing, and report generation with PDF export.
+When the user asks for research/deep dive/in-depth analysis:
+a) Ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks (aspects to focus on, depth level, etc.)
+b) Once the user answers, trigger the pipeline with: <<<DEEP_RESEARCH: their research query>>>
+c) The system handles everything: web search, source reading, analysis, gap filling, cross-referencing, report writing, and PDF generation.
+DO NOT write research content yourself. DO NOT fake or simulate research. Just ask clarifying questions, then emit <<<DEEP_RESEARCH: query>>> to trigger the real pipeline.
+Your response after the user answers should be brief — acknowledge preferences and output the trigger tag.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
@@ -1317,20 +1312,16 @@ def _build_tool_instructions(active_tools):
         ),
         "research": (
             "[TOOL ACTIVE: DEEP RESEARCH]\n"
-            "The user wants a deep, thorough research response on their topic. "
+            "The user wants deep, thorough research. You have access to a powerful 10-step research pipeline that does REAL web searching, source analysis, cross-referencing, and report generation.\n"
             "FIRST: Ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks to tailor the output. For example:\n"
             "- What specific aspects or angles to focus on\n"
-            "- Whether to include mind maps and visualizations (```mermaid)\n"
-            "- Whether to include images (<<<IMAGE_SEARCH>>>)\n"
-            "- Export format: just in-chat text, PDF via code execution, or saved as a file\n"
             "- Depth level: quick overview vs. comprehensive deep-dive\n"
-            "Keep the questions conversational and relevant to their specific topic. "
-            "Once the user answers, execute as a MULTI-STEP chain using <<<CONTINUE>>>:\n"
-            "Step 1: Write the research content and save to file → <<<CONTINUE>>>\n"
-            "Step 2: Find images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>\n"
-            "Step 3: Create mind map(s) with ```mermaid → <<<CONTINUE>>>\n"
-            "Step 4: Generate PDF with <<<CODE_EXECUTE: python>>> if requested\n"
-            "Do NOT try to do everything in one message. Chain each step."
+            "Keep the questions conversational and relevant to their specific topic.\n"
+            "Once the user answers, trigger the REAL research pipeline by outputting:\n"
+            "<<<DEEP_RESEARCH: their research query here>>>\n"
+            "The system will then run automated multi-step research with web searching, source analysis, cross-referencing, and PDF generation.\n"
+            "DO NOT try to write the research yourself. DO NOT fake or simulate research content. Just trigger the pipeline with <<<DEEP_RESEARCH: query>>> and let the system handle it.\n"
+            "After asking clarifying questions and getting answers, your response should be brief — acknowledge the user's preferences and then emit the <<<DEEP_RESEARCH: query>>> tag. The pipeline handles everything else."
         ),
     }
     for tool in active_tools:
@@ -1373,8 +1364,6 @@ def prepare_chat_turn(chat, payload):
     active_tools = payload.get("active_tools", [])
     if not thinking and user_text:
         thinking = _detect_complex_query(user_text)
-    if not web_search and "search" in active_tools:
-        web_search = True
 
     # --- Auto-detect research intent and inject tool instructions ---
     if "research" not in active_tools and user_text:
@@ -1384,6 +1373,9 @@ def prepare_chat_turn(chat, payload):
                             "comprehensive research", "investigate", "do research"]
         if any(s in lo for s in research_signals):
             active_tools = list(active_tools) + ["research"]
+
+    if not web_search and ("search" in active_tools or "research" in active_tools):
+        web_search = True
 
     # --- YouTube URL detection ---
     yt_urls = _extract_youtube_urls(user_text)
