@@ -1,5 +1,6 @@
 // ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
+let _continueCount=0;const _MAX_CONTINUES=10;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
 let googleInitDone=false,thinkingEnabled=false,guestAuthMode='register';
 let deepResearchDepth='standard';
@@ -2211,6 +2212,28 @@ function submitAllChoices(btn){
   sendQ(parts.join('\n'));
 }
 
+function _detectTruncation(text){
+  if(!text||text.length<200)return false;
+  const t=text.trim();
+  // Unclosed code blocks (odd number of ```)
+  const fenceCount=(t.match(/```/g)||[]).length;
+  if(fenceCount%2!==0)return true;
+  // Unclosed special tags
+  const openTags=['<<<CODE_EXECUTE','<<<FILE_CREATE','<<<FILE_UPDATE','<<<CHOICES>>>'];
+  const closeTags=['<<<END_CODE>>>','<<<END_FILE>>>','<<<END_FILE>>>','<<<END_CHOICES>>>'];
+  for(let i=0;i<openTags.length;i++){
+    const opens=(t.match(new RegExp(openTags[i].replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length;
+    const closes=(t.match(new RegExp(closeTags[i].replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length;
+    if(opens>closes)return true;
+  }
+  // Ends with obvious mid-sentence indicators
+  const lastLine=t.split('\n').pop().trim();
+  if(lastLine&&/[,;:\-–—]$/.test(lastLine))return true;
+  // Sentences like "Stand by." or "Here's" or "I'll now" that promise more content
+  if(/(?:stand by|here (?:is|are|comes)|i(?:'ll| will| am going to) (?:now|next)|let me|coming up)[.\s]*$/i.test(lastLine))return true;
+  return false;
+}
+
 function stripMetaBlocks(text){
   return (text||'')
     .replace(/<<<THINKING>>>[\s\S]*?(<<<END_THINKING>>>|$)/g,'')
@@ -2382,6 +2405,8 @@ async function openArtifact(id){
 async function sendMessage(){
   const input=document.getElementById('msgInput');const text=input.value.trim();
   if(!text&&!pendingFiles.length)return;
+  // Reset continue counter when user sends a new (non-continue) message
+  if(!text.startsWith('Continue'))_continueCount=0;
   if(curChat&&isChatRunning(curChat)){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
   if(!curChat){
@@ -2685,14 +2710,21 @@ async function sendMessage(){
               try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
             }
             refreshChats();
-            setStatus('Done. Ask a follow-up or start something new.');
-            // Auto-continue if AI signaled <<<CONTINUE>>>
-            if(shouldContinue){
+            // Auto-continue if AI signaled <<<CONTINUE>>> or if the response was truncated
+            if(!shouldContinue&&!choiceBlocks.length){
+              shouldContinue=_detectTruncation(displayReply);
+            }
+            if(shouldContinue&&_continueCount<_MAX_CONTINUES){
+              _continueCount++;
+              setStatus(`Continuing... (${_continueCount})`);
               setTimeout(()=>{
                 const inp=document.getElementById('msgInput');
-                inp.value='Continue.';
+                inp.value='Continue where you left off. Pick up exactly where you stopped.';
                 sendMessage();
               },600);
+            }else{
+              _continueCount=0;
+              setStatus('Done. Ask a follow-up or start something new.');
             }
             // If user navigated away and back, reload the chat so they see the response
             if(curChat===targetChatId&&!msgDiv.isConnected){

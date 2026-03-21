@@ -953,13 +953,18 @@ IMPORTANT: Always output the todolist block DIRECTLY in your response text for t
 ALSO: Always save the todo list to a file using <<<FILE_CREATE: notes/todos.md>>> (or an appropriate filename) so it persists across chats and shows up in the workspace. When updating an existing todo list, use <<<FILE_UPDATE: notes/todos.md>>> to keep it current. The file version should be a clean markdown checklist (e.g. "- [ ] Task" / "- [x] Done task"), NOT the JSON format.
 When the user adds items to an existing todo list, output the COMPLETE updated todolist block with ALL items (old + new), not just the new ones. This replaces the previous list in the chat.
 
-15. DEEP RESEARCH — When the [TOOL ACTIVE: DEEP RESEARCH] instruction is present, the user wants a thorough, in-depth response. Before diving in, YOU (the AI) should ask 2-4 quick clarifying questions using the interactive choices system to tailor the research. For example:
+15. DEEP RESEARCH — When the [TOOL ACTIVE: DEEP RESEARCH] instruction is present OR the user asks for research/deep dive/in-depth analysis, treat it as a multi-step research project. Before diving in, ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks:
 - What specific aspects to focus on
 - Whether to include mind maps / visualizations
 - Whether to include images
-- What export format they want (just text, PDF via code execution, saved to file, etc.)
-- How deep to go (overview vs. comprehensive deep-dive)
-Use <<<CHOICES>>> blocks for these questions so the user can click to answer. Once you have their preferences, THEN produce the full research response using all relevant tools (images, mind maps, code execution for PDFs, file saves, etc.). Make it feel like a thorough research report.
+- What export format (just text, PDF via code execution, saved to file, etc.)
+- Depth level (overview vs. comprehensive deep-dive)
+Once the user answers, execute the research as a MULTI-STEP chain using <<<CONTINUE>>>:
+  Step 1: Write the research content (save to file with FILE_CREATE) → <<<CONTINUE>>>
+  Step 2: Find relevant images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>
+  Step 3: Build mind map(s) with ```mermaid mindmap → <<<CONTINUE>>>
+  Step 4: Generate PDF / final export with <<<CODE_EXECUTE: python>>> if requested
+Do NOT try to do all steps in one message. Chain them with <<<CONTINUE>>>.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
@@ -999,12 +1004,19 @@ The rule is simple: if information has a home in the workspace file structure, p
 
 Also use <<<MEMORY_ADD>>> for quick facts that don't need a full file but should persist across conversations.
 
-Message Continuation:
-- If your response is long and you need to continue, or if you want to chain multiple actions (e.g. text response → code → mind map → file export), you can end your message with <<<CONTINUE>>> on its own line.
-- When you emit <<<CONTINUE>>>, the system will automatically send your next message so you can keep going. You can continue as many times as needed.
-- Use this when: you have more to say than fits comfortably, you want to do multiple steps (research → write → export), or the user asked for a complex multi-part deliverable.
-- Each continued message gets its own bubble in the chat, so the user sees your work flowing naturally.
-- ALWAYS end with <<<CONTINUE>>> if you still have more work to do. Only stop when you are truly done.
+Message Continuation (CRITICAL — MULTI-STEP SYSTEM):
+You have a powerful multi-turn continuation system. Use it aggressively for any task that involves more than one action.
+- End your message with <<<CONTINUE>>> on its own line to automatically trigger your next message.
+- The system will send "Continue" on your behalf and you pick up right where you left off.
+- You can chain as many continuations as needed. Each gets its own message bubble.
+- MANDATORY for multi-step tasks: If the user asks for research + images + mind map + PDF (or any combination), do ONE step per message and use <<<CONTINUE>>> to chain them:
+  * Message 1: Write the research content → <<<CONTINUE>>>
+  * Message 2: Find images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>
+  * Message 3: Create mind map with ```mermaid → <<<CONTINUE>>>
+  * Message 4: Generate PDF with <<<CODE_EXECUTE: python>>> (done)
+- ALWAYS end with <<<CONTINUE>>> if you have more work to do. Only omit it when you are truly finished.
+- If you're about to do code execution, mind maps, image searches, or file operations AND you've already written substantial text, use <<<CONTINUE>>> to split them into separate messages. Don't try to cram everything into one giant response.
+- Even if you're unsure whether you need to continue, err on the side of using <<<CONTINUE>>> — it's better to send an extra message than to leave work unfinished.
 
 Workspace File Rules:
 - Relative paths from workspace root
@@ -1313,9 +1325,12 @@ def _build_tool_instructions(active_tools):
             "- Export format: just in-chat text, PDF via code execution, or saved as a file\n"
             "- Depth level: quick overview vs. comprehensive deep-dive\n"
             "Keep the questions conversational and relevant to their specific topic. "
-            "Once the user answers, produce the full research using ALL relevant tools "
-            "(images, mind maps, code execution for PDF generation, FILE_CREATE for saving). "
-            "Make it comprehensive, well-structured with headings and sections, and cite specific facts."
+            "Once the user answers, execute as a MULTI-STEP chain using <<<CONTINUE>>>:\n"
+            "Step 1: Write the research content and save to file → <<<CONTINUE>>>\n"
+            "Step 2: Find images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>\n"
+            "Step 3: Create mind map(s) with ```mermaid → <<<CONTINUE>>>\n"
+            "Step 4: Generate PDF with <<<CODE_EXECUTE: python>>> if requested\n"
+            "Do NOT try to do everything in one message. Chain each step."
         ),
     }
     for tool in active_tools:
@@ -1360,6 +1375,15 @@ def prepare_chat_turn(chat, payload):
         thinking = _detect_complex_query(user_text)
     if not web_search and "search" in active_tools:
         web_search = True
+
+    # --- Auto-detect research intent and inject tool instructions ---
+    if "research" not in active_tools and user_text:
+        lo = user_text.lower()
+        research_signals = ["deep research", "deep dive", "in-depth", "in depth",
+                            "research on", "research about", "thorough research",
+                            "comprehensive research", "investigate", "do research"]
+        if any(s in lo for s in research_signals):
+            active_tools = list(active_tools) + ["research"]
 
     # --- YouTube URL detection ---
     yt_urls = _extract_youtube_urls(user_text)
@@ -1942,7 +1966,7 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
         cfg["max_output_tokens"] = 65536
         print(f"  [thinking] Google stream: thinking enabled, budget=16000")
     else:
-        cfg["max_output_tokens"] = 16384
+        cfg["max_output_tokens"] = 65536
     if web_search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     stream = client.models.generate_content_stream(
@@ -1992,7 +2016,7 @@ def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=F
             msgs.append({"role": role, "content": parts[0]["text"]})
         elif parts:
             msgs.append({"role": role, "content": parts})
-    create_kw = dict(model=model, messages=msgs, max_tokens=16384)
+    create_kw = dict(model=model, messages=msgs, max_tokens=32768)
     if web_search:
         create_kw["tools"] = [{"type": "web_search_preview"}]
         create_kw["tool_choice"] = "auto"
@@ -2051,7 +2075,7 @@ def call_openai_stream(api_key, model, sysprompt, messages, base_url=None, web_s
             msgs.append({"role": role, "content": parts[0]["text"]})
         elif parts:
             msgs.append({"role": role, "content": parts})
-    create_kw = dict(model=model, messages=msgs, stream=True, max_tokens=16384)
+    create_kw = dict(model=model, messages=msgs, stream=True, max_tokens=32768)
     if web_search:
         create_kw["tools"] = [{"type": "web_search_preview"}]
         create_kw["tool_choice"] = "auto"
