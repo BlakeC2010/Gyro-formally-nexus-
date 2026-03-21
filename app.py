@@ -209,6 +209,12 @@ app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_NAME"] = "nexus_session"
 
+@app.before_request
+def _refresh_session():
+    """Touch the session on every request so the cookie expiry is refreshed."""
+    if session.get("user_id") or session.get("guest"):
+        session.modified = True
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Catch-all so Firestore / unexpected errors return JSON, not a 500 HTML page."""
@@ -839,7 +845,34 @@ Capabilities:
    - When STATUS.md lists friction items, check if they've been resolved; if not, suggest the smallest concrete next step.
    - Never nag. Frame nudges as "I noticed..." not "You should...". One nudge per conversation max unless asked.
    - The homepage already surfaces friction widgets — reinforce them conversationally when relevant.
-9. INCLUDE IMAGES — when useful, include images in your responses using markdown: ![description](https://image-url). Use this for explanations, tutorials, diagrams from the web, or when the user asks to see something visual. Find real image URLs from your knowledge or web search results.
+9. IMAGE SEARCH — you have access to a real image search engine that finds and displays images in a scrollable carousel. To use it, include this tag anywhere in your response:
+<<<IMAGE_SEARCH: descriptive search query>>>
+
+WHEN TO USE image search (use it proactively — don't wait to be asked):
+- User asks to SEE something: "show me", "what does X look like", "picture of", "images of", "photo of"
+- Explaining physical objects, places, animals, people, landmarks, architecture, art, fashion, food, etc.
+- Tutorials or how-to guides where seeing the thing helps (e.g., "how to tie a bowline knot" → show the knot)
+- Comparing visual things: "difference between alligator and crocodile" → show both
+- Historical figures, events, artifacts — show what they looked like
+- Science/nature topics: planets, cells, animals, geological formations, weather phenomena
+- Design, UI, or aesthetic discussions — show examples
+- When the user describes something and you want to confirm what they mean
+- Travel or location discussions — show the place
+- Any time a visual would make your explanation clearer or more engaging
+
+WHEN NOT TO USE image search:
+- Pure code/programming questions
+- Math or abstract logic problems
+- When the user explicitly says they don't want images
+- Casual greetings or simple yes/no answers
+- When you're writing files or doing workspace operations
+
+RULES:
+- Write descriptive, specific search queries. "Socrates ancient Greek philosopher bust sculpture" is better than just "Socrates"
+- You can use MULTIPLE <<<IMAGE_SEARCH>>> tags in one response for different topics
+- Always include explanatory text WITH the images — don't just dump images with no context
+- Do NOT use markdown image syntax ![](url) — you don't have real image URLs. ONLY use <<<IMAGE_SEARCH>>>
+- Prefer to put the image search tag AFTER your text about that topic, so the images appear below your explanation
 10. ANALYZE YOUTUBE VIDEOS — when the user shares a YouTube link, you can watch/analyze the video content and discuss it in detail. The video is provided to you directly.
 11. Interactive questions — you can ask the user multiple-choice questions they can click to answer (they can also type their own response). Use this when it genuinely helps move the conversation forward:
 
@@ -956,6 +989,22 @@ Workspace File Rules:
 - Be approachable and conversational while staying useful
 - Be specific and actionable in briefings
 
+15. INTELLIGENT CROSS-REFERENCING & SYNTHESIS:
+- When answering, actively look for connections ACROSS workspace files. If a decision in decisions/ impacts a project/, highlight it.
+- When a user asks about a topic, pull together ALL mentions from notes/, projects/, STATUS.md, decisions/, and people/ files into a coherent brief.
+- If you notice contradictions between files (e.g. STATUS.md says "on track" but a project file says "blocked"), flag them proactively.
+- When creating or updating files, check if other files reference the same concepts and suggest updates.
+- Format cross-references clearly: "This connects to [project/X.md] which mentions..." or "Note: decisions/2026-01-15_api_choice.md affects this project's timeline."
+
+16. LEARNING WORKFLOW PATTERNS:
+- Pay attention to sequences of tasks the user commonly does. For example: research → brainstorm → mind map → project file → STATUS.md update.
+- When you recognize the user is in a familiar workflow pattern, proactively suggest the likely next step.
+- If the user just finished research, suggest: "Want me to create a mind map of the key findings?"
+- If the user just brainstormed, suggest: "Should I organize these into a project plan?"
+- If the user just made a decision, suggest: "Want me to create a decision record and update STATUS.md?"
+- If the user just created a project file, suggest: "Should I update STATUS.md to reflect this new project?"
+- Track the user's workflow preferences in memory using <<<MEMORY_ADD: Workflow pattern: user prefers [pattern]>>> when you notice a repeated sequence.
+
 Session Info:
 - The user's name is {uname}
 - Today: {datetime.date.today().isoformat()}
@@ -1039,11 +1088,39 @@ def extract_research_trigger(text):
         return cleaned, query
     return text, None
 
+def extract_image_searches(text):
+    """Extract all <<<IMAGE_SEARCH: query>>> tags and return (cleaned_text, [queries])."""
+    queries = [m.group(1).strip() for m in re.finditer(r'<<<IMAGE_SEARCH:\s*(.+?)>>>', text)]
+    cleaned = re.sub(r'<<<IMAGE_SEARCH:\s*.+?>>>', '', text).strip()
+    return cleaned, queries
+
+def search_images(query, num=8):
+    """Search images via DuckDuckGo. Free, no API key, no limits."""
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            raw = list(ddgs.images(query, max_results=num, safesearch="moderate"))
+        results = []
+        for item in raw:
+            results.append({
+                "url": item.get("image", ""),
+                "title": item.get("title", ""),
+                "thumbnail": item.get("thumbnail", item.get("image", "")),
+                "context_url": item.get("url", ""),
+                "width": item.get("width", 0),
+                "height": item.get("height", 0),
+            })
+        return results
+    except Exception as e:
+        print(f"  [image-search] error: {e}")
+        return []
+
 def clean_response(text):
     text = re.sub(r'<<<FILE_CREATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<FILE_UPDATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<MEMORY_ADD:\s*.+?>>>', '', text)
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
+    text = re.sub(r'<<<IMAGE_SEARCH:\s*.+?>>>', '', text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1146,6 +1223,7 @@ def prepare_chat_turn(chat, payload):
     # --- Thinking & web-search flags ---
     thinking = payload.get("thinking", False)
     web_search = payload.get("web_search", False)
+    research_hint = payload.get("research_hint", False)
     if not thinking and user_text:
         thinking = _detect_complex_query(user_text)
     if not web_search and "[search the web]" in user_text.lower():
@@ -1217,6 +1295,7 @@ def prepare_chat_turn(chat, payload):
         "api_msgs": api_msgs,
         "thinking": thinking,
         "web_search": web_search,
+        "research_hint": research_hint,
     }, None, None
 
 def finalize_chat_response(chat, ctx, raw_response):
@@ -1407,6 +1486,128 @@ def _detect_friction_points(chats, todos, profile):
         })
 
     return nudges[:5]
+
+
+def _build_cross_references(files):
+    """Scan workspace files and find cross-references between them."""
+    refs = []
+    file_topics = {}  # path -> set of key terms
+    for path, content in files.items():
+        words = set(w.lower() for w in re.findall(r'\b[A-Za-z]{4,}\b', content))
+        # Also extract mentioned file paths
+        mentioned = set(re.findall(r'(?:notes|projects|decisions|people)/[\w\-/]+\.md', content))
+        file_topics[path] = {"words": words, "mentions": mentioned}
+
+    # Find connections: files that reference each other or share significant topic overlap
+    paths = list(files.keys())
+    for i, p1 in enumerate(paths):
+        t1 = file_topics.get(p1, {})
+        # Direct mentions
+        for mentioned_path in t1.get("mentions", set()):
+            if mentioned_path in files and mentioned_path != p1:
+                refs.append({
+                    "type": "direct_reference",
+                    "source": p1,
+                    "target": mentioned_path,
+                    "summary": f"{p1} directly references {mentioned_path}"
+                })
+        # Topic overlap between project files and decision files
+        for j in range(i + 1, len(paths)):
+            p2 = paths[j]
+            t2 = file_topics.get(p2, {})
+            w1, w2 = t1.get("words", set()), t2.get("words", set())
+            overlap = w1 & w2 - {"this", "that", "with", "from", "have", "been", "will", "they", "their", "about", "would", "could", "should", "which", "there", "other", "just", "some", "than", "into", "only", "also", "very", "when", "what", "your", "more", "make", "like", "over", "such", "take", "each", "them"}
+            # Only flag if significant overlap and different directories
+            dir1 = str(Path(p1).parent)
+            dir2 = str(Path(p2).parent)
+            if len(overlap) >= 8 and dir1 != dir2:
+                shared = sorted(overlap, key=lambda w: -len(w))[:5]
+                refs.append({
+                    "type": "topic_overlap",
+                    "source": p1,
+                    "target": p2,
+                    "shared_topics": shared,
+                    "summary": f"{p1} and {p2} share topics: {', '.join(shared)}"
+                })
+    return refs[:20]
+
+
+def _detect_workflow_patterns(chats):
+    """Analyze recent chat history to detect common workflow sequences."""
+    patterns = []
+    if not chats or len(chats) < 3:
+        return patterns
+
+    # Analyze the titles/topics of recent chats to detect sequences
+    recent_titles = [c.get("title", "").lower() for c in chats[:15]]
+
+    research_kw = {"research", "investigate", "study", "analyze", "report", "sources", "deep dive"}
+    brainstorm_kw = {"brainstorm", "ideas", "ideate", "creative", "options", "mind map"}
+    plan_kw = {"plan", "organize", "schedule", "roadmap", "strategy", "priorities"}
+    write_kw = {"write", "draft", "document", "create", "update", "edit"}
+    decide_kw = {"decide", "decision", "choose", "compare", "evaluate"}
+
+    def title_matches(title, keywords):
+        return any(kw in title for kw in keywords)
+
+    recent_types = []
+    for t in recent_titles:
+        if title_matches(t, research_kw): recent_types.append("research")
+        elif title_matches(t, brainstorm_kw): recent_types.append("brainstorm")
+        elif title_matches(t, plan_kw): recent_types.append("plan")
+        elif title_matches(t, write_kw): recent_types.append("write")
+        elif title_matches(t, decide_kw): recent_types.append("decide")
+
+    # Detect the most recent type and suggest next step
+    if recent_types:
+        latest = recent_types[0]
+        suggestions = {
+            "research": {
+                "detected": "You've been doing research",
+                "suggestion": "Ready to brainstorm or create a mind map from your findings?",
+                "action": {"type": "prompt", "text": "Create a mind map summarizing my recent research findings"},
+            },
+            "brainstorm": {
+                "detected": "You've been brainstorming",
+                "suggestion": "Want to organize these ideas into a project plan?",
+                "action": {"type": "prompt", "text": "Help me organize my brainstorming ideas into a structured project plan"},
+            },
+            "plan": {
+                "detected": "You've been planning",
+                "suggestion": "Time to start executing? Want to create task breakdowns?",
+                "action": {"type": "prompt", "text": "Break down my plan into actionable tasks with a todo list"},
+            },
+            "decide": {
+                "detected": "You've been evaluating options",
+                "suggestion": "Ready to document the decision and update STATUS.md?",
+                "action": {"type": "prompt", "text": "Help me write a decision record for the choice I just made and update STATUS.md"},
+            },
+            "write": {
+                "detected": "You've been writing",
+                "suggestion": "Want to review, get feedback, or share this work?",
+                "action": {"type": "prompt", "text": "Review what I just wrote and suggest improvements"},
+            },
+        }
+        if latest in suggestions:
+            patterns.append(suggestions[latest])
+
+    # Detect repeated sequences (e.g. research→brainstorm pattern)
+    if len(recent_types) >= 2:
+        pair = f"{recent_types[1]}→{recent_types[0]}"
+        common_flows = {
+            "research→brainstorm": "You often brainstorm after research — this is becoming your flow!",
+            "brainstorm→plan": "You like to plan right after brainstorming — nice workflow!",
+            "plan→write": "Planning then writing — your systematic approach is working!",
+            "decide→write": "Making decisions then documenting — great habit!",
+        }
+        if pair in common_flows:
+            patterns.append({
+                "detected": "Workflow pattern recognized",
+                "suggestion": common_flows[pair],
+                "action": None,
+            })
+
+    return patterns[:3]
 
 
 def _widget_has_content(w):
@@ -1963,23 +2164,23 @@ def get_user_data():
 @app.route("/api/auth/data", methods=["DELETE"])
 @require_auth
 def reset_data():
-    code = (request.get_json() or {}).get("code", "")
-    if code != "DELETE-MY-DATA":
-        return jsonify({"error": "Type DELETE-MY-DATA to confirm."}), 400
+    """Permanently delete the user's account and all associated data."""
     uid = session.get("user_id")
     if not uid:
         return jsonify({"error": "Not authenticated"}), 401
     if FIREBASE_ENABLED:
+        # Delete all chats
         col = _chats_col()
         if col:
             for doc in col.stream():
                 doc.reference.delete()
-        _uid_doc("memory").set({"facts": [], "updated": None})
-        _uid_doc("settings").set({"keys": {}, "selected_model": DEFAULT_MODEL, "custom_endpoints": []})
-        ref = _uid_doc("profile")
-        snap = ref.get()
-        if snap.exists:
-            ref.delete()
+        # Delete memory, settings, profile
+        for doc_name in ("memory", "settings", "profile"):
+            ref = _uid_doc(doc_name)
+            if ref:
+                try: ref.delete()
+                except Exception: pass
+        # Delete uploaded files
         bucket = _storage_bucket()
         if bucket:
             try:
@@ -1988,16 +2189,20 @@ def reset_data():
                     blob.delete()
             except Exception:
                 pass
+        # Delete the user document itself
+        try:
+            user_ref = db.collection("users").document(uid)
+            user_ref.delete()
+        except Exception:
+            pass
     else:
-        chats_dir = _local_user_dir(uid) / "chats"
-        if chats_dir.exists():
-            for f in chats_dir.glob("*.json"):
-                f.unlink()
-        save_memory({"facts": [], "updated": None})
-        save_settings({"keys": {}, "selected_model": DEFAULT_MODEL, "custom_endpoints": []})
-        prof = _local_user_dir(uid) / "profile.json"
-        if prof.exists(): prof.unlink()
-    return jsonify({"ok": True, "message": "All data reset."})
+        import shutil
+        user_dir = _local_user_dir(uid)
+        if user_dir.exists():
+            shutil.rmtree(user_dir)
+    # Clear server session
+    session.clear()
+    return jsonify({"ok": True, "message": "Account deleted."})
 
 @app.route("/api/auth/theme", methods=["POST"])
 @require_auth
@@ -2215,6 +2420,48 @@ def del_chat(chat_id):
     delete_chat(chat_id)
     return jsonify({"ok": True})
 
+@app.route("/api/chats/bulk-delete", methods=["POST"])
+@require_auth_or_guest
+def bulk_delete_chats():
+    """Delete multiple chats at once."""
+    d = request.get_json() or {}
+    ids = d.get("chat_ids", [])
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "No chat IDs provided"}), 400
+    deleted = 0
+    for cid in ids:
+        if isinstance(cid, str) and _safe_id(cid):
+            if delete_chat(cid):
+                deleted += 1
+    return jsonify({"ok": True, "deleted": deleted})
+
+@app.route("/api/chats/delete-all", methods=["POST"])
+@require_auth_or_guest
+def delete_all_chats():
+    """Delete every chat for the current user."""
+    chats = list_chats()
+    deleted = 0
+    for c in chats:
+        if delete_chat(c["id"]):
+            deleted += 1
+    return jsonify({"ok": True, "deleted": deleted})
+
+@app.route("/api/cross-references")
+@require_auth
+def cross_references_route():
+    """Analyze workspace files and return cross-references."""
+    files = read_workspace_files()
+    refs = _build_cross_references(files)
+    return jsonify({"references": refs})
+
+@app.route("/api/workflow-patterns")
+@require_auth_or_guest
+def workflow_patterns_route():
+    """Analyze recent chat history and return detected workflow patterns."""
+    chats = list_chats()
+    patterns = _detect_workflow_patterns(chats)
+    return jsonify({"patterns": patterns})
+
 @app.route("/api/chats/<chat_id>/message", methods=["POST"])
 @require_auth_or_guest
 def chat_message(chat_id):
@@ -2387,9 +2634,16 @@ def chat_message_stream(chat_id):
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             # Check if AI triggered deep research
             raw_text, research_query = extract_research_trigger(raw_text)
-            # Safety net: if user clearly asked for research and AI forgot the tag, auto-trigger
-            if not research_query and _detect_research_intent(ctx["user_text"]):
+            # Only trigger research if the user explicitly had research mode on (sent as research_hint)
+            if not research_query and ctx.get("research_hint"):
                 research_query = ctx["user_text"]
+            # Extract image search queries and fetch results
+            raw_text, image_queries = extract_image_searches(raw_text)
+            image_results = []
+            for iq in image_queries:
+                imgs = search_images(iq)
+                if imgs:
+                    image_results.append({"query": iq, "images": imgs})
             clean, executed, new_facts = finalize_chat_response(chat, ctx, raw_text)
             done_payload = {
                 "type": "done",
@@ -2400,6 +2654,8 @@ def chat_message_stream(chat_id):
             }
             if research_query:
                 done_payload["research_trigger"] = research_query
+            if image_results:
+                done_payload["image_results"] = image_results
             yield event(done_payload)
         except Exception as e:
             err = str(e)
@@ -2601,9 +2857,62 @@ def get_folders():
         if parent != ".": folders.add(parent)
     return jsonify({"folders": sorted(folders)})
 
+# ─── Version & Changelog ──────────────────────────────────────────────────────
+NEXUS_VERSION = "3.3"
+NEXUS_CHANGELOG = [
+    {
+        "version": "3.3",
+        "date": "2026-03-21",
+        "title": "Image Search",
+        "changes": [
+            "Nexus can now search and show real images from Google in a carousel",
+            "Ask to see what anything looks like and get visual results inline",
+        ]
+    },
+    {
+        "version": "3.2",
+        "date": "2026-03-21",
+        "title": "Intelligence & Management Upgrade",
+        "changes": [
+            "Intelligent Cross-Referencing: Nexus now draws connections across all your files automatically",
+            "Workflow Pattern Learning: detects your work sequences and suggests next steps",
+            "New cross-references & workflow pattern widgets on home screen",
+            "Delete folders and all their chats at once",
+            "Multi-select mode: select and bulk-delete chats and folders",
+            "Delete All Chats button in settings",
+            "Account deletion now properly removes everything",
+        ]
+    },
+    {
+        "version": "3.1",
+        "date": "2026-03-21",
+        "title": "Quality-of-Life Improvements",
+        "changes": [
+            "Fixed duplicate chat reload when clicking an already-open chat",
+            "Sessions now stay alive during inactivity — no more random logouts",
+            "Added update notification system so you never miss new features",
+        ]
+    },
+    {
+        "version": "3.0",
+        "date": "2026-03-01",
+        "title": "Initial Release",
+        "changes": [
+            "NEXUS launched with multi-model AI chat",
+            "Deep research mode",
+            "Canvas & workspace tools",
+        ]
+    },
+]
+
 @app.route("/api/status")
 def status_route():
-    return jsonify({"version": "3.0", "name": "NEXUS"})
+    return jsonify({"version": NEXUS_VERSION, "name": "NEXUS"})
+
+@app.route("/api/changelog")
+def changelog_route():
+    """Return current version + full changelog for the update modal."""
+    return jsonify({"version": NEXUS_VERSION, "changelog": NEXUS_CHANGELOG})
 
 @app.route("/api/greeting")
 @require_auth_or_guest

@@ -4,6 +4,8 @@ let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
 let googleInitDone=false,thinkingEnabled=false,researchEnabled=false,guestAuthMode='register';
 let deepResearchDepth='standard';
 let onboardingChecked=false;
+let selectMode=false;
+const selectedItems=new Set();
 const runningStreams=new Map();
 const unreadChats=new Set();
 const artifactStore=[];
@@ -157,9 +159,38 @@ async function apiFetch(url, opts={}){
     const ok=await tryAutoResume();
     apiFetch._resuming=false;
     if(ok) r=await fetch(url,opts);
+    else { _handleSessionLost(); return r; }
   }
   return r;
 }
+
+// ─── Session keep-alive ───────────────────────────
+function _handleSessionLost(){
+  showToast('Session expired. Please sign in again.','info');
+  curUser=null; curChat=null;
+  document.getElementById('appPage').classList.remove('visible');
+  document.getElementById('loginPage').style.display='flex';
+  initGoogleAuthUI();
+}
+
+// Ping the server periodically to keep the session cookie alive
+setInterval(async()=>{
+  if(!curUser) return;
+  try{ await fetch('/api/auth/me'); }catch{}
+}, 10*60*1000); // every 10 minutes
+
+// On tab re-focus, verify the session is still valid
+document.addEventListener('visibilitychange', async()=>{
+  if(document.visibilityState!=='visible' || !curUser) return;
+  try{
+    const r=await fetch('/api/auth/me');
+    const d=await r.json();
+    if(!d.authenticated && !d.guest){
+      const ok=await tryAutoResume();
+      if(!ok) _handleSessionLost();
+    }
+  }catch{}
+});
 
 // ─── Init ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',async()=>{
@@ -354,6 +385,67 @@ async function showApp(){
   await refreshChats();
   updateComposerBusyUI();
   document.getElementById('msgInput').focus();
+  checkForUpdates();
+}
+
+// ─── Changelog / Update Notification ──────────────
+const LAST_SEEN_VERSION_KEY='nexus_last_seen_version';
+
+async function checkForUpdates(){
+  try{
+    const r=await fetch('/api/changelog');
+    if(!r.ok) return;
+    const d=await r.json();
+    const current=d.version;
+    const lastSeen=localStorage.getItem(LAST_SEEN_VERSION_KEY);
+    if(lastSeen===current) return;
+    showChangelogModal(d.changelog, lastSeen, current);
+  }catch{}
+}
+
+function showChangelogModal(changelog, lastSeen, currentVersion){
+  const overlay=document.getElementById('changelogOverlay');
+  const body=document.getElementById('clBody');
+  const verEl=document.getElementById('clVersion');
+  if(!overlay||!body) return;
+  overlay._currentVersion=currentVersion;
+  const latest=changelog[0];
+  verEl.textContent=`v${latest.version} · ${_fmtChangelogDate(latest.date)}`;
+  // Build entries — mark versions newer than lastSeen
+  let html='';
+  for(const entry of changelog){
+    const isNew=!lastSeen||_versionCompare(entry.version,lastSeen)>0;
+    html+=`<div class="cl-entry${isNew?' cl-entry-new':''}"><div class="cl-entry-head"><span class="cl-entry-ver">v${esc(entry.version)}</span><span class="cl-entry-title">${esc(entry.title)}</span><span class="cl-entry-date">${_fmtChangelogDate(entry.date)}</span></div><ul class="cl-changes">`;
+    for(const c of entry.changes) html+=`<li>${esc(c)}</li>`;
+    html+=`</ul></div>`;
+  }
+  body.innerHTML=html;
+  overlay.classList.add('open');
+}
+
+function dismissChangelog(){
+  const overlay=document.getElementById('changelogOverlay');
+  if(overlay._currentVersion){
+    localStorage.setItem(LAST_SEEN_VERSION_KEY, overlay._currentVersion);
+  }
+  overlay.classList.remove('open');
+}
+
+function _versionCompare(a,b){
+  const pa=a.split('.').map(Number), pb=b.split('.').map(Number);
+  for(let i=0;i<Math.max(pa.length,pb.length);i++){
+    const na=pa[i]||0, nb=pb[i]||0;
+    if(na>nb) return 1;
+    if(na<nb) return -1;
+  }
+  return 0;
+}
+
+function _fmtChangelogDate(dateStr){
+  try{
+    const d=new Date(dateStr+'T00:00:00');
+    return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  }catch{ return dateStr; }
 }
 
 async function ensureOAuthConfigLoaded(){
@@ -448,6 +540,28 @@ function renderHomeWidget(w){
     const meta=w?.meta?`<div class="wl-vision-meta">${esc(w.meta)}</div>`:'';
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-vision-main">${esc(text)}</div>${meta}</div>`;
   }
+  if(type==='crossref'){
+    const items=Array.isArray(w.items)?w.items:[];
+    if(!items.length)return'';
+    const body=items.map(i=>`<div class="wl-crossref-item"><div class="wl-crossref-summary">${esc(i.summary||'')}</div></div>`).join('');
+    return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-crossref-list">${body}</div></div>`;
+  }
+  if(type==='workflow'){
+    const items=Array.isArray(w.items)?w.items:[];
+    if(!items.length)return'';
+    const body=items.map(i=>{
+      const actionAttr=i.action?`data-nudge-action='${esc(JSON.stringify(i.action))}'`:'';
+      return `<div class="wl-nudge-item" ${actionAttr}>`
+        +`<span class="wl-nudge-icon">→</span>`
+        +`<div class="wl-nudge-body">`
+        +`<div class="wl-nudge-msg">${esc(i.detected||'')}</div>`
+        +`<div class="wl-nudge-step">${esc(i.suggestion||'')}</div>`
+        +`</div>`
+        +(i.action?`<button class="wl-nudge-act" onclick="event.stopPropagation();handleNudgeAction(this)">Go</button>`:'')
+        +`</div>`;
+    }).join('');
+    return `<div class="${cls} wl-nudge-widget"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-nudge-list">${body}</div></div>`;
+  }
   if(type==='motivation'){
     const text=(w?.text||'').trim();
     if(!text)return'';
@@ -521,6 +635,9 @@ function buildInstantHomePlan(greeting){
 
   // Pin nudge at top, then fill remaining slots
   const final=nudgeWidget?[nudgeWidget,...pool]:[...pool];
+
+  // Async: load cross-references and workflow patterns in background
+  _loadSmartWidgets();
 
   return {
     heading:'What would you like to work on today?',
@@ -900,15 +1017,29 @@ function renderChatList(filter=''){
   let html='';const seen=new Set();
   for(const fld of ['',...Object.keys(grouped).filter(f=>f).sort()]){
     if(seen.has(fld)||!grouped[fld])continue;seen.add(fld);
-    if(fld)html+=`<div class="sb-folder-name" data-folder="${esc(fld)}"><span class="sf-label">${esc(fld)}</span><button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
+    if(fld){
+      const fldSel=selectMode&&_isFolderSelected(fld)?' selected':'';
+      html+=`<div class="sb-folder-name${fldSel}" data-folder="${esc(fld)}">`;
+      if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${_isFolderSelected(fld)?'checked':''} onclick="event.stopPropagation();toggleSelectFolder('${esc(fld)}')">`;
+      html+=`<span class="sf-label">${esc(fld)}</span><button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
+    }
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
       const g=isChatRunning(c.id)?' generating':'';
       const u=unreadChats.has(c.id)?' unread':'';
-      html+=`<div class="sb-chat${a}${g}${u}" onclick="openChat('${c.id}')"><span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
+      const sel=selectMode&&selectedItems.has(c.id)?' selected':'';
+      html+=`<div class="sb-chat${a}${g}${u}${sel}" onclick="${selectMode?`toggleSelectChat('${c.id}')`:"openChat('"+c.id+"')"}">`;
+      if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${selectedItems.has(c.id)?'checked':''} onclick="event.stopPropagation();toggleSelectChat('${c.id}')">`;
+      html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
+  // Update select bar count
+  const selBar=document.getElementById('selectBar');
+  if(selBar){
+    const cnt=selectedItems.size;
+    document.getElementById('selCount').textContent=cnt?`${cnt} selected`:'None selected';
+  }
 }
 
 function filterChats(){renderChatList(document.getElementById('chatSearch').value)}
@@ -951,7 +1082,7 @@ function toggleFolderMenu(btn,folder){
   if(existing){existing.remove();return;}
   const menu=document.createElement('div');
   menu.className='sf-menu';
-  menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="openFolderSettings('${folder.replace(/'/g,"\\'")}')">Settings</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Delete</button>`;
+  menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="openFolderSettings('${folder.replace(/'/g,"\\'")}')">Settings</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
   btn.parentElement.style.position='relative';
   btn.parentElement.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
@@ -974,14 +1105,105 @@ async function openFolderSettings(folder){
 }
 async function deleteFolderFromMenu(folder){
   document.querySelector('.sf-menu')?.remove();
-  const ok=await _dlg({title:'Delete folder',msg:'Chats will be moved out of the folder, not deleted.',icon:'▸',iconType:'danger',confirmText:'Delete folder',cancelText:'Cancel',dangerous:true});
+  const ok=await _dlg({title:'Remove folder',msg:'Chats will be moved out of the folder, not deleted.',icon:'▸',iconType:'danger',confirmText:'Remove folder',cancelText:'Cancel',dangerous:true});
   if(!ok)return;
   const chats=allChats.filter(c=>c.folder===folder);
   for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:''})});}
   await refreshChats();showToast('Folder removed.','success');
 }
 
+async function deleteFolderAndChats(folder){
+  document.querySelector('.sf-menu')?.remove();
+  const chats=allChats.filter(c=>c.folder===folder);
+  const ok=await _dlg({title:'Delete folder & all chats',msg:`This will permanently delete the folder "${folder}" and ${chats.length} chat${chats.length!==1?'s':''} inside it.`,icon:'🔥',iconType:'danger',confirmText:`Delete ${chats.length} chat${chats.length!==1?'s':''}`,cancelText:'Cancel',dangerous:true});
+  if(!ok)return;
+  const ids=chats.map(c=>c.id);
+  if(ids.length){
+    await fetch('/api/chats/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
+  }
+  if(ids.includes(curChat)){
+    curChat=null;
+    document.getElementById('topTitle').textContent='NEXUS';
+    loadWelcome(true);
+  }
+  await refreshChats();showToast(`Folder "${folder}" and ${ids.length} chat${ids.length!==1?'s':''} deleted.`,'success');
+}
+
+// ─── Multi-Select Mode ────────────────────────────
+function toggleSelectMode(){
+  selectMode=!selectMode;
+  selectedItems.clear();
+  const bar=document.getElementById('selectBar');
+  if(bar)bar.style.display=selectMode?'flex':'none';
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
+function _isFolderSelected(folder){
+  const chats=allChats.filter(c=>c.folder===folder);
+  return chats.length>0&&chats.every(c=>selectedItems.has(c.id));
+}
+function toggleSelectChat(id){
+  if(selectedItems.has(id))selectedItems.delete(id); else selectedItems.add(id);
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
+function toggleSelectFolder(folder){
+  const chats=allChats.filter(c=>c.folder===folder);
+  const allSelected=chats.every(c=>selectedItems.has(c.id));
+  for(const c of chats){
+    if(allSelected)selectedItems.delete(c.id); else selectedItems.add(c.id);
+  }
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
+function selectAllChats(){
+  for(const c of allChats)selectedItems.add(c.id);
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
+function deselectAllChats(){
+  selectedItems.clear();
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
+async function deleteSelectedChats(){
+  if(!selectedItems.size){showToast('Nothing selected.','info');return;}
+  const count=selectedItems.size;
+  const ok=await _dlg({title:`Delete ${count} chat${count!==1?'s':''}?`,msg:`This will permanently delete ${count} selected chat${count!==1?'s':''}.`,icon:'🔥',iconType:'danger',confirmText:`Delete ${count}`,cancelText:'Cancel',dangerous:true});
+  if(!ok)return;
+  const ids=[...selectedItems];
+  await fetch('/api/chats/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
+  if(ids.includes(curChat)){
+    curChat=null;
+    document.getElementById('topTitle').textContent='NEXUS';
+    loadWelcome(true);
+  }
+  selectedItems.clear();
+  await refreshChats();
+  showToast(`${count} chat${count!==1?'s':''} deleted.`,'success');
+}
+
+// ─── Smart Home Widgets (async) ─────────────────
+async function _loadSmartWidgets(){
+  try{
+    const [crRes, wfRes]=await Promise.all([
+      fetch('/api/cross-references').then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch('/api/workflow-patterns').then(r=>r.ok?r.json():null).catch(()=>null),
+    ]);
+    const grid=document.querySelector('.wl-grid');
+    if(!grid)return;
+    // Add cross-reference widget if data exists
+    if(crRes?.references?.length){
+      const w={type:'crossref',size:'medium',title:'Cross-References',subtitle:`${crRes.references.length} connection${crRes.references.length!==1?'s':''}`,items:crRes.references.slice(0,5)};
+      const html=renderHomeWidget(w);
+      if(html)grid.insertAdjacentHTML('beforeend',html);
+    }
+    // Add workflow pattern widget if data exists
+    if(wfRes?.patterns?.length){
+      const w={type:'workflow',size:'medium',title:'Workflow Insights',subtitle:'Based on your recent activity',items:wfRes.patterns};
+      const html=renderHomeWidget(w);
+      if(html)grid.insertAdjacentHTML('beforeend',html);
+    }
+  }catch{}
+}
+
 async function openChat(id){
+  if(curChat===id) return;
   curChat=id;
   unreadChats.delete(id);
   const r=await apiFetch(`/api/chats/${id}`);
@@ -1652,7 +1874,7 @@ async function confirmInlineResearchPlan(){
   }
 
   // Start research inline
-  const targetChatId=currentChat;
+  const targetChatId=curChat;
   setChatRunning(targetChatId,true,{type:'research'});
   const area=document.getElementById('chatArea');
   try{
@@ -1687,6 +1909,28 @@ function cancelInlineResearch(){
 function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}}
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
 function sendQ(t){document.getElementById('msgInput').value=t;sendMessage()}
+
+function renderImageCarousel(query, images){
+  if(!images||!images.length)return'';
+  const cards=images.map(img=>{
+    const safeUrl=esc(img.url||'');
+    const safeThumb=esc(img.thumbnail||img.url||'');
+    const safeTitle=esc(img.title||'');
+    const safeCtx=esc(img.context_url||'');
+    return `<div class="img-car-card" onclick="openImageLightbox('${safeUrl}','${safeTitle}')">`
+      +`<img src="${safeThumb}" alt="${safeTitle}" loading="lazy" onerror="this.parentElement.style.display='none'">`
+      +`<div class="img-car-label">${safeTitle}</div>`
+      +`</div>`;
+  }).join('');
+  return `<div class="img-car-wrap">`
+    +`<div class="img-car-header"><span class="img-car-icon">🖼</span> Images for "${esc(query)}"</div>`
+    +`<div class="img-car-track">`
+    +`<button class="img-car-arrow img-car-left" onclick="event.stopPropagation();this.nextElementSibling.scrollBy({left:-260,behavior:'smooth'})">&lsaquo;</button>`
+    +`<div class="img-car-scroll">${cards}</div>`
+    +`<button class="img-car-arrow img-car-right" onclick="event.stopPropagation();this.previousElementSibling.scrollBy({left:260,behavior:'smooth'})">&rsaquo;</button>`
+    +`</div>`
+    +`</div>`;
+}
 
 function renderChoiceBlock(choices,question){
   const letters='ABCDEFGH';
@@ -1731,6 +1975,9 @@ function stripMetaBlocks(text){
   return (text||'')
     .replace(/<<<THINKING>>>[\s\S]*?(<<<END_THINKING>>>|$)/g,'')
     .replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES>>>[\s\S]*?(<<<END_CHOICES>>>|$)/g,'')
+    .replace(/<<<IMAGE_SEARCH:\s*.+?>>>/g,'')
+    .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
+    .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .trim();
 }
 
@@ -1749,6 +1996,10 @@ function fmtLive(raw){
   html=html.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
   // Detect special blocks mid-stream and show placeholders
+  // Unclosed DEEP_RESEARCH tag mid-stream (after HTML escaping, <<< becomes &lt;&lt;&lt;)
+  if(/&lt;&lt;&lt;DEEP_RESEARCH/i.test(html)){
+    html=html.replace(/&lt;&lt;&lt;DEEP_RESEARCH[\s\S]*$/,'');
+  }
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){
     html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating mind map...</div>');
@@ -1910,8 +2161,12 @@ async function sendMessage(){
   pendingFiles=[];renderPF();
   for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
-  // ── Research when explicitly toggled or auto-detected ──
+  // ── Research when explicitly toggled ──
   let useResearch=researchEnabled;
+  if(useResearch){
+    researchEnabled=false;
+    refreshModeMenuUI();
+  }
 
   if(useResearch){
     if(files.length){showToast('Deep Research ignores attachments for now.','info');}
@@ -1955,7 +2210,7 @@ async function sendMessage(){
 
   try{
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:text,files,thinking:thinkingEnabled}),signal:controller.signal});
+      body:JSON.stringify({message:text,files,thinking:thinkingEnabled,research_hint:useResearch}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -2118,14 +2373,15 @@ async function sendMessage(){
             finalHTML+=renderArtifactCards(artifactIds,'ready');
             if(data.memory_added?.length)finalHTML+=`<div class="mops">Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
 
-            // ── AI-triggered deep research ──
-            if(data.research_trigger){
-              const rq=data.research_trigger;
-              setTimeout(()=>{
-                if(!researchEnabled) toggleResearch();
-                startInlineResearchPlan(rq,deepResearchDepth);
-              },400);
+            // ── Image search results carousel ──
+            if(data.image_results?.length){
+              for(const ir of data.image_results){
+                finalHTML+=renderImageCarousel(ir.query, ir.images);
+              }
             }
+
+            // ── AI-triggered deep research (hint only) ──
+            // Research is now user-initiated only; no auto-trigger from backend
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
@@ -2760,26 +3016,48 @@ async function openData(){
 }
 
 async function resetData(){
-  const code=document.getElementById('resetCode').value.trim();
-  if(code!=='DELETE-MY-DATA'){
-    await _dlg({title:'Incorrect confirmation',msg:'Please type DELETE-MY-DATA exactly in the field above.',icon:'▸',iconType:'warn',confirmText:'OK'});
-    return;
-  }
-  const step1=await _dlg({title:'Delete all data?',msg:'This will permanently erase all your chats, memory, uploads, and settings. There is no undo.',icon:'▸',iconType:'danger',confirmText:'Yes, delete everything',cancelText:'Cancel',dangerous:true});
+  const step1=await _dlg({title:'Delete your account?',msg:'Are you sure? This will permanently delete your account, all your chats, memory, settings, and uploaded files. This cannot be undone.',icon:'🔥',iconType:'danger',confirmText:'Yes, delete my account',cancelText:'Cancel',dangerous:true});
   if(!step1)return;
-  const step2=await _dlg({title:'Final confirmation',msg:'Last chance — this action is irreversible.',icon:'🔥',iconType:'danger',confirmText:'Permanently delete',cancelText:'Cancel',dangerous:true});
+  const step2=await _dlg({title:'Final confirmation',msg:'Last chance — this will permanently erase everything. There is no way to recover your data.',icon:'🔥',iconType:'danger',confirmText:'Permanently delete',cancelText:'Cancel',dangerous:true});
   if(!step2)return;
-  const r=await fetch('/api/auth/data',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+  const r=await fetch('/api/auth/data',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
   const d=await r.json();
   if(d.ok){
-    closeM('settingsModal');curChat=null;
-    document.getElementById('chatArea').innerHTML='';document.getElementById('topTitle').textContent='NEXUS';
-    await refreshChats();await loadModels();
-    showToast('All data has been reset.','success');
+    // Clear all local storage
+    localStorage.removeItem('nexus_uid');
+    localStorage.removeItem('nexus_remember');
+    localStorage.removeItem('nexus_guest_id');
+    localStorage.removeItem('nexus_theme_override');
+    localStorage.removeItem(LAST_SEEN_VERSION_KEY);
+    localStorage.removeItem(ONB_SKIP_KEY);
+    localStorage.removeItem(ONB_NO_REMIND_KEY);
+    localStorage.removeItem(ONB_DISMISS_KEY);
+    localStorage.removeItem(CALENDAR_STATE_KEY);
+    localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
+    localStorage.removeItem(CHAT_CACHE_KEY);
+    try{localStorage.removeItem('nexus_productivity');}catch{}
+    closeM('settingsModal');
+    curChat=null;curUser=null;
+    document.getElementById('appPage').classList.remove('visible');
+    document.getElementById('loginPage').style.display='flex';
+    showToast('Account deleted.','success');
   }else{
-    await _dlg({title:'Reset failed',msg:d.error||'Something went wrong.',icon:'✕',iconType:'danger',confirmText:'OK'});
+    await _dlg({title:'Deletion failed',msg:d.error||'Something went wrong.',icon:'✕',iconType:'danger',confirmText:'OK'});
   }
-  document.getElementById('resetCode').value='';
+}
+
+async function deleteAllChats(){
+  const count=allChats.length;
+  if(!count){showToast('No chats to delete.','info');return;}
+  const ok=await _dlg({title:`Delete all ${count} chats?`,msg:`This will permanently delete every chat. Your memory, settings, and account will not be affected.`,icon:'🔥',iconType:'danger',confirmText:`Delete all ${count} chats`,cancelText:'Cancel',dangerous:true});
+  if(!ok)return;
+  await fetch('/api/chats/delete-all',{method:'POST'});
+  curChat=null;
+  document.getElementById('topTitle').textContent='NEXUS';
+  document.getElementById('chatArea').innerHTML='';
+  await refreshChats();
+  loadWelcome(true);
+  showToast(`All ${count} chats deleted.`,'success');
 }
 
 // ─── Files ────────────────────────────────────────
