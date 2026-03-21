@@ -1555,6 +1555,8 @@ input[type="file"]{display:none}
 .img-car-arrow:hover{opacity:1;background:var(--bg-raised)}
 .img-car-left{left:4px}
 .img-car-right{right:4px}
+.img-search-fail{display:flex;align-items:center;gap:8px;margin:12px 0;padding:10px 14px;border-radius:var(--r-sm);background:var(--bg-surface);border:1px solid var(--border);color:var(--text-muted);font-size:12.5px}
+.img-search-fail-icon{font-size:16px}
 
 /* ══════════════════════════════════════════════════
    CANVAS PANEL  (inline split)

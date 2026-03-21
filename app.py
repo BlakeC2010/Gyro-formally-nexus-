@@ -1166,25 +1166,78 @@ def extract_image_searches(text):
     return cleaned, queries
 
 def search_images(query, num=8):
-    """Search images via DuckDuckGo. Free, no API key, no limits."""
+    """Search images with DuckDuckGo, with retry + Bing scraping fallback."""
+    import time as _time
+
+    # --- Attempt 1: DuckDuckGo via library (try up to 2 times) ---
+    for attempt in range(2):
+        try:
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                raw = list(ddgs.images(query, max_results=num, safesearch="moderate"))
+            if raw:
+                results = []
+                for item in raw:
+                    results.append({
+                        "url": item.get("image", ""),
+                        "title": item.get("title", ""),
+                        "thumbnail": item.get("thumbnail", item.get("image", "")),
+                        "context_url": item.get("url", ""),
+                        "width": item.get("width", 0),
+                        "height": item.get("height", 0),
+                    })
+                return results
+        except Exception as e:
+            print(f"  [image-search] DDG attempt {attempt+1} error: {e}")
+            if attempt == 0:
+                _time.sleep(1.5)
+
+    # --- Attempt 2: Bing image scraping fallback ---
     try:
-        from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            raw = list(ddgs.images(query, max_results=num, safesearch="moderate"))
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        }
+        url = f"https://www.bing.com/images/search?q={_req.utils.quote(query)}&first=1&count={num}"
+        resp = _req.get(url, headers=headers, timeout=8)
+        soup = _BS(resp.text, "html.parser")
         results = []
-        for item in raw:
-            results.append({
-                "url": item.get("image", ""),
-                "title": item.get("title", ""),
-                "thumbnail": item.get("thumbnail", item.get("image", "")),
-                "context_url": item.get("url", ""),
-                "width": item.get("width", 0),
-                "height": item.get("height", 0),
-            })
-        return results
+        for a_tag in soup.select("a.iusc"):
+            import json as _json
+            m_attr = a_tag.get("m")
+            if not m_attr:
+                continue
+            try:
+                m_data = _json.loads(m_attr)
+            except Exception:
+                continue
+            img_url = m_data.get("murl", "")
+            thumb = m_data.get("turl", img_url)
+            title = m_data.get("t", "")
+            if img_url:
+                results.append({
+                    "url": img_url,
+                    "title": title,
+                    "thumbnail": thumb,
+                    "context_url": m_data.get("purl", ""),
+                    "width": 0,
+                    "height": 0,
+                })
+            if len(results) >= num:
+                break
+        if results:
+            print(f"  [image-search] Bing fallback returned {len(results)} results for '{query}'")
+            return results
     except Exception as e:
-        print(f"  [image-search] error: {e}")
-        return []
+        print(f"  [image-search] Bing fallback error: {e}")
+
+    print(f"  [image-search] ALL methods failed for '{query}'")
+    return []
 
 def clean_response(text):
     text = re.sub(r'<<<FILE_CREATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
@@ -2731,10 +2784,13 @@ def chat_message_stream(chat_id):
             # Extract image search queries and fetch results
             raw_text, image_queries = extract_image_searches(raw_text)
             image_results = []
+            failed_image_queries = []
             for iq in image_queries:
                 imgs = search_images(iq)
                 if imgs:
                     image_results.append({"query": iq, "images": imgs})
+                else:
+                    failed_image_queries.append(iq)
             clean, executed, new_facts, code_results = finalize_chat_response(chat, ctx, raw_text)
             done_payload = {
                 "type": "done",
@@ -2749,6 +2805,8 @@ def chat_message_stream(chat_id):
                 done_payload["research_trigger"] = research_query
             if image_results:
                 done_payload["image_results"] = image_results
+            if failed_image_queries:
+                done_payload["failed_images"] = failed_image_queries
             yield event(done_payload)
         except Exception as e:
             err = str(e)

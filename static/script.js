@@ -2684,6 +2684,11 @@ async function sendMessage(){
                 finalHTML+=renderImageCarousel(ir.query, ir.images);
               }
             }
+            if(data.failed_images?.length){
+              for(const fq of data.failed_images){
+                finalHTML+=`<div class="img-search-fail"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(fq)}" couldn't load — try again or search manually.</div>`;
+              }
+            }
 
             // ── AI-triggered deep research ──
             if(data.research_trigger&&!choiceBlocks.length){
