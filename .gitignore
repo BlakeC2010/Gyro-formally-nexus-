@@ -15,9 +15,9 @@ serviceAccount.json
 *serviceAccount*.json
 
 # User data — never commit
-.nexus_data/
-.nexus_history/
-.nexus_session_secret
+.gyro_data/
+.gyro_history/
+.gyro_session_secret
 
 # Build artifacts
 dist/

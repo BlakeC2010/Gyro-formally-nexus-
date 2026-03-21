@@ -6,6 +6,7 @@ let deepResearchDepth='standard';
 let onboardingChecked=false;
 let selectMode=false;
 const selectedItems=new Set();
+const _collapsedFolders=new Set();
 const runningStreams=new Map();
 const unreadChats=new Set();
 const artifactStore=[];
@@ -18,12 +19,12 @@ let canvasTabs=[];
 let activeCanvasTabId=null;
 const _thinkPhrases=['Thinking this through...','Working on it...','Pulling ideas together...','Reasoning carefully...','Analyzing your request...','Finding the best approach...'];
 let _thinkInterval=null;
-const ONB_SKIP_KEY='nexus_onboarding_skipped';
-const ONB_NO_REMIND_KEY='nexus_onboarding_no_remind';
-const ONB_DISMISS_KEY='nexus_onboarding_reminder_dismissed';
-const CALENDAR_STATE_KEY='nexus_calendar_state_v1';
-const HOME_WIDGET_CACHE_KEY='nexus_home_widgets_cache_v1';
-const CHAT_CACHE_KEY='nexus_recent_chats_v1';
+const ONB_SKIP_KEY='gyro_onboarding_skipped';
+const ONB_NO_REMIND_KEY='gyro_onboarding_no_remind';
+const ONB_DISMISS_KEY='gyro_onboarding_reminder_dismissed';
+const CALENDAR_STATE_KEY='gyro_calendar_state_v1';
+const HOME_WIDGET_CACHE_KEY='gyro_home_widgets_cache_v1';
+const CHAT_CACHE_KEY='gyro_recent_chats_v1';
 let calendarToken='';
 let calendarTokenClient=null;
 let calendarEvents=[];
@@ -119,8 +120,8 @@ function retryMsg(btn){
 // ─── Auto Resume ──────────────────────────────────
 async function tryAutoResume(){
   // Try to resume an authenticated session using a stored remember token
-  const savedUid=localStorage.getItem('nexus_uid');
-  const savedToken=localStorage.getItem('nexus_remember');
+  const savedUid=localStorage.getItem('gyro_uid');
+  const savedToken=localStorage.getItem('gyro_remember');
   if(savedUid && savedToken){
     try{
       const r=await fetch('/api/auth/resume',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -136,7 +137,7 @@ async function tryAutoResume(){
     }catch{}
   }
   // Try to resume a guest session using stored guest_id
-  const savedGid=localStorage.getItem('nexus_guest_id');
+  const savedGid=localStorage.getItem('gyro_guest_id');
   if(savedGid){
     try{
       const r=await fetch('/api/auth/guest',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -194,7 +195,7 @@ document.addEventListener('visibilitychange', async()=>{
 
 // ─── Init ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',async()=>{
-  if(!localStorage.getItem('nexus_theme_override')){
+  if(!localStorage.getItem('gyro_theme_override')){
     theme=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
     applyTheme(false);
   }
@@ -224,7 +225,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   initDropzone();
   refreshModeMenuUI();
   window.matchMedia('(prefers-color-scheme: light)').addEventListener('change',e=>{
-    if(!localStorage.getItem('nexus_theme_override')){
+    if(!localStorage.getItem('gyro_theme_override')){
       theme=e.matches?'light':'dark'; applyTheme(true);
     }
   });
@@ -280,7 +281,7 @@ function applyTheme(animated=true){
 
 function toggleTheme(){
   theme=theme==='light'?'dark':'light';
-  localStorage.setItem('nexus_theme_override','1');
+  localStorage.setItem('gyro_theme_override','1');
   applyTheme(true);
   fetch('/api/auth/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})});
 }
@@ -389,7 +390,7 @@ async function showApp(){
 }
 
 // ─── Changelog / Update Notification ──────────────
-const LAST_SEEN_VERSION_KEY='nexus_last_seen_version';
+const LAST_SEEN_VERSION_KEY='gyro_last_seen_version';
 
 async function checkForUpdates(){
   try{
@@ -573,19 +574,21 @@ function renderHomeWidget(w){
 function buildInstantHomePlan(greeting){
   const state=loadProductivityState();
   const todos=(state.todos||[]).filter(t=>!t.done).slice(0,5);
-  const visions=(state.visions||[]).slice(0,1);
-  const chats=(allChats||[]).slice(0,5);
-  const cal=(calendarEvents||[]).slice(0,4);
+  const chats=(allChats||[]).slice(0,4);
   const pool=[];
 
-  if(chats.length){
+  // Proactive friction detection — nudges (highest priority)
+  const nudges=_detectClientFriction();
+  if(nudges.length){
     pool.push({
-      type:'recent',
+      type:'nudge',
       size:'medium',
-      title:'Recent chats',
-      items:chats.map(c=>({id:c.id,title:c.title||'Untitled'})),
+      title:'Needs your attention',
+      subtitle:`${nudges.length} item${nudges.length!==1?'s':''}`,
+      items:nudges,
     });
   }
+
   if(todos.length){
     pool.push({
       type:'todos',
@@ -595,53 +598,18 @@ function buildInstantHomePlan(greeting){
       items:todos,
     });
   }
-  if(cal.length){
+  if(chats.length){
     pool.push({
-      type:'calendar',
+      type:'recent',
       size:'medium',
-      title:'Upcoming schedule',
-      items:cal,
+      title:'Recent chats',
+      items:chats.map(c=>({id:c.id,title:c.title||'Untitled'})),
     });
   }
-  if(visions.length){
-    const v=visions[0];
-    pool.push({
-      type:'vision',
-      size:'small',
-      title:'Vision target',
-      text:(v.title||'').trim(),
-      meta:(v.when||'').trim(),
-    });
-  }
-
-  // Proactive friction detection — nudges (pinned first)
-  const nudges=_detectClientFriction();
-  let nudgeWidget=null;
-  if(nudges.length){
-    nudgeWidget={
-      type:'nudge',
-      size:'medium',
-      title:'Needs your attention',
-      subtitle:`${nudges.length} item${nudges.length!==1?'s':''}`,
-      items:nudges,
-    };
-  }
-
-  // Shuffle real data widgets
-  for(let i=pool.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [pool[i],pool[j]]=[pool[j],pool[i]];
-  }
-
-  // Pin nudge at top, then fill remaining slots
-  const final=nudgeWidget?[nudgeWidget,...pool]:[...pool];
-
-  // Async: load cross-references and workflow patterns in background
-  _loadSmartWidgets();
 
   return {
     heading:'What would you like to work on today?',
-    widgets:final.slice(0,6),
+    widgets:pool.slice(0,3),
   };
 }
 
@@ -737,7 +705,8 @@ function pickWidgetsForGrid(widgets,maxUnits=8){
 
 function getLocalTimeGreeting(){
   const hour=new Date().getHours();
-  const uname=(curUser?.name||'').split(' ')[0]||'';
+  const rawName=(curUser?.name||'').split(' ')[0]||'';
+  const uname=(rawName==='Guest'&&isGuest)?'':rawName;
   const namePart=uname?`, ${uname}`:'';
   const period=hour<5?'late night':hour<12?'morning':hour<17?'afternoon':hour<21?'evening':'late night';
   const presets={
@@ -745,21 +714,51 @@ function getLocalTimeGreeting(){
       `Burning the midnight oil${namePart}?`,
       `Late-night focus${namePart}?`,
       `Quiet hours, clear mind${namePart}.`,
+      `The world sleeps${namePart}. You build.`,
+      `Night owl mode activated${namePart}.`,
+      `Still going strong${namePart}? 🌙`,
+      `Deep into the night${namePart}.`,
+      `Midnight clarity${namePart}.`,
+      `The best ideas come late${namePart}.`,
+      `No distractions now${namePart}.`,
     ],
     morning:[
       `Early start today${namePart}?`,
       `Morning focus, steady pace${namePart}.`,
       `Fresh morning energy${namePart}.`,
+      `New day, new momentum${namePart}.`,
+      `Rise and build${namePart}. ☀️`,
+      `Morning brain is the best brain${namePart}.`,
+      `Let's make today count${namePart}.`,
+      `Good morning${namePart}. What's the plan?`,
+      `The day is yours${namePart}.`,
+      `Coffee and ideas${namePart}? ☕`,
+      `Starting fresh${namePart}.`,
+      `Clear mind, full day ahead${namePart}.`,
     ],
     afternoon:[
       `Afternoon rhythm holding up${namePart}?`,
       `Midday focus check${namePart}.`,
       `Keeping momentum this afternoon${namePart}?`,
+      `Halfway through the day${namePart}.`,
+      `Afternoon push${namePart}. Let's go.`,
+      `Post-lunch productivity${namePart}? 🚀`,
+      `Still crushing it${namePart}.`,
+      `The afternoon stretch${namePart}.`,
+      `Second wind kicking in${namePart}?`,
+      `Keep the energy up${namePart}.`,
     ],
     evening:[
       `Evening stretch ahead${namePart}.`,
       `Winding down or diving in${namePart}?`,
       `Golden hour thoughts${namePart}.`,
+      `Evening mode${namePart}. Time to reflect or create.`,
+      `Wrapping up the day${namePart}?`,
+      `One more thing before tonight${namePart}?`,
+      `Good evening${namePart}. What's on your mind?`,
+      `The quiet part of the day${namePart}. 🌅`,
+      `End-of-day clarity${namePart}.`,
+      `Evening glow, fresh perspective${namePart}.`,
     ],
   };
   const options=presets[period]||[`Ready when you are${namePart}.`];
@@ -772,6 +771,45 @@ async function loadWelcome(force=false){
   const greeting=getLocalTimeGreeting();
   const instantPlan=buildInstantHomePlan(greeting);
   area.innerHTML=getWelcomeHTML(greeting,instantPlan);
+}
+
+let _activeFolderView=null;
+
+function openFolderView(folder){
+  _activeFolderView=folder;
+  curChat=null;
+  const area=document.getElementById('chatArea');
+  const chats=allChats.filter(c=>c.folder===folder);
+  document.getElementById('topTitle').textContent=folder;
+  const chatListHtml=chats.length?chats.map(c=>`<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
+    +`<span class="fv-chat-icon">💬</span>`
+    +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${c.messages?.length||0} messages</div></div>`
+    +`<span class="fv-chat-arrow">→</span></div>`).join('')
+    :'<div class="fv-empty">No chats in this folder yet. Start a new chat to add one.</div>';
+  area.innerHTML=`<div class="folder-view">
+    <div class="fv-header">
+      <span class="fv-icon">📁</span>
+      <h1 class="fv-title">${esc(folder)}</h1>
+      <button class="fv-edit-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Edit</button>
+    </div>
+    <div class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''} in this folder</div>
+    <div class="fv-chat-list">${chatListHtml}</div>
+    <button class="fv-new-chat-btn" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">+ New Chat in ${esc(folder)}</button>
+  </div>`;
+  renderChatList();
+}
+
+async function renameFolderFromView(oldName){
+  const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
+  if(!next?.trim()||next.trim()===oldName)return;
+  const newName=next.trim();
+  const chats=allChats.filter(c=>c.folder===oldName);
+  for(const c of chats){
+    await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:newName})});
+  }
+  await refreshChats();
+  openFolderView(newName);
+  showToast('Folder renamed.','success');
 }
 
 function loadCachedChats(){
@@ -810,7 +848,6 @@ async function fillMasterPrompt(text){
   input.value=normalized;
   autoResize(input);
   input.focus();
-  await sendMessage();
 }
 
 function updateUserUI(){
@@ -837,9 +874,9 @@ async function handleGoogleCred(resp){
     curUser=d.user; curUser.plan=d.user.plan||'free';
     // Save remember token for auto-resume on session loss
     if(d.remember_token && d.user.id){
-      localStorage.setItem('nexus_uid',d.user.id);
-      localStorage.setItem('nexus_remember',d.remember_token);
-      localStorage.removeItem('nexus_guest_id');
+      localStorage.setItem('gyro_uid',d.user.id);
+      localStorage.setItem('gyro_remember',d.remember_token);
+      localStorage.removeItem('gyro_guest_id');
     }
     theme=d.user.theme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
     applyTheme(false); onboardingChecked=false; showApp();
@@ -848,13 +885,13 @@ async function handleGoogleCred(resp){
 
 async function guestLogin(){
   try{
-    const prevGid=localStorage.getItem('nexus_guest_id')||'';
+    const prevGid=localStorage.getItem('gyro_guest_id')||'';
     const r=await fetch('/api/auth/guest',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({guest_id:prevGid})});
     const d=await r.json();
     if(d.ok){
       isGuest=true;curUser={name:'Guest',email:'',plan:'guest'};
-      if(d.guest_id) localStorage.setItem('nexus_guest_id',d.guest_id);
+      if(d.guest_id) localStorage.setItem('gyro_guest_id',d.guest_id);
       showApp();
     }
     else document.getElementById('loginErr').textContent=d.error||'Guest login failed';
@@ -862,12 +899,12 @@ async function guestLogin(){
 }
 
 async function signOut(){
-  const ok=await _dlg({title:'Sign out',msg:'Are you sure you want to sign out of Nexus?',icon:'⏻',iconType:'warn',confirmText:'Sign out',cancelText:'Cancel'});
+  const ok=await _dlg({title:'Sign out',msg:'Are you sure you want to sign out of gyro?',icon:'⏻',iconType:'warn',confirmText:'Sign out',cancelText:'Cancel'});
   if(!ok)return;
   await fetch('/api/auth/logout',{method:'POST'});
-  localStorage.removeItem('nexus_uid');
-  localStorage.removeItem('nexus_remember');
-  localStorage.removeItem('nexus_guest_id');
+  localStorage.removeItem('gyro_uid');
+  localStorage.removeItem('gyro_remember');
+  localStorage.removeItem('gyro_guest_id');
   curUser=null;curChat=null;allChats=[];isGuest=false;
   onboardingChecked=false;
   hideSetupReminder();
@@ -992,7 +1029,7 @@ async function submitOnboarding(){
     hideSetupReminder();
     if(curUser){curUser.name=(d.user?.name||preferred_name);updateUserUI();}
     document.getElementById('onboardingModal').classList.remove('open');
-    showToast('Setup complete. Nexus is personalized for you.','success');
+    showToast('Setup complete. gyro is personalized for you.','success');
   }catch(e){
     errEl.textContent='Failed to save setup.';
     btn.disabled=false;
@@ -1019,9 +1056,16 @@ function renderChatList(filter=''){
     if(seen.has(fld)||!grouped[fld])continue;seen.add(fld);
     if(fld){
       const fldSel=selectMode&&_isFolderSelected(fld)?' selected':'';
-      html+=`<div class="sb-folder-name${fldSel}" data-folder="${esc(fld)}">`;
+      const chatCount=grouped[fld].length;
+      const isCollapsed=_collapsedFolders.has(fld);
+      html+=`<div class="sb-folder${fldSel}${isCollapsed?' collapsed':''}" data-folder="${esc(fld)}" onclick="openFolderView('${esc(fld).replace(/'/g,"\\'")}')">`;  
       if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${_isFolderSelected(fld)?'checked':''} onclick="event.stopPropagation();toggleSelectFolder('${esc(fld)}')">`;
-      html+=`<span class="sf-label">${esc(fld)}</span><button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
+      html+=`<span class="sf-arrow" onclick="event.stopPropagation();toggleFolderCollapse('${esc(fld)}')">${isCollapsed?'▸':'▾'}</span>`;
+      html+=`<span class="sf-icon">📁</span>`;
+      html+=`<span class="sf-label">${esc(fld)}</span>`;
+      html+=`<span class="sf-count">${chatCount}</span>`;
+      html+=`<button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
+      if(isCollapsed) continue;
     }
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
@@ -1077,6 +1121,11 @@ async function newFolder(){
   const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
   if(n?.trim())createChat(n.trim());
 }
+function toggleFolderCollapse(folder){
+  if(_collapsedFolders.has(folder))_collapsedFolders.delete(folder);
+  else _collapsedFolders.add(folder);
+  renderChatList(document.getElementById('chatSearch')?.value||'');
+}
 function toggleFolderMenu(btn,folder){
   const existing=document.querySelector('.sf-menu');
   if(existing){existing.remove();return;}
@@ -1123,7 +1172,7 @@ async function deleteFolderAndChats(folder){
   }
   if(ids.includes(curChat)){
     curChat=null;
-    document.getElementById('topTitle').textContent='NEXUS';
+    document.getElementById('topTitle').textContent='gyro';
     loadWelcome(true);
   }
   await refreshChats();showToast(`Folder "${folder}" and ${ids.length} chat${ids.length!==1?'s':''} deleted.`,'success');
@@ -1170,7 +1219,7 @@ async function deleteSelectedChats(){
   await fetch('/api/chats/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_ids:ids})});
   if(ids.includes(curChat)){
     curChat=null;
-    document.getElementById('topTitle').textContent='NEXUS';
+    document.getElementById('topTitle').textContent='gyro';
     loadWelcome(true);
   }
   selectedItems.clear();
@@ -1204,6 +1253,7 @@ async function _loadSmartWidgets(){
 
 async function openChat(id){
   if(curChat===id) return;
+  _activeFolderView=null;
   curChat=id;
   unreadChats.delete(id);
   const r=await apiFetch(`/api/chats/${id}`);
@@ -1254,7 +1304,7 @@ async function openChat(id){
     const genDiv=document.createElement('div');
     genDiv.className='msg kairo';
     genDiv.id='bg-gen-indicator';
-    genDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
+    genDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
     area.appendChild(genDiv);
     area.scrollTop=area.scrollHeight;
   }
@@ -1275,7 +1325,7 @@ async function delChat(id){
     await refreshChats();
     if(curChat===id){
       curChat=null;
-      document.getElementById('topTitle').textContent='NEXUS';
+      document.getElementById('topTitle').textContent='gyro';
       loadWelcome(true);
     }
     updateComposerBusyUI();
@@ -1344,7 +1394,7 @@ function showUpgradeForModel(m){
 
 function openUpgradeModal(){
   const plan=curUser?.plan||'free';
-  document.getElementById('upgradeModalSubtitle').textContent='Manage your Nexus plan.';
+  document.getElementById('upgradeModalSubtitle').textContent='Manage your gyro plan.';
   ['Free','Pro','Max','Dev'].forEach(p=>{
     const el=document.getElementById('uplan'+p);
     if(el)el.classList.toggle('current',plan===p.toLowerCase());
@@ -1779,7 +1829,7 @@ async function startInlineResearchPlan(query,depth){
   msgDiv.className='msg kairo';
   const contentEl=document.createElement('div');
   contentEl.className='msg-content';
-  msgDiv.innerHTML='<div class="lbl">Nexus</div>';
+  msgDiv.innerHTML='<div class="lbl">gyro</div>';
   msgDiv.appendChild(contentEl);
   area.appendChild(msgDiv);
   area.scrollTop=area.scrollHeight;
@@ -2181,7 +2231,7 @@ async function sendMessage(){
     const area=document.getElementById('chatArea');
     const msgDiv=document.createElement('div');
     msgDiv.className='msg kairo';
-    msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"></div>';
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
     area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
     const contentEl=msgDiv.querySelector('.msg-content');
     try{
@@ -2202,7 +2252,7 @@ async function sendMessage(){
 
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
-  msgDiv.innerHTML='<div class="lbl">Nexus</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
+  msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
   area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
   startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
@@ -2275,7 +2325,7 @@ async function sendMessage(){
         try{
           const data=JSON.parse(line);
           if(data.type==='thinking_delta'){
-            if(!isThinking)console.log('[NEXUS] thinking_delta received — thinking panel activating');
+            if(!isThinking)console.log('[gyro] thinking_delta received — thinking panel activating');
             isThinking=true;
             thinkText+=data.text;
             if(canRender()){
@@ -2380,8 +2430,13 @@ async function sendMessage(){
               }
             }
 
-            // ── AI-triggered deep research (hint only) ──
-            // Research is now user-initiated only; no auto-trigger from backend
+            // ── AI-triggered deep research (confirm with user) ──
+            if(data.research_trigger){
+              const rq=data.research_trigger;
+              setTimeout(()=>{
+                startInlineResearchPlan(rq,deepResearchDepth);
+              },400);
+            }
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
@@ -2442,7 +2497,7 @@ function renderThinkBlock(thinkText){
 function addMsg(role,text,files,extra={}){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
   div.className=`msg ${role}`;let html='';
-  if(role==='kairo')html+='<div class="lbl">Nexus</div>';
+  if(role==='kairo')html+='<div class="lbl">gyro</div>';
   if(role==='user'&&extra.fileNames?.length)html+=`<div class="msg-f">${extra.fileNames.map(esc).join(', ')}</div>`;
   if(role==='user'&&extra.files?.length){
     const previews=extra.files.map(f=>{
@@ -2488,7 +2543,7 @@ function addMsg(role,text,files,extra={}){
 
 function addThinking(){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
-  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div> Nexus is thinking...';
+  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div> gyro is thinking...';
   area.appendChild(div);area.scrollTop=area.scrollHeight;return div;
 }
 
@@ -3024,10 +3079,10 @@ async function resetData(){
   const d=await r.json();
   if(d.ok){
     // Clear all local storage
-    localStorage.removeItem('nexus_uid');
-    localStorage.removeItem('nexus_remember');
-    localStorage.removeItem('nexus_guest_id');
-    localStorage.removeItem('nexus_theme_override');
+    localStorage.removeItem('gyro_uid');
+    localStorage.removeItem('gyro_remember');
+    localStorage.removeItem('gyro_guest_id');
+    localStorage.removeItem('gyro_theme_override');
     localStorage.removeItem(LAST_SEEN_VERSION_KEY);
     localStorage.removeItem(ONB_SKIP_KEY);
     localStorage.removeItem(ONB_NO_REMIND_KEY);
@@ -3035,7 +3090,7 @@ async function resetData(){
     localStorage.removeItem(CALENDAR_STATE_KEY);
     localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
     localStorage.removeItem(CHAT_CACHE_KEY);
-    try{localStorage.removeItem('nexus_productivity');}catch{}
+    try{localStorage.removeItem('gyro_productivity');}catch{}
     closeM('settingsModal');
     curChat=null;curUser=null;
     document.getElementById('appPage').classList.remove('visible');
@@ -3053,7 +3108,7 @@ async function deleteAllChats(){
   if(!ok)return;
   await fetch('/api/chats/delete-all',{method:'POST'});
   curChat=null;
-  document.getElementById('topTitle').textContent='NEXUS';
+  document.getElementById('topTitle').textContent='gyro';
   document.getElementById('chatArea').innerHTML='';
   await refreshChats();
   loadWelcome(true);
@@ -3597,7 +3652,7 @@ async function enhanceMermaidDiagrams(){
   }
 }
 
-const PRODUCTIVITY_KEY='nexus_productivity_v1';
+const PRODUCTIVITY_KEY='gyro_productivity_v1';
 
 function loadProductivityState(){
   try{

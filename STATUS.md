@@ -1,4 +1,4 @@
-# Nexus Command Center Status
+# gyro Command Center Status
 **Last Updated:** 2025-06-19
 **Current Focus:** None set
 
