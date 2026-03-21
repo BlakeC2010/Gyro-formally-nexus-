@@ -1180,7 +1180,7 @@ function renderChatList(filter=''){
       const sel=selectMode&&selectedItems.has(c.id)?' selected':'';
       html+=`<div class="sb-chat${a}${g}${u}${sel}" onclick="${selectMode?`toggleSelectChat('${c.id}')`:"openChat('"+c.id+"')"}">`;
       if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${selectedItems.has(c.id)?'checked':''} onclick="event.stopPropagation();toggleSelectChat('${c.id}')">`;
-      html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
+      html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();showMoveMenu(this,'${c.id}')" title="Move to folder">📁</button><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
@@ -1250,6 +1250,35 @@ function toggleFolderMenu(btn,folder){
   btn.parentElement.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
+}
+function showMoveMenu(btn,chatId){
+  const existing=document.querySelector('.sf-menu');
+  if(existing){existing.remove();return;}
+  const chat=allChats.find(c=>c.id===chatId);
+  const curFolder=chat?.folder||'';
+  const folders=[...new Set([...allChats.map(c=>c.folder).filter(f=>f),...Object.keys(_loadFolderMeta())])].sort();
+  const menu=document.createElement('div');
+  menu.className='sf-menu';
+  let items='';
+  for(const f of folders){
+    if(f===curFolder) continue;
+    const safe=f.replace(/'/g,"\\'").replace(/</g,'&lt;');
+    items+=`<button onclick="moveChat('${chatId}','${safe}')">📁 ${esc(f)}</button>`;
+  }
+  if(curFolder) items+=`<button onclick="moveChat('${chatId}','')">🚫 Remove from folder</button>`;
+  if(!items) items='<div style="padding:8px 12px;color:var(--text-muted);font-size:11px">No folders yet</div>';
+  menu.innerHTML=items;
+  btn.closest('.sb-chat').style.position='relative';
+  btn.closest('.sb-chat').appendChild(menu);
+  const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+}
+async function moveChat(chatId,folder){
+  document.querySelector('.sf-menu')?.remove();
+  await fetch(`/api/chats/${chatId}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});
+  await refreshChats();
+  if(_activeFolderView) openFolderView(_activeFolderView);
+  showToast(folder?`Moved to ${folder}.`:'Removed from folder.','success');
 }
 async function renameFolderFromMenu(oldName){
   document.querySelector('.sf-menu')?.remove();
@@ -2328,7 +2357,7 @@ async function sendMessage(){
   // Force-create a new chat if none exists (don't rely on createChat guard)
   if(!curChat){
     try{
-      const cr=await apiFetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:pendingFolder||''})});
+      const cr=await apiFetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:_activeFolderView||pendingFolder||''})});
       const cc=await cr.json();
       if(cc.error){showToast('Could not create chat: '+cc.error,'error');return;}
       curChat=cc.id;
@@ -2449,7 +2478,7 @@ async function sendMessage(){
           msgDiv.remove();
           setChatRunning(targetChatId,false);
           curChat=null;
-          await createChat(pendingFolder||'');
+          await createChat(_activeFolderView||pendingFolder||'');
           document.getElementById('msgInput').value=text;
           pendingFiles=files;
           renderPF();
