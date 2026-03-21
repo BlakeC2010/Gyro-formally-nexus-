@@ -206,8 +206,18 @@ body.light .sidebar{background:var(--bg-raised)}
 .sb-folder-name{
   font-size:9px;text-transform:uppercase;letter-spacing:2px;
   color:var(--text-muted);padding:10px 10px 4px;
-  cursor:pointer;display:flex;align-items:center;gap:5px;font-weight:600;
+  cursor:default;display:flex;align-items:center;gap:5px;font-weight:600;
+  position:relative;
 }
+.sb-folder-name .sf-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sf-dots{background:none;border:none;color:var(--text-muted);font-size:14px;cursor:pointer;padding:2px 4px;border-radius:var(--r-xs);opacity:0;transition:all .15s;line-height:1;font-weight:700;letter-spacing:0}
+.sb-folder-name:hover .sf-dots{opacity:1}
+.sf-dots:hover{color:var(--text-primary);background:var(--bg-hover)}
+.sf-menu{position:absolute;top:100%;right:4px;z-index:100;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px;min-width:120px;box-shadow:var(--shadow-lg);animation:sfMenuIn .12s var(--ease-out)}
+@keyframes sfMenuIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.sf-menu button{display:block;width:100%;text-align:left;padding:7px 10px;border:none;background:none;color:var(--text-secondary);font-size:11px;font-weight:500;border-radius:var(--r-xs);cursor:pointer;font-family:var(--font);transition:all .12s}
+.sf-menu button:hover{background:var(--bg-hover);color:var(--text-primary)}
+.sf-menu button:last-child:hover{color:var(--red);background:rgba(248,113,113,.06)}
 .sb-chat{
   padding:10px 12px;border-radius:var(--r-sm);cursor:pointer;
   font-size:12px;display:flex;align-items:center;gap:9px;
@@ -583,7 +593,7 @@ body.light .chat-area::before{
   animation:artifactShimmer 2s ease-in-out infinite;
 }
 @keyframes spIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-.sp-icon{font-size:16px;position:relative;z-index:1}
+.sp-icon{font-size:16px;position:relative;z-index:1;color:var(--accent)}
 .stream-placeholder>:not(.sp-icon){position:relative;z-index:1}
 
 /* ── Stream Inline Styles ── */
@@ -619,7 +629,7 @@ body.light .chat-area::before{
 .msg .fops{margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:11px}
 .msg .fo{display:flex;align-items:center;gap:5px;padding:2px 0;color:var(--green)}
 .msg .mops{margin-top:6px;font-size:10px;color:var(--purple)}
-.msg .mermaid-container{margin-top:12px;background:linear-gradient(135deg,var(--bg-deep) 0%,var(--bg-raised) 100%);border-radius:var(--r-md);padding:24px 20px;overflow-x:auto;border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.msg .mermaid-container{margin-top:16px;background:var(--bg-deep);border-radius:var(--r-lg);padding:20px;overflow-x:auto;border:1px solid var(--border);box-shadow:0 2px 12px rgba(0,0,0,.15)}
 /* Stream preview — live text + cursor */
 .msg .stream-preview{
   white-space:pre-wrap;color:var(--text-secondary);font-size:13px;line-height:1.7;
@@ -675,12 +685,27 @@ body.light .chat-area::before{
 .msg .artifact-card .meta .name{font-size:12px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .msg .artifact-card .meta .sub{font-size:10px;color:var(--text-muted)}
 .msg .artifact-card .artifact-arrow{font-size:13px;color:var(--text-muted)}
-.msg .mermaid-container .mermaid{display:flex;justify-content:center}
-.msg .mermaid-container svg{max-width:100%;filter:drop-shadow(0 10px 20px rgba(0,0,0,.25));background:radial-gradient(circle at 50% 50%,rgba(191,107,58,.05),transparent 70%);border-radius:12px}
-.msg .mermaid-container .mermaid-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:10px}
-.msg .mermaid-container .mermaid-toolbar button,.msg .mermaid-container .mermaid-toolbar a{padding:6px 10px;border-radius:var(--r-xs);border:1px solid var(--border);background:var(--bg-deep);font-size:10px;color:var(--text-secondary);cursor:pointer;text-decoration:none}
-.msg .mermaid-container .mermaid-toolbar button:hover,.msg .mermaid-container .mermaid-toolbar a:hover{background:var(--bg-hover);color:var(--text-primary)}
-.msg .mermaid-container img.mermaid-png{width:100%;height:auto;border-radius:12px;border:1px solid var(--border);display:block}
+.msg .mermaid-container .mermaid{display:flex;justify-content:center;padding:16px 8px}
+.msg .mermaid-container svg{max-width:100%;border-radius:12px}
+/* Mind map node hierarchy — section-based colors for visual separation */
+.msg .mermaid-container svg .node.section-0>rect,.msg .mermaid-container svg .node.section-0>circle,.msg .mermaid-container svg .node.section-0>path{fill:var(--accent)!important;stroke:var(--accent)!important;filter:drop-shadow(0 4px 12px rgba(191,107,58,.35))}
+.msg .mermaid-container svg .node.section-0 .nodeLabel{color:#fff!important;font-weight:700!important}
+.msg .mermaid-container svg .node.section-1>rect,.msg .mermaid-container svg .node.section-1>path{fill:#2d2640!important;stroke:#6c5ab7!important}
+.msg .mermaid-container svg .node.section-1 .nodeLabel{color:#c4b5fd!important}
+.msg .mermaid-container svg .node.section-2>rect,.msg .mermaid-container svg .node.section-2>path{fill:#1e2d3d!important;stroke:#4a90b8!important}
+.msg .mermaid-container svg .node.section-2 .nodeLabel{color:#93c5e8!important}
+.msg .mermaid-container svg .node.section-3>rect,.msg .mermaid-container svg .node.section-3>path{fill:#1f3028!important;stroke:#4a9960!important}
+.msg .mermaid-container svg .node.section-3 .nodeLabel{color:#86d9a0!important}
+.msg .mermaid-container svg .node.section-4>rect,.msg .mermaid-container svg .node.section-4>path{fill:#3d2828!important;stroke:#b85a5a!important}
+.msg .mermaid-container svg .node.section-4 .nodeLabel{color:#e8a0a0!important}
+.msg .mermaid-container svg .node.section-5>rect,.msg .mermaid-container svg .node.section-5>path{fill:#3d3520!important;stroke:#b89a4a!important}
+.msg .mermaid-container svg .node.section-5 .nodeLabel{color:#e8d08a!important}
+.msg .mermaid-container svg .edge path{stroke-width:2px!important;opacity:.5}
+.msg .mermaid-container svg .nodeLabel{font-size:13px!important;font-weight:500!important;letter-spacing:.01em}
+.msg .mermaid-container .mermaid-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-bottom:8px}
+.msg .mermaid-container .mermaid-toolbar button,.msg .mermaid-container .mermaid-toolbar a{padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-surface);font-size:11px;color:var(--text-muted);cursor:pointer;text-decoration:none;font-weight:500;transition:all .15s var(--ease)}
+.msg .mermaid-container .mermaid-toolbar button:hover,.msg .mermaid-container .mermaid-toolbar a:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-hover)}
+.msg .mermaid-container img.mermaid-png{width:100%;height:auto;border-radius:12px;display:block}
 
 /* Image expand / lightbox */
 .msg-img-wrap{position:relative;display:inline-block;margin:10px 0;max-width:100%}
@@ -907,7 +932,7 @@ body.light .chat-area::before{
 }
 .wl-action-card:hover{background:var(--bg-hover);border-color:var(--border-hover);transform:translateY(-3px);box-shadow:var(--shadow-sm)}
 .wl-action-card:active{transform:translateY(0) scale(.98);transition-duration:.1s}
-.wl-ac-icon{font-size:22px}
+.wl-ac-icon{font-size:16px;color:var(--accent);font-weight:700}
 .wl-ac-label{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
 .wl-ac-sub{font-size:11px;color:var(--text-muted);line-height:1.4}
 .wl-cal-list,.wl-todo-list{display:flex;flex-direction:column;gap:8px}
@@ -932,7 +957,7 @@ body.light .chat-area::before{
 .wl-nudge-list{display:flex;flex-direction:column;gap:8px}
 .wl-nudge-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-deep);transition:all .2s var(--ease);cursor:default}
 .wl-nudge-item:hover{border-color:var(--border-hover);background:var(--bg-surface)}
-.wl-nudge-icon{font-size:16px;line-height:1;flex-shrink:0;margin-top:1px}
+.wl-nudge-icon{font-size:16px;line-height:1;flex-shrink:0;margin-top:1px;color:var(--accent)}
 .wl-nudge-body{flex:1;min-width:0}
 .wl-nudge-msg{font-size:13px;color:var(--text-primary);font-weight:500;line-height:1.4}
 .wl-nudge-step{font-size:11.5px;color:var(--text-muted);margin-top:3px;line-height:1.4}
@@ -998,7 +1023,7 @@ input[type="file"]{display:none}
 @keyframes plusIn{from{opacity:0;transform:translateY(8px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
 .plus-item{display:flex;align-items:center;gap:10px;padding:9px 14px;font-size:12px;color:var(--text-secondary);cursor:pointer;transition:all .15s var(--ease);border-left:2px solid transparent}
 .plus-item:hover{background:var(--bg-hover);color:var(--text-primary);border-left-color:var(--accent);padding-left:16px}
-.plus-item .pi-icon{width:20px;text-align:center;font-size:14px;flex-shrink:0}
+.plus-item .pi-icon{width:20px;text-align:center;font-size:14px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--accent)}
 .plus-item .pi-label{flex:1}
 .plus-item .pi-badge{font-size:9px;padding:2px 6px;border-radius:999px;background:var(--accent-dim);color:var(--accent);font-weight:600}
 .plus-item.plus-toggle.active{background:var(--accent-dim);border-left:2px solid var(--accent)}
@@ -1100,7 +1125,7 @@ input[type="file"]{display:none}
 .fb-del:hover{color:var(--red);background:rgba(248,113,113,.08)}
 
 /* ── Chat Settings Drawer ── */
-.chat-drawer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);backdrop-filter:blur(4px);z-index:900;opacity:0;pointer-events:none;transition:opacity .25s var(--ease)}
+.chat-drawer-overlay{position:fixed;inset:0;background:transparent;z-index:900;opacity:0;pointer-events:none;transition:opacity .25s var(--ease)}
 .chat-drawer-overlay.open{opacity:1;pointer-events:auto}
 .chat-drawer{position:fixed;top:0;right:0;bottom:0;width:360px;max-width:90vw;background:var(--bg-app);border-left:1px solid var(--border);z-index:901;transform:translateX(100%);transition:transform .3s var(--ease-spring);display:flex;flex-direction:column}
 .chat-drawer.open{transform:translateX(0)}

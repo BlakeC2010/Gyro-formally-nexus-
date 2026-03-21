@@ -235,7 +235,7 @@ function applyTheme(animated=true){
   }
   document.body.classList.toggle('light',theme==='light');
   const btn=document.getElementById('btnTheme');
-  if(btn)btn.textContent=theme==='light'?'☀️':'🌙';
+  if(btn)btn.textContent=theme==='light'?'○':'●';
   const dark=document.getElementById('themeBtn_dark');
   const light=document.getElementById('themeBtn_light');
   if(dark&&light){
@@ -370,10 +370,10 @@ function normalizeMasterPrompt(text){
 
 function getMasterPrompts(){
   return [
-    {icon:'⚡',label:'Plan my day',q:'Help me organize and prioritize everything on my plate today. Ask me 2 quick clarifying questions before building the plan.'},
-    {icon:'✍',label:'Help me write',q:'Help me write or polish something. Start by asking what audience, tone, and outcome I want.'},
-    {icon:'💡',label:'Brainstorm',q:'Brainstorm ideas with me for a project or problem. Push for novel options, then rank the top 3.'},
-    {icon:'🔍',label:'Research & analyze',q:'Help me research this topic deeply. Outline the scope first, then suggest a strong investigation path.'}
+    {icon:'→',label:'Plan my day',q:'Help me organize and prioritize everything on my plate today. Ask me 2 quick clarifying questions before building the plan.'},
+    {icon:'→',label:'Help me write',q:'Help me write or polish something. Start by asking what audience, tone, and outcome I want.'},
+    {icon:'→',label:'Brainstorm',q:'Brainstorm ideas with me for a project or problem. Push for novel options, then rank the top 3.'},
+    {icon:'→',label:'Research & analyze',q:'Help me research this topic deeply. Outline the scope first, then suggest a strong investigation path.'}
   ];
 }
 
@@ -429,7 +429,7 @@ function renderHomeWidget(w){
     const items=Array.isArray(w.items)?w.items:[];
     if(!items.length)return'';
     const body=items.map(i=>{
-      const icon=i.category==='stale_chat'?'⏸':'⚡';
+      const icon=i.category==='stale_chat'?'●':'●';
       const actionAttr=i.action?`data-nudge-action='${esc(JSON.stringify(i.action))}'`:'';
       return `<div class="wl-nudge-item" ${actionAttr}>`
         +`<span class="wl-nudge-icon">${icon}</span>`
@@ -704,7 +704,7 @@ function updateUserUI(){
   const planEl=document.getElementById('userPlan');
   if(planEl){
     const plan=curUser.plan||'free';
-    const labels={guest:'Guest',free:'Free',pro:'Pro ⚡',max:'Max 👑',dev:'Dev 🔧'};
+    const labels={guest:'Guest',free:'Free',pro:'Pro',max:'Max',dev:'DEV'};
     planEl.textContent=labels[plan]||'Free';
     planEl.className='plan-badge '+plan;
   }
@@ -900,7 +900,7 @@ function renderChatList(filter=''){
   let html='';const seen=new Set();
   for(const fld of ['',...Object.keys(grouped).filter(f=>f).sort()]){
     if(seen.has(fld)||!grouped[fld])continue;seen.add(fld);
-    if(fld)html+=`<div class="sb-folder-name">📁 ${esc(fld)}</div>`;
+    if(fld)html+=`<div class="sb-folder-name" data-folder="${esc(fld)}"><span class="sf-label">${esc(fld)}</span><button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
       const g=isChatRunning(c.id)?' generating':'';
@@ -915,7 +915,7 @@ function filterChats(){renderChatList(document.getElementById('chatSearch').valu
 
 async function renameChat(id){
   const chat=allChats.find(c=>c.id===id);
-  const next=await _dlg({title:'Rename chat',msg:'',icon:'✏️',iconType:'info',inputLabel:'New title',inputDefault:chat?.title||'',inputPlaceholder:'Chat title…',confirmText:'Rename',cancelText:'Cancel'});
+  const next=await _dlg({title:'Rename chat',msg:'',icon:'▸',iconType:'info',inputLabel:'New title',inputDefault:chat?.title||'',inputPlaceholder:'Chat title…',confirmText:'Rename',cancelText:'Cancel'});
   if(!next||!next.trim())return;
   await fetch(`/api/chats/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:next.trim()})});
   if(curChat===id)document.getElementById('topTitle').textContent=next.trim();
@@ -943,8 +943,42 @@ async function createChat(folder=''){
 }
 
 async function newFolder(){
-  const n=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
+  const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
   if(n?.trim())createChat(n.trim());
+}
+function toggleFolderMenu(btn,folder){
+  const existing=document.querySelector('.sf-menu');
+  if(existing){existing.remove();return;}
+  const menu=document.createElement('div');
+  menu.className='sf-menu';
+  menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="openFolderSettings('${folder.replace(/'/g,"\\'")}')">Settings</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Delete</button>`;
+  btn.parentElement.style.position='relative';
+  btn.parentElement.appendChild(menu);
+  const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+}
+async function renameFolderFromMenu(oldName){
+  document.querySelector('.sf-menu')?.remove();
+  const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
+  if(!next?.trim()||next.trim()===oldName)return;
+  const chats=allChats.filter(c=>c.folder===oldName);
+  for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:next.trim()})});}
+  await refreshChats();showToast('Folder renamed.','success');
+}
+async function openFolderSettings(folder){
+  document.querySelector('.sf-menu')?.remove();
+  const chats=allChats.filter(c=>c.folder===folder);
+  if(!chats.length){showToast('No chats in folder.','info');return;}
+  curChat=chats[0].id;
+  openChatDrawer();
+}
+async function deleteFolderFromMenu(folder){
+  document.querySelector('.sf-menu')?.remove();
+  const ok=await _dlg({title:'Delete folder',msg:'Chats will be moved out of the folder, not deleted.',icon:'▸',iconType:'danger',confirmText:'Delete folder',cancelText:'Cancel',dangerous:true});
+  if(!ok)return;
+  const chats=allChats.filter(c=>c.folder===folder);
+  for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:''})});}
+  await refreshChats();showToast('Folder removed.','success');
 }
 
 async function openChat(id){
@@ -1009,7 +1043,7 @@ async function openChat(id){
 }
 
 async function delChat(id){
-  const ok=await _dlg({title:'Delete chat',msg:'This chat will be permanently deleted.',icon:'🗑',iconType:'danger',confirmText:'Delete',cancelText:'Cancel',dangerous:true});
+  const ok=await _dlg({title:'Delete chat',msg:'This chat will be permanently deleted.',icon:'▸',iconType:'danger',confirmText:'Delete',cancelText:'Cancel',dangerous:true});
   if(!ok)return;
   try{
     const run=runningStreams.get(id);
@@ -1058,13 +1092,13 @@ async function loadModels(){
       let badgeHTML=m.tier==='free'
         ?'<span class="cms-badge free">free</span>'
         :m.tier==='pro'?'<span class="cms-badge pro">pro</span>':'';
-      const lockIcon=locked?'<span class="lock-icon">🔒</span>':'';
+      const lockIcon=locked?'<span class="lock-icon">•</span>':'';
       opt.innerHTML=`${logoImg(m.provider)} <span>${esc(m.label)}</span>${badgeHTML}${lockIcon}`;
       opt.onclick=()=>{
         if(locked){showUpgradeForModel(m);return;}
         if(unavailable){showToast(m.locked_reason||'Model unavailable','error');return;}
         if(m.provider!=='google'){
-          showToast('⚠️ '+m.label+' is not available yet. Only Gemini models are currently active.','info');
+          showToast(m.label+' is not available yet. Only Gemini models are currently active.','info');
           return;
         }
         selectModel(m.id,m.label,m.provider);
@@ -1108,7 +1142,7 @@ async function applyPlanChange(plan){
   }
   // Warn for non-dev plan changes (payments not available yet)
   if(plan!=='dev'){
-    showToast('⚠️ Plan purchasing is not available yet. Use the Developer plan for full access.','info');
+    showToast('Plan purchasing is not available yet. Use the Developer plan for full access.','info');
     return;
   }
   try{
@@ -1204,7 +1238,7 @@ function handleFiles(input){
 
 function renderPF(){
   document.getElementById('filePreview').innerHTML=pendingFiles.map((f,i)=>{
-    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:'📄';
+    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:'▪';
     return`<div class="file-chip">${t} ${esc(f.name)} <button class="fc-x" onclick="pendingFiles.splice(${i},1);renderPF()">✕</button></div>`;
   }).join('');
   if(pendingFiles.length)setStatus(`${pendingFiles.length} file${pendingFiles.length===1?'':'s'} attached and ready.`);
@@ -1395,7 +1429,7 @@ async function runDeepResearch(query,contentEl,area,planText){
   const depth=deepResearchDepth||'standard';
 
   const stepNames=['Plan','Search','Read','Analyze','Gap Fill','Cross-Ref','Write','Review','Cite','Export'];
-  const stepIcons=['📋','🔍','📖','🧠','🔎','🔗','✍️','✅','📑','📄'];
+  const stepIcons=['1','2','3','4','5','6','7','8','9','10'];
   let currentPct=0, currentStep=0, lastMessage='Preparing research pipeline...';
   let wasCancelled=false;
 
@@ -1488,7 +1522,7 @@ async function runDeepResearch(query,contentEl,area,planText){
         if(evt.pdf_file)dl.push(`<a class="choice-btn" href="/api/research/download/${encodeURIComponent(evt.pdf_file)}">Download PDF</a>`);
         if(evt.md_file)dl.push(`<a class="choice-btn" href="/api/research/download/${encodeURIComponent(evt.md_file)}">Download Markdown</a>`);
         contentEl.innerHTML=`
-          <div class="research-badge">✅ Research complete · ${esc(depth)} · ${Number(evt.source_count||srcs.length)} sources</div>
+          <div class="research-badge">Research complete · ${esc(depth)} · ${Number(evt.source_count||srcs.length)} sources</div>
           <div class="research-actions">${dl.join('')}</div>
           ${srcHtml?`<div class="research-summary"><strong>Top sources</strong><ol style="margin:8px 0 0 18px">${srcHtml}</ol></div>`:''}
           <div style="margin-top:10px">${fmt(report.slice(0,32000))}</div>
@@ -1532,7 +1566,7 @@ async function startInlineResearchPlan(query,depth){
   contentEl.innerHTML=`
     <div class="ri-card">
       <div class="ri-header">
-        <span class="research-plan-badge">🧪 Deep Research</span>
+        <span class="research-plan-badge">Deep Research</span>
         <span class="ri-depth">${esc(depth)}</span>
       </div>
       <div class="ri-query">${esc(query)}</div>
@@ -1560,7 +1594,7 @@ async function startInlineResearchPlan(query,depth){
     contentEl.innerHTML=`
       <div class="ri-card">
         <div class="ri-header">
-          <span class="research-plan-badge">📋 Research Plan</span>
+          <span class="research-plan-badge">Research Plan</span>
           <span class="ri-depth">${esc(depth)}</span>
         </div>
         <div class="ri-query">${esc(query)}</div>
@@ -1578,7 +1612,7 @@ async function startInlineResearchPlan(query,depth){
   }catch(e){
     contentEl.innerHTML=`
       <div class="ri-card ri-card-error">
-        <div class="ri-header"><span class="research-plan-badge">🧪 Deep Research</span></div>
+        <div class="ri-header"><span class="research-plan-badge">Deep Research</span></div>
         <div style="color:var(--red);margin-top:10px">${esc(e.message||'Failed to generate plan.')}</div>
         <div class="ri-actions">
           <button class="research-btn-back" onclick="cancelInlineResearch()">Dismiss</button>
@@ -1717,11 +1751,11 @@ function fmtLive(raw){
   // Detect special blocks mid-stream and show placeholders
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){
-    html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">🗺️</span> Generating mind map...</div>');
+    html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating mind map...</div>');
   }
   // Unclosed todolist block
   if(/```todolist\n/i.test(html)&&!(/```todolist\n[\s\S]*?```/.test(html))){
-    html=html.replace(/```todolist\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">✅</span> Generating task list...</div>');
+    html=html.replace(/```todolist\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating task list...</div>');
   }
   // Unclosed generic code block — show artifact generating
   if(hasUnclosedCodeFence(html)){
@@ -1729,7 +1763,7 @@ function fmtLive(raw){
     const fenceMatch=html.match(/```(\w+)\n(?![\s\S]*```)/);
     const lang=fenceMatch?fenceMatch[1]:'code';
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','json':'JSON','markdown':'Markdown','md':'Markdown','sql':'SQL','bash':'Shell','sh':'Shell','typescript':'TypeScript','ts':'TypeScript'}[lang.toLowerCase()]||lang;
-    html=html.replace(/```\w*\n[^]*$/,'<div class="stream-placeholder"><span class="sp-icon">⚙</span> Writing '+esc(langLabel)+' artifact...</div>');
+    html=html.replace(/```\w*\n[^]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Writing '+esc(langLabel)+' artifact...</div>');
   }
 
   // Completed code blocks: render styled
@@ -2082,7 +2116,7 @@ async function sendMessage(){
               finalHTML+='</div>';
             }
             finalHTML+=renderArtifactCards(artifactIds,'ready');
-            if(data.memory_added?.length)finalHTML+=`<div class="mops">🧠 Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
+            if(data.memory_added?.length)finalHTML+=`<div class="mops">Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
 
             // ── AI-triggered deep research ──
             if(data.research_trigger){
@@ -2153,14 +2187,14 @@ function addMsg(role,text,files,extra={}){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
   div.className=`msg ${role}`;let html='';
   if(role==='kairo')html+='<div class="lbl">Nexus</div>';
-  if(role==='user'&&extra.fileNames?.length)html+=`<div class="msg-f">📎 ${extra.fileNames.map(esc).join(', ')}</div>`;
+  if(role==='user'&&extra.fileNames?.length)html+=`<div class="msg-f">${extra.fileNames.map(esc).join(', ')}</div>`;
   if(role==='user'&&extra.files?.length){
     const previews=extra.files.map(f=>{
       const name=esc(f.name||'upload');
       if(f.mime?.startsWith('image/')&&f.data){
         return `<div class="user-file-preview image"><img src="data:${f.mime};base64,${f.data}" alt="${name}" loading="lazy"><span>${name}</span></div>`;
       }
-      return `<div class="user-file-preview"><span>📄 ${name}</span></div>`;
+      return `<div class="user-file-preview"><span>${name}</span></div>`;
     }).join('');
     html+=`<div class="msg-user-files">${previews}</div>`;
   }
@@ -2189,7 +2223,7 @@ function addMsg(role,text,files,extra={}){
   if(role==='kairo')artifactIds=registerArtifactsFromReply(displayText,files||[]);
   if(files?.length){html+='<div class="fops">';for(const f of files)html+=`<div class="fo">● ${f.action}: ${esc(f.path)}</div>`;html+='</div>'}
   if(artifactIds.length)html+=renderArtifactCards(artifactIds,'ready');
-  if(extra.memory_added?.length)html+=`<div class="mops">🧠 Remembered: ${extra.memory_added.map(esc).join('; ')}</div>`;
+  if(extra.memory_added?.length)html+=`<div class="mops">Remembered: ${extra.memory_added.map(esc).join('; ')}</div>`;
   if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
   else if(role==='kairo')html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
   div.dataset.text=text||'';
@@ -2722,16 +2756,16 @@ async function openData(){
      <div class="ds"><span class="num">${d.stats.uploaded_files}</span>Uploads</div>
      <div class="ds"><span class="num">${d.stats.api_keys}</span>API Keys</div>`;
   document.getElementById('dataMemory').innerHTML=(d.memory||[]).map(f=>`<div style="padding:2px 0">• ${esc(f)}</div>`).join('')||'None';
-  document.getElementById('dataChats').innerHTML=(d.chats||[]).map(c=>`<div style="padding:2px 0">💬 ${esc(c.title)} (${c.messages} msgs)</div>`).join('')||'None';
+  document.getElementById('dataChats').innerHTML=(d.chats||[]).map(c=>`<div style="padding:2px 0">${esc(c.title)} (${c.messages} msgs)</div>`).join('')||'None';
 }
 
 async function resetData(){
   const code=document.getElementById('resetCode').value.trim();
   if(code!=='DELETE-MY-DATA'){
-    await _dlg({title:'Incorrect confirmation',msg:'Please type DELETE-MY-DATA exactly in the field above.',icon:'⚠️',iconType:'warn',confirmText:'OK'});
+    await _dlg({title:'Incorrect confirmation',msg:'Please type DELETE-MY-DATA exactly in the field above.',icon:'▸',iconType:'warn',confirmText:'OK'});
     return;
   }
-  const step1=await _dlg({title:'Delete all data?',msg:'This will permanently erase all your chats, memory, uploads, and settings. There is no undo.',icon:'⚠️',iconType:'danger',confirmText:'Yes, delete everything',cancelText:'Cancel',dangerous:true});
+  const step1=await _dlg({title:'Delete all data?',msg:'This will permanently erase all your chats, memory, uploads, and settings. There is no undo.',icon:'▸',iconType:'danger',confirmText:'Yes, delete everything',cancelText:'Cancel',dangerous:true});
   if(!step1)return;
   const step2=await _dlg({title:'Final confirmation',msg:'Last chance — this action is irreversible.',icon:'🔥',iconType:'danger',confirmText:'Permanently delete',cancelText:'Cancel',dangerous:true});
   if(!step2)return;
@@ -2793,11 +2827,11 @@ async function refreshWorkspaceFiles(){
     for(const fld of sortedFolders){
       if(!folders[fld])continue;
       if(fld){
-        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon">📁</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
+        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon" style="color:var(--accent)">▸</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
       }
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
-        const icon=ext==='md'?'📝':ext==='json'?'📋':ext==='txt'?'📄':ext==='yaml'||ext==='yml'?'⚙':'📄';
+        const icon=ext==='md'?'◆':ext==='json'?'◇':ext==='txt'?'▪':ext==='yaml'||ext==='yml'?'▫':'▪';
         html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">${icon}</span><span class="fb-file-name">${esc(f.name)}</span><span class="fb-file-size">${formatFileSize(f.size)}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete">✕</button></div>`;
       }
       if(fld)html+=`</div></div>`;
@@ -2827,13 +2861,13 @@ async function refreshChatFiles(){
       html+='<div class="fb-section-title">Generated Files</div>';
       for(const f of genFiles){
         const name=f.path.split('/').pop()||f.path;
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">✨</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">◆</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
       }
     }
     if(uploads.length){
       html+='<div class="fb-section-title">Uploaded Files</div>';
       for(const u of uploads){
-        html+=`<div class="fb-file"><span class="fb-file-icon">📎</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
+        html+=`<div class="fb-file"><span class="fb-file-icon">▪</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
       }
     }
     if(!html)html='<div class="fb-empty">No files in this chat yet.</div>';
@@ -2841,7 +2875,7 @@ async function refreshChatFiles(){
   }catch{el.innerHTML='<div class="fb-empty">Could not load chat files.</div>';}
 }
 async function createUserFolder(){
-  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});
+  const name=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});
   if(!name?.trim())return;
   await fetch('/api/user-files/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:name.trim()})});
   refreshWorkspaceFiles();
@@ -2850,7 +2884,7 @@ async function createUserFolder(){
 async function deleteUserFile(encodedPath,isFolder){
   const path=decodeURIComponent(encodedPath);
   const type=isFolder?'folder and all its contents':'file';
-  const ok=await _dlg({title:`Delete ${type}?`,msg:`Are you sure you want to delete "${path}"?`,icon:'⚠️',iconType:'warn',confirmText:'Delete',cancelText:'Cancel'});
+  const ok=await _dlg({title:`Delete ${type}?`,msg:`Are you sure you want to delete "${path}"?`,icon:'▸',iconType:'warn',confirmText:'Delete',cancelText:'Cancel'});
   if(!ok)return;
   await fetch('/api/user-files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
   refreshWorkspaceFiles();
@@ -2895,7 +2929,7 @@ async function loadChatDrawer(){
     const pinnedEl=document.getElementById('pinnedFilesList');
     const pinned=chat.pinned_files||[];
     pinnedEl.innerHTML=pinned.length
-      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>📄 ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">✕</button></div>`;}).join('')
+      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>▪ ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">✕</button></div>`;}).join('')
       :'<div class="fb-empty">No pinned files.</div>';
     // Populate folder select
     const sel=document.getElementById('chatFolderSelect');
@@ -2917,7 +2951,7 @@ async function openPinFilePicker(){
     const files=d.files||[];
     if(!files.length){showToast('No files to pin.','info');return;}
     const list=files.map(f=>f.path).join('\n');
-    const chosen=await _dlg({title:'Pin a file',msg:'Available: '+files.map(f=>f.path).join(', '),icon:'📌',iconType:'info',inputLabel:'File path',inputDefault:files[0]?.path||'',inputPlaceholder:'e.g. notes/research/topic.md',confirmText:'Pin',cancelText:'Cancel'});
+    const chosen=await _dlg({title:'Pin a file',msg:'Available: '+files.map(f=>f.path).join(', '),icon:'▸',iconType:'info',inputLabel:'File path',inputDefault:files[0]?.path||'',inputPlaceholder:'e.g. notes/research/topic.md',confirmText:'Pin',cancelText:'Cancel'});
     if(!chosen?.trim())return;
     // Fetch current chat to get existing pins
     const cr=await apiFetch(`/api/chats/${curChat}`);
@@ -2946,7 +2980,7 @@ async function moveChatToFolder(folder){
   showToast(folder?`Moved to ${folder}.`:'Removed from folder.','success');
 }
 async function createAndMoveFolder(){
-  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create & Move',cancelText:'Cancel'});
+  const name=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create & Move',cancelText:'Cancel'});
   if(!name?.trim())return;
   await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:name.trim()})});
   await refreshChats();
@@ -3476,34 +3510,34 @@ function initMermaidTheme(){
   mermaid.initialize({
     startOnLoad:false,
     theme:'base',
-    flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:48,rankSpacing:56,padding:18},
-    mindmap:{padding:18,maxNodeWidth:260},
+    flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:60,rankSpacing:70,padding:22},
+    mindmap:{padding:24,maxNodeWidth:220},
     themeVariables:light?{
-      primaryColor:'#fff5ea',
-      primaryTextColor:'#2a1f16',
-      primaryBorderColor:'#ce976b',
-      lineColor:'#ae7a4e',
-      secondaryColor:'#f5e8da',
-      tertiaryColor:'#ead8c6',
-      fontSize:'15px',
+      primaryColor:'#fdf6ef',
+      primaryTextColor:'#1a1410',
+      primaryBorderColor:'#d4a574',
+      lineColor:'#c9956a',
+      secondaryColor:'#f0e1d0',
+      tertiaryColor:'#e8d5c0',
+      fontSize:'14px',
       fontFamily:'Inter, Segoe UI, sans-serif',
-      nodeBorder:'#ce976b',
-      mainBkg:'#fff5ea',
+      nodeBorder:'#d4a574',
+      mainBkg:'#fdf6ef',
       clusterBkg:'#f5e8da',
       edgeLabelBackground:'#f3e7d8',
     }:{
-      primaryColor:'#2c2a35',
-      primaryTextColor:'#f5eee8',
-      primaryBorderColor:'#bf6b3a',
-      lineColor:'#c3855f',
-      secondaryColor:'#1f2530',
-      tertiaryColor:'#342418',
-      fontSize:'15px',
+      primaryColor:'#1e1b24',
+      primaryTextColor:'#ede6df',
+      primaryBorderColor:'#c97b42',
+      lineColor:'#8b6b50',
+      secondaryColor:'#252130',
+      tertiaryColor:'#2a1f16',
+      fontSize:'14px',
       fontFamily:'Inter, Segoe UI, sans-serif',
-      nodeBorder:'#a17352',
-      mainBkg:'#27232b',
-      clusterBkg:'#1c212a',
-      edgeLabelBackground:'#171615',
+      nodeBorder:'#7a5d46',
+      mainBkg:'#1a1722',
+      clusterBkg:'#16131e',
+      edgeLabelBackground:'#121014',
     }
   });
 }
