@@ -953,7 +953,7 @@ IMPORTANT: Always output the todolist block DIRECTLY in your response text for t
 ALSO: Always save the todo list to a file using <<<FILE_CREATE: notes/todos.md>>> (or an appropriate filename) so it persists across chats and shows up in the workspace. When updating an existing todo list, use <<<FILE_UPDATE: notes/todos.md>>> to keep it current. The file version should be a clean markdown checklist (e.g. "- [ ] Task" / "- [x] Done task"), NOT the JSON format.
 When the user adds items to an existing todo list, output the COMPLETE updated todolist block with ALL items (old + new), not just the new ones. This replaces the previous list in the chat.
 
-15. DEEP RESEARCH — The user can activate a deep research tool from the toolbar that searches the live internet, reads dozens of sources, and produces a comprehensive cited report. When the deep research tool is active, you will see a [TOOL ACTIVE: DEEP RESEARCH] section in your instructions. You do NOT need to trigger deep research yourself — it is handled externally when the user activates the tool. Just respond normally to the user's question.
+15. DEEP RESEARCH — The user can activate a deep research tool from the toolbar. When active, you give an exceptionally thorough, multi-angle, well-structured response — like a mini research report. You do NOT need to output any <<<DEEP_RESEARCH>>> tags. Just respond with maximum depth and quality directly.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
@@ -1296,6 +1296,18 @@ def _build_tool_instructions(active_tools):
             "You may use multiple CODE_EXECUTE blocks in a single response if needed. "
             "Available standard library modules: math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc. "
             "Keep code focused and concise. The execution has a 15-second timeout."
+        ),
+        "research": (
+            "[TOOL ACTIVE: DEEP RESEARCH]\n"
+            "The user has activated the Deep Research tool. Respond with an exceptionally thorough, comprehensive, "
+            "and well-structured response. Go much deeper than normal — cover multiple angles, provide detailed analysis, "
+            "include historical context, current state, and future implications where relevant. "
+            "Use headings, sub-sections, and bullet points for organization. "
+            "Cite specific facts, dates, names, and statistics. "
+            "Include relevant images using <<<IMAGE_SEARCH: query>>> tags. "
+            "Generate mind maps using ```mermaid blocks when it helps visualize relationships. "
+            "This should feel like a mini research report, not a casual answer. "
+            "Do NOT output <<<DEEP_RESEARCH>>> tags. Just give the thorough response directly."
         ),
     }
     for tool in active_tools:

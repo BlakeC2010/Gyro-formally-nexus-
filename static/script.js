@@ -2398,36 +2398,8 @@ async function sendMessage(){
   for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
   // ── Research when explicitly activated via tool ──
-  let useResearch=activeTools.has('research');
-
-  if(useResearch){
-    activeTools.delete('research');
-    renderToolBadges();
-    if(files.length){showToast('Deep Research ignores attachments for now.','info');}
-    const planText=window._pendingResearchPlan||null;
-    window._pendingResearchPlan=null;
-    if(!planText){
-      startInlineResearchPlan(text,deepResearchDepth);
-      return;
-    }
-    setChatRunning(targetChatId,true,{type:'research'});
-    const area=document.getElementById('chatArea');
-    const msgDiv=document.createElement('div');
-    msgDiv.className='msg kairo';
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
-    area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
-    const contentEl=msgDiv.querySelector('.msg-content');
-    try{
-      await runDeepResearch(text,contentEl,area,planText);
-      await refreshChats();
-    }catch(e){
-      contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;
-      setStatus('Research failed.');
-    }finally{
-      setChatRunning(targetChatId,false);
-    }
-    return;
-  }
+  // Deep research silently enhances the prompt — no visible plan/modal
+  // It's sent as part of activeTools in the normal chat flow
 
   const controller=new AbortController();
   setChatRunning(targetChatId,true,{type:'chat',controller});
@@ -2656,13 +2628,8 @@ async function sendMessage(){
               }
             }
 
-            // ── AI-triggered deep research (confirm with user) ──
-            if(data.research_trigger){
-              const rq=data.research_trigger;
-              setTimeout(()=>{
-                startInlineResearchPlan(rq,deepResearchDepth);
-              },400);
-            }
+            // ── AI-triggered deep research — disabled, research is handled silently ──
+            // research_trigger is no longer auto-started
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
