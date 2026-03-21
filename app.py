@@ -1366,15 +1366,19 @@ def _build_tool_instructions(active_tools):
         "research": (
             "[TOOL ACTIVE: DEEP RESEARCH]\n"
             "The user wants deep, thorough research. You have access to a powerful 10-step research pipeline that does REAL web searching, source analysis, cross-referencing, and report generation.\n"
-            "FIRST: Ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks to tailor the output. For example:\n"
+            "IMPORTANT TWO-STEP PROCESS — you MUST follow this order:\n"
+            "STEP 1 (THIS response): Ask 2-4 quick clarifying questions using <<<CHOICES>>> blocks to understand what the user wants. For example:\n"
             "- What specific aspects or angles to focus on\n"
             "- Depth level: quick overview vs. comprehensive deep-dive\n"
+            "- Any particular sources, perspectives, or constraints\n"
             "Keep the questions conversational and relevant to their specific topic.\n"
-            "Once the user answers, trigger the REAL research pipeline by outputting:\n"
-            "<<<DEEP_RESEARCH: their research query here>>>\n"
-            "The system will then run automated multi-step research with web searching, source analysis, cross-referencing, and PDF generation.\n"
-            "DO NOT try to write the research yourself. DO NOT fake or simulate research content. Just trigger the pipeline with <<<DEEP_RESEARCH: query>>> and let the system handle it.\n"
-            "After asking clarifying questions and getting answers, your response should be brief — acknowledge the user's preferences and then emit the <<<DEEP_RESEARCH: query>>> tag. The pipeline handles everything else."
+            "DO NOT emit <<<DEEP_RESEARCH: ...>>> yet. ONLY ask questions.\n\n"
+            "STEP 2 (NEXT response, after user answers): Acknowledge their preferences briefly, then trigger the pipeline:\n"
+            "<<<DEEP_RESEARCH: their refined research query here>>>\n\n"
+            "CRITICAL RULES:\n"
+            "- NEVER skip Step 1. NEVER emit <<<DEEP_RESEARCH>>> in the same message as your clarifying questions.\n"
+            "- NEVER write research yourself. The pipeline handles everything.\n"
+            "- If the user has ALREADY answered clarifying questions about this topic (check conversation history), go ahead and emit <<<DEEP_RESEARCH: query>>>."
         ),
     }
     for tool in active_tools:
@@ -2693,6 +2697,17 @@ def chat_message(chat_id):
         return jsonify({"error": f"API error: {err}", "files": []})
 
     resp, research_query = extract_research_trigger(resp)
+    # Safety: block research trigger if AI hasn't asked clarifying questions yet
+    if research_query and "research" in ctx.get("active_tools", []):
+        has_prior_clarification = False
+        for prev_msg in reversed(chat.get("messages", [])[-8:]):
+            if prev_msg.get("role") == "assistant":
+                ptxt = prev_msg.get("text", "")
+                if "<<<CHOICE" in ptxt or "CHOICE:" in ptxt:
+                    has_prior_clarification = True
+                    break
+        if not has_prior_clarification:
+            research_query = None
     clean, executed, new_facts, code_results = finalize_chat_response(chat, ctx, resp)
     result = {"reply": clean, "files": executed, "memory_added": new_facts}
     if code_results:
@@ -2781,6 +2796,18 @@ def chat_message_stream(chat_id):
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             # Check if AI triggered deep research
             raw_text, research_query = extract_research_trigger(raw_text)
+            # Safety: block research trigger if AI hasn't asked clarifying questions yet
+            if research_query and "research" in ctx.get("active_tools", []):
+                has_prior_clarification = False
+                for prev_msg in reversed(chat.get("messages", [])[-8:]):
+                    if prev_msg.get("role") == "assistant":
+                        ptxt = prev_msg.get("text", "")
+                        if "<<<CHOICE" in ptxt or "CHOICE:" in ptxt:
+                            has_prior_clarification = True
+                            break
+                if not has_prior_clarification:
+                    # AI skipped clarifying questions — suppress the trigger
+                    research_query = None
             # Extract image search queries and fetch results
             raw_text, image_queries = extract_image_searches(raw_text)
             image_results = []
@@ -3264,26 +3291,33 @@ def _ddg_search(query, max_results=8):
     """DuckDuckGo text search → list of {title, url, snippet}."""
     try:
         DDGS = _lazy_import_ddg()
-        with DDGS() as ddgs:
+        with DDGS(timeout=15) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         return [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
                 for r in results if r.get("href")]
     except Exception:
         return []
 
-def _research_ai_call(prompt, resolved, max_tokens=4096):
-    """Non-streaming AI call for research steps."""
+def _research_ai_call(prompt, resolved, max_tokens=4096, timeout=90):
+    """Non-streaming AI call for research steps with timeout protection."""
     provider = resolved.get("provider", "google")
-    try:
+    import concurrent.futures as _cf
+    def _inner():
         fn = PROVIDERS.get(provider, call_openai)
-        result = fn(
+        return fn(
             api_key=resolved.get("api_key",""),
             model=resolved.get("actual_model",""),
             sysprompt="You are a precise, expert research analyst. Follow instructions exactly. Output only what is asked.",
             messages=[{"role": "user", "text": prompt}],
             base_url=resolved.get("base_url"),
         )
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_inner)
+            result = future.result(timeout=timeout)
         return result or ""
+    except _cf.TimeoutError:
+        return "[AI error: call timed out after {}s]".format(timeout)
     except Exception as e:
         return f"[AI error: {e}]"
 
@@ -4198,6 +4232,8 @@ def start_research():
         yield json.dumps({"type": "job_id", "job_id": job_id}) + "\n"
         sent = 0
         last_send = _time.time()
+        job_start = _time.time()
+        JOB_TIMEOUT = 600  # 10 minute total timeout
         while True:
             job = _research_jobs.get(job_id, {})
             evts = job.get("events", [])
@@ -4207,8 +4243,14 @@ def start_research():
                 last_send = _time.time()
             if job.get("status") in ("done", "error", "cancelled") and sent >= len(evts):
                 break
-            # Send heartbeat every 8 seconds to prevent connection timeout
-            if _time.time() - last_send > 8:
+            # Total job timeout
+            if _time.time() - job_start > JOB_TIMEOUT:
+                yield json.dumps({"type": "error", "error": "Research timed out after 10 minutes. Try a narrower query or 'quick' depth."}) + "\n"
+                job["cancelled"] = True
+                job["status"] = "error"
+                break
+            # Send heartbeat every 5 seconds to prevent connection timeout
+            if _time.time() - last_send > 5:
                 yield json.dumps({"type": "heartbeat"}) + "\n"
                 last_send = _time.time()
             _time.sleep(0.25)

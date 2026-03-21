@@ -1496,7 +1496,6 @@ const logoUrls={
   google:'/static/logos/google.svg',
   openai:'/static/logos/openai.svg',
   anthropic:'/static/logos/anthropic.svg',
-  custom:'/static/logos/custom.svg'
 };
 
 function logoImg(provider){
@@ -1914,10 +1913,27 @@ async function runDeepResearch(query,contentEl,area,planText){
   _currentResearchReader=reader;
   const decoder=new TextDecoder();
   let buffer='';
+  let lastEventTime=Date.now();
+  const STALL_TIMEOUT=45000; // 45 seconds with no data = stalled
 
   while(true){
-    const{done,value}=await reader.read();
+    // Race between reading and a stall timeout
+    let stallTimer;
+    const timeoutPromise=new Promise((_,reject)=>{
+      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server. Try again.')),STALL_TIMEOUT);
+    });
+    let readResult;
+    try{
+      readResult=await Promise.race([reader.read(),timeoutPromise]);
+    }catch(e){
+      clearTimeout(stallTimer);
+      try{reader.cancel()}catch(_){}
+      throw e;
+    }
+    clearTimeout(stallTimer);
+    const{done,value}=readResult;
     if(done)break;
+    lastEventTime=Date.now();
     buffer+=decoder.decode(value,{stream:true});
     let nl;
     while((nl=buffer.indexOf('\n'))>=0){
