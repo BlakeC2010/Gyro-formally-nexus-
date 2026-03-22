@@ -1,6 +1,6 @@
 // ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
-let _continueCount=0;const _MAX_CONTINUES=10;
+let _continueCount=0;const _MAX_CONTINUES=15;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
 let googleInitDone=false,thinkingEnabled=false,guestAuthMode='register';
 let deepResearchDepth='standard';
@@ -1939,13 +1939,13 @@ async function runDeepResearch(query,contentEl,area,planText){
   const decoder=new TextDecoder();
   let buffer='';
   let lastEventTime=Date.now();
-  const STALL_TIMEOUT=120000; // 120 seconds — research AI calls can be long
+  const STALL_TIMEOUT=300000; // 5 minutes — research AI calls can be very long
 
   while(true){
     // Race between reading and a stall timeout
     let stallTimer;
     const timeoutPromise=new Promise((_,reject)=>{
-      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server. Try again.')),STALL_TIMEOUT);
+      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server for 5 minutes. Try again with a simpler query.')),STALL_TIMEOUT);
     });
     let readResult;
     try{
@@ -2013,7 +2013,7 @@ async function runDeepResearch(query,contentEl,area,planText){
   _currentResearchReader=null;
   // If stream ended but we never got a 'done' event, it stalled
   if(!researchCompleted&&!wasCancelled){
-    throw new Error('__RESEARCH_STALLED__');
+    throw new Error('Research pipeline ended unexpectedly. This may be a server-side timeout or search failure. Try again with a simpler query or "quick" depth.');
   }
 }
 
@@ -2310,8 +2310,15 @@ function _detectTruncation(text){
   // Ends with obvious mid-sentence indicators
   const lastLine=t.split('\n').pop().trim();
   if(lastLine&&/[,;:\-–—]$/.test(lastLine))return true;
+  // Ends mid-word or mid-sentence (no sentence-ending punctuation)
+  if(lastLine&&lastLine.length>20&&!/[.!?)\]"'…]$/.test(lastLine))return true;
+  // Numbered list that seems incomplete (ends with a number item, likely more coming)
+  const lines=t.split('\n').filter(l=>l.trim());
+  const lastThree=lines.slice(-3);
+  const numberedCount=lastThree.filter(l=>/^\s*\d+[.)]\s/.test(l)).length;
+  if(numberedCount>=2)return true;
   // Sentences like "Stand by." or "Here's" or "I'll now" that promise more content
-  if(/(?:stand by|here (?:is|are|comes)|i(?:'ll| will| am going to) (?:now|next)|let me|coming up)[.\s]*$/i.test(lastLine))return true;
+  if(/(?:stand by|here (?:is|are|comes)|i(?:'ll| will| am going to) (?:now|next)|let me|coming up|let's (?:start|continue|move|look)|first,|next,)[.\s]*$/i.test(lastLine))return true;
   return false;
 }
 

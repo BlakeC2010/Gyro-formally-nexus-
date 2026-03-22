@@ -866,7 +866,8 @@ Capabilities:
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
 <<<END_CODE>>>
-The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.). 15-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
+The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml. You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 30-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
+IMPORTANT: Do NOT use CODE_EXECUTE for web searching. When the Web Search tool is active, your model has built-in web search grounding — just answer directly. CODE_EXECUTE is for computation, file generation, data processing, and other coding tasks.
 10. IMAGE SEARCH — you have a real image search engine that finds and displays images inline in your response. To use it, include this tag WHERE you want the images to appear:
 <<<IMAGE_SEARCH: descriptive search query>>>
 
@@ -1205,20 +1206,28 @@ def execute_code_blocks(text):
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
                 tmp.write(code)
                 tmp_path = tmp.name
+            # Build env that inherits PATH (for pip/packages) and strips bytecode caching
+            exec_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
             result = subprocess.run(
                 ["python", tmp_path],
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True, text=True, timeout=30,
+                env=exec_env,
+                cwd=str(WORKSPACE),
             )
             os.unlink(tmp_path)
             output = result.stdout
             if result.stderr:
-                output += ("\n" if output else "") + result.stderr
+                # Filter out pip install noise from stderr
+                stderr_lines = [l for l in result.stderr.splitlines()
+                                if not l.strip().startswith(("Requirement already", "WARNING:", "[notice]", "Successfully installed"))]
+                filtered_stderr = "\n".join(stderr_lines).strip()
+                if filtered_stderr:
+                    output += ("\n" if output else "") + filtered_stderr
             results.append({"language": lang, "code": code, "output": output.strip() or "(no output)", "success": result.returncode == 0})
         except subprocess.TimeoutExpired:
             try: os.unlink(tmp_path)
             except Exception: pass
-            results.append({"language": lang, "code": code, "output": "Execution timed out (15s limit).", "success": False})
+            results.append({"language": lang, "code": code, "output": "Execution timed out (30s limit).", "success": False})
         except Exception as e:
             results.append({"language": lang, "code": code, "output": f"Error: {e}", "success": False})
     return results
@@ -1429,7 +1438,10 @@ def _build_tool_instructions(active_tools):
         ),
         "search": (
             "[TOOL ACTIVE: WEB SEARCH]\n"
-            "The user has activated the Web Search tool. Provide the most current, accurate information available and cite sources when possible."
+            "The user has activated the Web Search tool. Your AI model has BUILT-IN web search grounding — the search happens automatically behind the scenes.\n"
+            "DO NOT try to search using CODE_EXECUTE blocks (e.g. google_search.search(), requests.get(), etc.) — that will fail.\n"
+            "DO NOT write Python code to fetch web pages. Your model already has real-time web access built in.\n"
+            "Just answer the question directly using the most current, accurate information available from your grounded web search. Cite sources when possible."
         ),
         "mindmap": (
             "[TOOL ACTIVE: MIND MAP]\n"
@@ -1452,8 +1464,11 @@ def _build_tool_instructions(active_tools):
             "The code will be executed server-side and the output shown to the user. "
             "Always use print() to produce output the user can see. "
             "You may use multiple CODE_EXECUTE blocks in a single response if needed. "
-            "Available standard library modules: math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc. "
-            "Keep code focused and concise. The execution has a 15-second timeout."
+            "AVAILABLE PACKAGES (pre-installed, just import): math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, "
+            "requests, beautifulsoup4 (from bs4 import BeautifulSoup), fpdf2 (from fpdf import FPDF), lxml. "
+            "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
+            "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
+            "Keep code focused and concise. The execution has a 30-second timeout."
         ),
         "research": (
             "[TOOL HINT: DEEP RESEARCH REQUESTED]\n"
@@ -3455,7 +3470,10 @@ def _lazy_import_bs():
     import requests as _r; from bs4 import BeautifulSoup as _BS; return _r, _BS
 
 def _lazy_import_ddg():
-    from duckduckgo_search import DDGS; return DDGS
+    try:
+        from ddgs import DDGS; return DDGS
+    except ImportError:
+        from duckduckgo_search import DDGS; return DDGS
 
 def _fetch_url_text(url, timeout=12):
     """Fetch URL, strip boilerplate, return up to 8 000 chars of plain text."""
@@ -3485,11 +3503,23 @@ def _ddg_search(query, max_results=8):
     """DuckDuckGo text search → list of {title, url, snippet}."""
     try:
         DDGS = _lazy_import_ddg()
-        with DDGS(timeout=15) as ddgs:
+        with DDGS(timeout=20) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        return [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
+        parsed = [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
                 for r in results if r.get("href")]
-    except Exception:
+        if parsed:
+            return parsed
+        # Retry once with simplified query if no results
+        simplified = " ".join(query.split()[:5])
+        if simplified != query:
+            print(f"  [search] Zero results for '{query[:50]}', retrying with '{simplified}'")
+            with DDGS(timeout=20) as ddgs:
+                results = list(ddgs.text(simplified, max_results=max_results))
+            return [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
+                    for r in results if r.get("href")]
+        return []
+    except Exception as e:
+        print(f"  [search] DDG search error: {e}")
         return []
 
 def _research_ai_call(prompt, resolved, max_tokens=4096, timeout=90):
