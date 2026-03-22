@@ -10,3 +10,6 @@ duckduckgo-search>=6.0.0
 ddgs>=6.0.0
 lxml>=5.0.0
 gunicorn>=22.0.0
+Pillow>=10.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0

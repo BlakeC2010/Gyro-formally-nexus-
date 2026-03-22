@@ -862,12 +862,12 @@ Capabilities:
    - When STATUS.md lists friction items, check if they've been resolved; if not, suggest the smallest concrete next step.
    - Never nag. Frame nudges as "I noticed..." not "You should...". One nudge per conversation max unless asked.
    - The homepage already surfaces friction widgets — reinforce them conversationally when relevant.
-9. CODE EXECUTION — you can run Python code and show the output. When computation, data processing, math, generating files (PDFs, CSVs, etc.), simulations, plotting, or ANY task that benefits from running actual code is involved, write executable Python inside:
+9. CODE EXECUTION — you can run Python code and show the output. When computation, data processing, math, generating files (PDFs, CSVs, images, etc.), simulations, plotting, or ANY task that benefits from running actual code is involved, write executable Python inside:
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
 <<<END_CODE>>>
-The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml. You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 30-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
-IMPORTANT: Do NOT use CODE_EXECUTE for web searching. When the Web Search tool is active, your model has built-in web search grounding — just answer directly. CODE_EXECUTE is for computation, file generation, data processing, and other coding tasks.
+The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 30-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
+When generating files (images, PDFs, etc.), save them to the current working directory. The system will automatically detect new files and display them to the user with download links (images are shown inline).
 10. IMAGE SEARCH — you have a real image search engine that finds and displays images inline in your response. To use it, include this tag WHERE you want the images to appear:
 <<<IMAGE_SEARCH: descriptive search query>>>
 
@@ -1498,7 +1498,8 @@ def _build_tool_instructions(active_tools):
             "Always use print() to produce output the user can see. "
             "You may use multiple CODE_EXECUTE blocks in a single response if needed. "
             "AVAILABLE PACKAGES (pre-installed, just import): math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, "
-            "requests, beautifulsoup4 (from bs4 import BeautifulSoup), fpdf2 (from fpdf import FPDF), lxml. "
+            "requests, beautifulsoup4 (from bs4 import BeautifulSoup), fpdf2 (from fpdf import FPDF), lxml, "
+            "Pillow (from PIL import Image, ImageDraw, ImageFont, ImageFilter), numpy (import numpy as np), matplotlib (import matplotlib.pyplot as plt — use plt.savefig() to save, MUST use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). "
             "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
             "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
             "Keep code focused and concise. The execution has a 30-second timeout."
