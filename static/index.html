@@ -238,6 +238,19 @@
       </div>
     </div>
     <hr>
+    <p class="st">Developer</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
+      <div>
+        <div style="font-size:12px;font-weight:500;color:var(--text-primary)">Raw Log Mode</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Show unformatted AI text with all raw tags visible</div>
+      </div>
+      <label class="switch" style="position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0">
+        <input type="checkbox" id="devRawToggle" onchange="toggleDevRaw(this.checked)" style="opacity:0;width:0;height:0">
+        <span style="position:absolute;cursor:pointer;inset:0;background:var(--bg-deep);border:1px solid var(--border);border-radius:11px;transition:.3s"></span>
+        <span style="position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:var(--text-muted);border-radius:50%;transition:.3s;pointer-events:none" id="devRawDot"></span>
+      </label>
+    </div>
+    <hr>
     <p class="st">Delete All Chats</p>
     <p class="hint">Permanently delete every chat. Your memory, settings, and account will not be affected.</p>
     <div class="kr"><button onclick="deleteAllChats()" style="background:var(--error);color:#fff">Delete All Chats</button></div>

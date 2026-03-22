@@ -668,6 +668,8 @@ body.light .chat-area::before{
 /* Code execution generated files */
 .crb-files{padding:8px 12px;background:var(--bg-deep);border-top:1px solid var(--border)}
 .crb-file{display:flex;align-items:center;gap:8px;padding:4px 0}
+/* Dev raw log mode */
+.dev-raw-log{background:var(--bg-deep);color:var(--green,#4ade80);font-family:var(--font-mono,'Consolas',monospace);font-size:11px;line-height:1.7;padding:14px 16px;border-radius:var(--r-md);border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;overflow-x:auto;max-height:80vh;overflow-y:auto;margin:4px 0}
 .crb-file a.fo-link{color:var(--accent);text-decoration:none;font-size:12px;font-weight:500}
 .crb-file a.fo-link:hover{text-decoration:underline}
 .crb-file-size{font-size:10px;color:var(--text-muted)}

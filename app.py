@@ -1222,7 +1222,7 @@ def execute_code_blocks(text):
             # Build env that inherits PATH (for pip/packages) and strips bytecode caching
             exec_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
             result = subprocess.run(
-                ["python", tmp_path],
+                [sys.executable, tmp_path],
                 capture_output=True, text=True, timeout=30,
                 env=exec_env,
                 cwd=str(WORKSPACE),
@@ -3147,7 +3147,7 @@ def canvas_run():
             tmp.write(code)
             tmp_path = tmp.name
         result = subprocess.run(
-            ["python", tmp_path],
+            [sys.executable, tmp_path],
             capture_output=True, text=True, timeout=15,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )

@@ -284,6 +284,20 @@ function toggleTheme(){
   fetch('/api/auth/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})});
 }
 
+/* ─── Dev Raw Log Mode ──────────────────────────── */
+let devRawMode=localStorage.getItem('gyro_dev_raw')==='1';
+function toggleDevRaw(on){
+  devRawMode=!!on;
+  localStorage.setItem('gyro_dev_raw',on?'1':'0');
+  const dot=document.getElementById('devRawDot');
+  if(dot)dot.style.transform=on?'translateX(18px)':'none';
+  if(dot)dot.style.background=on?'var(--accent)':'var(--text-muted)';
+}
+function initDevRawToggle(){
+  const cb=document.getElementById('devRawToggle');
+  if(cb){cb.checked=devRawMode;toggleDevRaw(devRawMode);}
+}
+
 // ─── Custom Dialog Engine ────────────────────────
 let _dlgResolve=null;
 function _dlg({title,msg,icon,iconType='info',confirmText='OK',cancelText=null,inputLabel=null,inputDefault='',inputPlaceholder='',dangerous=false}){
@@ -2659,6 +2673,7 @@ async function sendMessage(opts){
   startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
+  let _renderScheduled=false;
 
   try{
     // Collect active tool names and clear them for next message
@@ -2791,13 +2806,21 @@ async function sendMessage(opts){
             }
             stopThinkingPhrases();
             fullText+=data.text;
-            if(canRender()){
-              const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-              // First delta: remove thinking indicator if still present
-              const ta=contentEl.querySelector('.think-active');
-              if(ta){ta.remove();stopThinkingPhrases();}
-              targetEl.innerHTML=fmtLive(fullText);
-              area.scrollTop=area.scrollHeight;
+            if(canRender()&&!_renderScheduled){
+              _renderScheduled=true;
+              requestAnimationFrame(()=>{
+                _renderScheduled=false;
+                if(!canRender())return;
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                const ta=contentEl.querySelector('.think-active');
+                if(ta){ta.remove();stopThinkingPhrases();}
+                if(devRawMode){
+                  targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
+                }else{
+                  targetEl.innerHTML=fmtLive(fullText);
+                }
+                area.scrollTop=area.scrollHeight;
+              });
             }
           }else if(data.type==='done'){
             // Collapse live thinking panel if present
@@ -2844,7 +2867,12 @@ async function sendMessage(opts){
               shouldContinue=true;
               displayReply=displayReply.replace(/<<<CONTINUE>>>/g,'').trim();
             }
-            finalHTML+=fmt(displayReply);
+            if(devRawMode){
+              // In dev raw mode, show the full unprocessed AI response with all tags
+              finalHTML+='<pre class="dev-raw-log">'+esc(fullText||data.reply||displayReply)+'</pre>';
+            }else{
+              finalHTML+=fmt(displayReply);
+            }
             if(choiceBlocks.length){
               finalHTML+='<div class="cq-group">';
               for(const cb of choiceBlocks){
@@ -3454,6 +3482,7 @@ async function openSettings(){
     light.style.cssText=(theme==='light'?activeStyle:inactiveStyle)+'padding:7px 14px;font-size:11px;font-weight:500;border:none;cursor:pointer;transition:all .2s;';
   }
   if(curUser)document.getElementById('profileName').value=curUser.name||'';
+  initDevRawToggle();
   openMemory();
 }
 
