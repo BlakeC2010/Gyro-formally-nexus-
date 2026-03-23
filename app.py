@@ -922,6 +922,32 @@ RULES:
 - Do NOT use markdown image syntax ![](url) — you don't have real image URLs. ONLY use <<<IMAGE_SEARCH>>>
 - Place the tag where it makes sense in your narrative flow — after introducing a topic, between comparisons, etc.
 - IMPORTANT: When discussing ANY person, place, thing, animal, concept, or topic that has a visual component, you MUST include at least one <<<IMAGE_SEARCH>>> tag. Err on the side of including images — they make your responses much more engaging and informative. If in doubt, include the image search.
+
+10b. IMAGE GENERATION — you can CREATE original images using AI. When the user asks you to generate, create, draw, design, or make an image, logo, illustration, artwork, etc., use this tag:
+<<<IMAGE_GENERATE: detailed description of the image to create>>>
+
+You can also control the aspect ratio:
+<<<IMAGE_GENERATE: detailed description | ratio=16:9>>>
+Available ratios: 1:1 (default), 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9
+
+WHEN TO USE image generation (<<<IMAGE_GENERATE>>>):
+- User asks you to CREATE, GENERATE, DRAW, DESIGN, or MAKE an image
+- User wants an original illustration, logo, icon, concept art, mockup, etc.
+- User describes something they want you to visualize from scratch
+- "Draw me a...", "Create an image of...", "Generate a picture of...", "Make a logo for..."
+
+WHEN TO USE image search (<<<IMAGE_SEARCH>>>) instead:
+- User wants to SEE existing/real images of something
+- Looking up what something looks like — real people, places, products
+- Reference images, real photos, screenshots, etc.
+
+IMAGE GENERATION RULES:
+- Write highly detailed, descriptive prompts. Include style, colors, mood, composition, lighting, and specific details.
+- Example: "A minimalist logo for a coffee shop called 'Brew Haven' with a steaming cup icon, warm earthy tones, clean sans-serif font, on a white background" instead of just "coffee shop logo"
+- You can use MULTIPLE <<<IMAGE_GENERATE>>> tags in one response
+- Always accompany generated images with descriptive text about what you created
+- For best results, describe the image as if you're art-directing a professional designer
+
 11. ANALYZE YOUTUBE VIDEOS — when the user shares a YouTube link, you can watch/analyze the video content and discuss it in detail. The video is provided to you directly.
 12. Interactive questions — you can ask the user multiple-choice questions they can click to answer (they can also type their own response). Use this when it genuinely helps move the conversation forward:
 
@@ -993,13 +1019,13 @@ IMPORTANT: Always output the todolist block DIRECTLY in your response text for t
 ALSO: Always save the todo list to a file using <<<FILE_CREATE: notes/todos.md>>> (or an appropriate filename) so it persists across chats and shows up in the workspace. When updating an existing todo list, use <<<FILE_UPDATE: notes/todos.md>>> to keep it current. The file version should be a clean markdown checklist (e.g. "- [ ] Task" / "- [x] Done task"), NOT the JSON format.
 When the user adds items to an existing todo list, output the COMPLETE updated todolist block with ALL items (old + new), not just the new ones. This replaces the previous list in the chat.
 
-15. DEEP RESEARCH — You have a powerful automated research pipeline that performs REAL web searching, source analysis, cross-referencing, and report generation with PDF export.
-You can trigger this pipeline AUTONOMOUSLY whenever you judge a query merits deep investigation. You do NOT need the user to ask for it explicitly — use your judgment.
+15. DEEP RESEARCH — You have access to Gemini's built-in Deep Research agent that performs comprehensive web searching, source analysis, and report generation with PDF export.
+You can trigger this AUTONOMOUSLY whenever you judge a query merits deep investigation. You do NOT need the user to ask for it explicitly — use your judgment.
 
 To trigger the pipeline, emit this tag in your response:
 <<<DEEP_RESEARCH: detailed research query here>>>
 
-The system handles everything: planning, multi-query web search, source reading, deep analysis, gap filling, cross-referencing, multi-pass report writing, quality review, and PDF/Markdown export.
+The Gemini Deep Research agent handles everything: web searching, reading sources, analysis, cross-referencing, and comprehensive report writing.
 
 WHEN TO TRIGGER (use your judgment):
 - The user asks for research, a deep dive, investigation, comprehensive analysis, or anything that benefits from gathering real, current information from multiple web sources
@@ -1018,8 +1044,8 @@ HOW TO USE IT:
 - OR you can trigger it immediately if the user's intent is clear — no clarifying questions required
 - Write a detailed, specific research query in the tag — the more specific, the better the results
 - Keep your message brief when triggering — just acknowledge what you're researching and emit the tag
-- DO NOT write research content yourself. DO NOT fake or simulate research. The pipeline does the real work.
-- After the pipeline completes, the system will auto-request a brief executive summary from you.
+- DO NOT write research content yourself. DO NOT fake or simulate research. The agent does the real work.
+- After the research completes, the system will auto-request a brief executive summary from you.
 
 File operations format:
 <<<FILE_CREATE: path/to/file.md>>>
@@ -1291,6 +1317,63 @@ def extract_research_trigger(text):
         return cleaned, query
     return text, None
 
+def extract_image_generation(text):
+    """Extract <<<IMAGE_GENERATE: prompt>>> or <<<IMAGE_GENERATE: prompt | size=WxH>>> tags.
+    Returns (cleaned_text, [{'prompt': str, 'aspect_ratio': str, 'index': int}])."""
+    pattern = re.compile(r'<<<IMAGE_GENERATE:\s*(.+?)>>>')
+    generations = []
+    idx = 0
+    def _replace(m):
+        nonlocal idx
+        raw = m.group(1).strip()
+        aspect_ratio = "1:1"
+        prompt = raw
+        if '|' in raw:
+            parts = [p.strip() for p in raw.split('|', 1)]
+            prompt = parts[0]
+            for param in parts[1].split(','):
+                param = param.strip()
+                if param.lower().startswith('aspect_ratio=') or param.lower().startswith('ratio='):
+                    val = param.split('=', 1)[1].strip()
+                    if val in ("1:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"):
+                        aspect_ratio = val
+        generations.append({'prompt': prompt, 'aspect_ratio': aspect_ratio, 'index': idx})
+        placeholder = f'%%%IMGGEN:{idx}%%%'
+        idx += 1
+        return placeholder
+    result_text = pattern.sub(_replace, text)
+    return result_text, generations
+
+def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None):
+    """Generate an image using Gemini 2.5 Flash Image model. Returns (image_base64, mime_type) or (None, error_str)."""
+    try:
+        genai, types = _import_google()
+        if not api_key:
+            settings = load_settings()
+            api_key, _ = resolve_provider_key(settings, "google")
+        if not api_key:
+            return None, "No Google API key configured"
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_modalities=['TEXT', 'IMAGE'],
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+            ),
+        )
+        text_parts = []
+        for part in (response.candidates[0].content.parts if response.candidates else []):
+            if getattr(part, 'inline_data', None) and part.inline_data.mime_type.startswith('image/'):
+                img_data = base64.b64encode(part.inline_data.data).decode('utf-8')
+                return img_data, part.inline_data.mime_type
+            elif getattr(part, 'text', None):
+                text_parts.append(part.text)
+        # No image returned
+        return None, "Model did not generate an image" + (f": {' '.join(text_parts)}" if text_parts else "")
+    except Exception as e:
+        return None, f"Image generation failed: {str(e)[:200]}"
+
 def extract_image_searches(text):
     """Extract <<<IMAGE_SEARCH: query>>> or <<<IMAGE_SEARCH: query | count=N>>> tags.
     Returns (text_with_placeholders, [{'query': str, 'count': int, 'index': int}]).
@@ -1398,10 +1481,12 @@ def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'<<<MEMORY_ADD:\s*.+?>>>', '', text)
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
     text = re.sub(r'(?:<<<|%%%|<<)IMAGE_SEARCH:\s*.+?(?:>>>|%%%)', '', text)
+    text = re.sub(r'<<<IMAGE_GENERATE:\s*.+?>>>', '', text)
     text = re.sub(r'<<<CONTINUE>>>', '', text)
     # Strip image placeholders so saved messages are clean (unless caller needs them)
     if not keep_img_placeholders:
         text = re.sub(r'%%%IMGBLOCK:\d+%%%', '', text)
+        text = re.sub(r'%%%IMGGEN:\d+%%%', '', text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1533,12 +1618,12 @@ def _build_tool_instructions(active_tools):
         "research": (
             "[TOOL HINT: DEEP RESEARCH REQUESTED]\n"
             "The user has specifically activated the Deep Research tool for this message. "
-            "This is a strong signal they want you to use the <<<DEEP_RESEARCH: query>>> pipeline.\n"
+            "This uses Gemini's built-in Deep Research agent for comprehensive web research.\n"
             "You should strongly consider triggering it. You can:\n"
             "- Trigger it immediately if their intent is clear: emit <<<DEEP_RESEARCH: detailed query>>>\n"
             "- Ask 1-2 quick clarifying questions first if the scope is genuinely unclear, then trigger on the next response\n"
             "- In rare cases, decline if the request truly doesn't need research (e.g. simple greeting)\n"
-            "Remember: DO NOT write research yourself. The pipeline handles real web searching, analysis, and report generation.\n"
+            "Remember: DO NOT write research yourself. The Gemini Deep Research agent handles real web searching, analysis, and report generation.\n"
             "Keep your response brief — acknowledge and trigger, or ask quick clarifying questions."
         ),
     }
@@ -3008,6 +3093,7 @@ def chat_message(chat_id):
 
     resp, research_query = extract_research_trigger(resp)
     resp, image_searches = extract_image_searches(resp)
+    resp, image_generations = extract_image_generation(resp)
     image_results = []
     if image_searches:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3020,17 +3106,36 @@ def chat_message(chat_id):
                 entry, imgs = fut.result()
                 if imgs:
                     image_results.append({"query": entry['query'], "images": imgs, "index": entry['index'], "count": entry['count']})
+    gen_results = []
+    if image_generations:
+        api_key = ctx["resolved"].get("api_key", "")
+        for entry in image_generations:
+            img_b64, result_or_err = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
+            if img_b64:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_prompt = re.sub(r'[^\w\s-]', '', entry['prompt'][:30]).strip().replace(' ', '_')
+                ext = 'png' if 'png' in result_or_err else 'jpeg'
+                fname = f"generated_{safe_prompt}_{ts}.{ext}"
+                gen_dir = WORKSPACE / "static" / "generated"
+                gen_dir.mkdir(parents=True, exist_ok=True)
+                (gen_dir / fname).write_bytes(base64.b64decode(img_b64))
+                gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": f"/static/generated/{fname}", "mime": result_or_err})
     clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, resp)
     if image_results:
         chat["messages"][-1]["image_results"] = image_results
+    if gen_results:
+        chat["messages"][-1]["generated_images"] = gen_results
+    if image_results or gen_results:
         save_chat(chat)
-    result = {"reply": clean_wp if image_searches else clean, "files": executed, "memory_added": new_facts}
+    result = {"reply": clean_wp if (image_searches or image_generations) else clean, "files": executed, "memory_added": new_facts}
     if code_results:
         result["code_results"] = code_results
     if research_query:
         result["research_trigger"] = research_query
     if image_results:
         result["image_results"] = image_results
+    if gen_results:
+        result["generated_images"] = gen_results
     return jsonify(result)
 
 
@@ -3115,12 +3220,14 @@ def chat_message_stream(chat_id):
             raw_text, research_query = extract_research_trigger(raw_text)
             # Extract image search queries — placeholders will be replaced on the client
             raw_text, image_searches = extract_image_searches(raw_text)
+            # Extract image generation requests
+            raw_text, image_generations = extract_image_generation(raw_text)
             # Detect <<<CONTINUE>>> BEFORE clean_response strips it
             should_continue = '<<<CONTINUE>>>' in raw_text
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text)
             done_payload = {
                 "type": "done",
-                "reply": clean_wp if image_searches else clean,
+                "reply": clean_wp if (image_searches or image_generations) else clean,
                 "files": executed,
                 "memory_added": new_facts,
                 "title": chat.get("title", "New Chat"),
@@ -3134,6 +3241,9 @@ def chat_message_stream(chat_id):
             # Tell the client which image searches are pending so it can show loaders
             if image_searches:
                 done_payload["pending_images"] = [{"query": s["query"], "index": s["index"], "count": s["count"]} for s in image_searches]
+            # Tell the client which image generations are pending
+            if image_generations:
+                done_payload["pending_generations"] = [{"prompt": g["prompt"], "index": g["index"], "aspect_ratio": g["aspect_ratio"]} for g in image_generations]
             yield event(done_payload)
 
             # Now fetch images AFTER the done event so the text renders immediately
@@ -3159,6 +3269,41 @@ def chat_message_stream(chat_id):
                 # Persist image results in the saved message so they survive reload
                 if image_results:
                     chat["messages"][-1]["image_results"] = image_results
+                    save_chat(chat)
+
+            # Generate images AFTER the done event so text renders immediately
+            if image_generations:
+                gen_results = []
+                api_key = resolved.get("api_key", "")
+                from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+                def _gen_one(entry):
+                    img_b64, result = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
+                    return entry, img_b64, result
+                with ThreadPoolExecutor(max_workers=min(len(image_generations), 2)) as pool:
+                    futs = {pool.submit(_gen_one, entry): entry for entry in image_generations}
+                    for fut in _as_completed(futs):
+                        entry, img_b64, result = fut.result()
+                        if img_b64:
+                            # Save to workspace file
+                            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            safe_prompt = re.sub(r'[^\w\s-]', '', entry['prompt'][:30]).strip().replace(' ', '_')
+                            ext = 'png' if 'png' in result else 'jpeg'
+                            fname = f"generated_{safe_prompt}_{ts}.{ext}"
+                            gen_dir = WORKSPACE / "static" / "generated"
+                            gen_dir.mkdir(parents=True, exist_ok=True)
+                            (gen_dir / fname).write_bytes(base64.b64decode(img_b64))
+                            gen_result = {
+                                "prompt": entry['prompt'],
+                                "index": entry['index'],
+                                "url": f"/static/generated/{fname}",
+                                "mime": result,
+                            }
+                            gen_results.append(gen_result)
+                            yield event({"type": "image_generated", "image": gen_result})
+                        else:
+                            yield event({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": result})
+                if gen_results:
+                    chat["messages"][-1]["generated_images"] = gen_results
                     save_chat(chat)
         except Exception as e:
             err = str(e)
@@ -3612,78 +3757,159 @@ def home_widgets_route():
 import threading as _threading
 _research_jobs = {}  # job_id -> {"status": ..., "events": [...]}
 
-def _lazy_import_bs():
-    import requests as _r; from bs4 import BeautifulSoup as _BS; return _r, _BS
+def _run_research_job(job_id, query, api_key):
+    """Background thread: Gemini Deep Research via Interactions API."""
+    import warnings as _w
+    _w.filterwarnings("ignore", message="Interactions usage is experimental")
+    job = _research_jobs[job_id]
 
-def _lazy_import_ddg():
-    try:
-        from ddgs import DDGS; return DDGS
-    except ImportError:
-        from duckduckgo_search import DDGS; return DDGS
+    def push(evt_type, **kw):
+        job["events"].append({"type": evt_type, **kw})
 
-def _fetch_url_text(url, timeout=12, max_bytes=200_000):
-    """Fetch URL, strip boilerplate, return up to 6 000 chars of plain text.
-    Limits download to max_bytes to prevent OOM on large pages."""
+    total_steps = 3  # Start, Research, Export
+
     try:
-        req, BS = _lazy_import_bs()
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-        resp = req.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
-        resp.raise_for_status()
-        ct = resp.headers.get("content-type", "")
-        if "text" not in ct:
-            resp.close()
-            return None
-        # Check Content-Length if available
-        cl = resp.headers.get("content-length", "")
-        if cl and cl.isdigit() and int(cl) > max_bytes * 3:
-            resp.close()
-            return None
-        # Read limited bytes to prevent OOM
-        chunks = []
-        total = 0
-        for chunk in resp.iter_content(chunk_size=32768, decode_unicode=False):
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= max_bytes:
+        genai, types = _import_google()
+        client = genai.Client(api_key=api_key)
+
+        push("progress", step="starting", pct=2, total_steps=total_steps, current_step=1,
+             message="Initializing Gemini Deep Research agent...")
+
+        # Stream the interaction so we can relay progress
+        stream = client.interactions.create(
+            input=query,
+            agent="deep-research-pro-preview-12-2025",
+            background=True,
+            stream=True,
+        )
+
+        push("progress", step="researching", pct=8, total_steps=total_steps, current_step=2,
+             message="Deep Research agent is searching and analyzing sources...")
+
+        interaction = None
+        last_status = ""
+        pct = 10
+
+        for event in stream:
+            if job.get("cancelled"):
+                try:
+                    if interaction and interaction.id:
+                        client.interactions.cancel(id=interaction.id)
+                except Exception:
+                    pass
+                push("cancelled")
+                job["status"] = "cancelled"
+                return
+
+            etype = getattr(event, "event_type", "")
+
+            if etype == "interaction.start":
+                interaction = event.interaction
+                push("progress", step="researching", pct=10, total_steps=total_steps, current_step=2,
+                     message="Research started — agent is searching the web...")
+
+            elif etype == "interaction.status_update":
+                status = getattr(event, "status", "")
+                if status != last_status:
+                    last_status = status
+                    pct = min(pct + 8, 85)
+                    msg_map = {
+                        "in_progress": "Researching — analyzing sources and gathering data...",
+                        "requires_action": "Processing research findings...",
+                    }
+                    push("progress", step="researching", pct=pct, total_steps=total_steps, current_step=2,
+                         message=msg_map.get(status, f"Research status: {status}"))
+
+            elif etype == "interaction.complete":
+                interaction = event.interaction
                 break
-        resp.close()
-        raw_html = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
-        soup = BS(raw_html, "lxml")
-        for tag in soup(["script","style","nav","header","footer","aside","form","iframe","noscript"]):
-            tag.decompose()
-        main = (soup.find("main") or soup.find("article") or
-                soup.find(id=re.compile(r"content|main|article", re.I)) or
-                soup.find(class_=re.compile(r"content|main|article|post", re.I)) or
-                soup.find("body"))
-        text = main.get_text(separator=" ", strip=True) if main else soup.get_text(separator=" ", strip=True)
-        text = re.sub(r"[ \t]{3,}", "  ", text)
-        text = re.sub(r"\n{4,}", "\n\n\n", text)
-        return text[:6000]
-    except Exception:
-        return None
 
-def _ddg_search(query, max_results=8):
-    """DuckDuckGo text search → list of {title, url, snippet}."""
-    try:
-        DDGS = _lazy_import_ddg()
-        with DDGS(timeout=20) as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        parsed = [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
-                for r in results if r.get("href")]
-        if parsed:
-            return parsed
-        # Retry once with simplified query if no results
-        simplified = " ".join(query.split()[:5])
-        if simplified != query:
-            print(f"  [search] Zero results for '{query[:50]}', retrying with '{simplified}'")
-            with DDGS(timeout=20) as ddgs:
-                results = list(ddgs.text(simplified, max_results=max_results))
-            return [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")}
-                    for r in results if r.get("href")]
-        return []
+        if not interaction:
+            push("error", error="Deep Research returned no result. Try again.")
+            job["status"] = "error"
+            return
+
+        status = getattr(interaction, "status", "")
+        if status == "failed":
+            push("error", error="Deep Research failed. The query may be too complex or unsupported.")
+            job["status"] = "error"
+            return
+
+        # Extract text from outputs
+        push("progress", step="exporting", pct=88, total_steps=total_steps, current_step=3,
+             message="Extracting research report...")
+
+        outputs = getattr(interaction, "outputs", None) or []
+        report_parts = []
+        source_urls = []
+        for item in outputs:
+            item_type = getattr(item, "type", "")
+            if item_type == "text" and hasattr(item, "text"):
+                report_parts.append(item.text)
+                # Extract URLs from annotations if present
+                for ann in (getattr(item, "annotations", None) or []):
+                    url = getattr(ann, "url", None) or getattr(ann, "uri", None)
+                    title_a = getattr(ann, "title", "")
+                    if url and url not in [s.get("url") for s in source_urls]:
+                        source_urls.append({"title": title_a or "Source", "url": url, "snippet": ""})
+            elif item_type == "google_search_result":
+                # Extract sources from search results
+                for sr in (getattr(item, "search_results", None) or []):
+                    url = getattr(sr, "url", None) or getattr(sr, "uri", None) or ""
+                    title_s = getattr(sr, "title", "") or ""
+                    snip = getattr(sr, "snippet", "") or ""
+                    if url and url not in [s.get("url") for s in source_urls]:
+                        source_urls.append({"title": title_s, "url": url, "snippet": snip})
+
+        report_md = "\n\n".join(report_parts) if report_parts else ""
+
+        if not report_md or len(report_md) < 100:
+            push("error", error="Deep Research produced no usable output. Try a more specific query.")
+            job["status"] = "error"
+            return
+
+        push("progress", step="exporting", pct=92, total_steps=total_steps, current_step=3,
+             message=f"Report extracted ({len(report_md)} chars). Saving files...")
+
+        # Save markdown and try PDF
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_q = re.sub(r"[^\w\s-]", "", query[:40]).strip().replace(" ", "_")
+        md_fn = f"research_{safe_q}_{ts}.md"
+        pdf_fn = f"research_{safe_q}_{ts}.pdf"
+        rdir = WORKSPACE / "notes" / "research"
+        rdir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            (rdir / md_fn).write_text(report_md, encoding="utf-8")
+        except Exception as e:
+            print(f"  [research] Markdown save failed: {e}")
+
+        pdf_ok = False
+        try:
+            _generate_research_pdf(query, report_md, source_urls, rdir / pdf_fn)
+            pdf_ok = True
+        except Exception as e:
+            print(f"  [research] PDF generation failed (non-fatal): {e}")
+
+        push("progress", step="exporting", pct=100, total_steps=total_steps, current_step=3,
+             message="Export complete!")
+
+        job["report"] = report_md
+        push("done",
+             report=report_md,
+             pdf_file=pdf_fn if pdf_ok else None,
+             md_file=md_fn,
+             sources=source_urls[:30],
+             sub_questions=[query],
+             source_count=len(source_urls),
+        )
+        job["status"] = "done"
+
     except Exception as e:
-        print(f"  [search] DDG search error: {e}")
-        return []
+        import traceback
+        print(f"  [research] Gemini Deep Research failed: {e}\n{traceback.format_exc()}")
+        push("error", error=f"Research failed: {str(e)[:200]}")
+        job["status"] = "error"
 
 def _research_ai_call(prompt, resolved, max_tokens=4096, timeout=90):
     """Non-streaming AI call for research steps with timeout protection."""
@@ -3880,698 +4106,6 @@ def _generate_research_pdf(title, report_md, sources, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pdf.output(str(output_path))
 
-def _run_research_job(job_id, query, depth, resolved, user_plan=None):
-    """Background thread: multi-pass fault-tolerant research pipeline.
-
-    Architecture (3 passes, each checkpointed & independently retryable):
-      Pass 1 — Plan & Scout: decompose query, budget-capped searches, extract notes
-      Pass 2 — Deepen: fill gaps in weak sections with targeted searches
-      Pass 3 — Synthesize & Export: write report, optional verify, save files
-
-    If any phase fails, the pipeline continues with whatever data is available.
-    If we crash after Pass 1, we still return a partial report from notes.
-    """
-    job = _research_jobs[job_id]
-    # Intermediate state for crash recovery
-    job["notes"] = {}
-    job["sources_list"] = []
-    job["report"] = ""
-
-    def push(evt_type, **kw):
-        job["events"].append({"type": evt_type, **kw})
-
-    def is_cancelled():
-        return job.get("cancelled", False)
-
-    def safe_ai_call(prompt, max_tokens=4096, timeout=90, fallback="", retries=1):
-        """AI call with retry and timeout."""
-        for attempt in range(retries + 1):
-            try:
-                result = _research_ai_call(prompt, resolved, max_tokens=max_tokens, timeout=timeout)
-                if result and "[AI error" not in result:
-                    return result
-                print(f"  [research] AI call attempt {attempt+1} returned error: {(result or '')[:100]}")
-            except Exception as e:
-                print(f"  [research] AI call attempt {attempt+1} exception: {e}")
-            if attempt < retries:
-                time.sleep(2)
-        return fallback
-
-    cfg = {
-        "quick":    {"sections": 3,  "scout_budget": 4,  "deepen_budget": 2,  "max_fetch": 6,   "report_tokens": 6000,  "report_min": 1500, "detail": "concise but insightful"},
-        "standard": {"sections": 5,  "scout_budget": 8,  "deepen_budget": 3,  "max_fetch": 10,  "report_tokens": 10000, "report_min": 3000, "detail": "thorough and comprehensive"},
-        "deep":     {"sections": 7,  "scout_budget": 12, "deepen_budget": 5,  "max_fetch": 16,  "report_tokens": 14000, "report_min": 5000, "detail": "exhaustive, deeply analytical, and authoritative"},
-    }.get(depth, {"sections": 5, "scout_budget": 8, "deepen_budget": 3, "max_fetch": 10, "report_tokens": 10000, "report_min": 3000, "detail": "thorough and comprehensive"})
-
-    total_steps = 7  # Plan, Scout, Read, Deepen, Synthesize, Verify, Export
-    notes = {}           # section_title -> [bullet_notes]
-    all_sources = []     # [{title, url, snippet, section}]
-    seen_urls = set()
-    scout_used = 0
-    deepen_used = 0
-
-    def _build_partial_report():
-        """Build a best-effort report from whatever notes we have."""
-        parts = [f"# {query}\n\n*Note: This report was generated from partial data due to a pipeline interruption.*\n"]
-        for section, bullets in notes.items():
-            parts.append(f"\n## {section}\n")
-            for b in bullets:
-                parts.append(f"- {b}\n")
-        if all_sources:
-            parts.append("\n---\n\n## Sources\n\n")
-            seen = set()
-            for idx, src in enumerate(all_sources[:20], 1):
-                u = src.get("url", "")
-                if u and u not in seen:
-                    seen.add(u)
-                    parts.append(f"{idx}. [{src.get('title', 'Untitled')}]({u})\n")
-        return "".join(parts)
-
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import gc as _gc
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 1: PLANNING (timeout: 60s, retries: 1)
-        # Budget allocation across sections
-        # ══════════════════════════════════════════════════════════════
-        push("progress", step="planning", pct=2, total_steps=total_steps, current_step=1,
-             message="Planner agent analyzing topic and formulating investigation strategy...")
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        sub_questions = []
-        search_queries = {}
-
-        user_plan_text = user_plan or ""
-        if user_plan_text.strip():
-            angle_idx = 0
-            for line in user_plan_text.split("\n"):
-                s = line.strip()
-                m = re.match(r"^\s*\d+[.)]\s+(.+)", s)
-                if m:
-                    sq = m.group(1).strip()
-                    if " | " in sq or " — " in sq:
-                        parts = re.split(r"\s*[|—]\s*", sq)
-                        sq = parts[0].strip()
-                        search_queries[angle_idx] = [p.strip().strip('"\'') for p in parts[1:] if p.strip()]
-                    sub_questions.append(sq)
-                    angle_idx += 1
-            sub_questions = (sub_questions or [query])[:cfg["sections"] + 2]
-            push("progress", step="planning", pct=5, total_steps=total_steps, current_step=1,
-                 message=f"Using your custom plan: {len(sub_questions)} investigation angles.")
-        else:
-            plan = safe_ai_call(
-                f"""You are a research strategist. Create a focused research plan.
-
-TOPIC: {query}
-
-Produce exactly {cfg['sections']} investigation angles as a numbered list.
-Each angle should be a specific sub-question to research.
-After the list, for each angle, suggest 1-2 search queries.
-
-Format:
-ANGLES:
-1. <sub-question>
-2. <sub-question>
-...
-
-SEARCHES:
-Angle 1: "query1" | "query2"
-Angle 2: "query1" | "query2"
-...""",
-                max_tokens=1500, timeout=60, retries=1, fallback=""
-            )
-
-            in_angles = False
-            in_strategy = False
-            angle_idx = 0
-            for line in (plan or "").split("\n"):
-                s = line.strip()
-                if re.search(r"ANGLES|RESEARCH_ANGLES", s):
-                    in_angles = True; in_strategy = False; continue
-                if re.search(r"SEARCHES|SEARCH_STRATEGY", s):
-                    in_angles = False; in_strategy = True; continue
-                if re.search(r"KEY_TERMS", s):
-                    in_angles = False; in_strategy = False; continue
-                if in_angles:
-                    m = re.match(r"^\s*\d+[.)]\s+(.+)", s)
-                    if m:
-                        sub_questions.append(m.group(1).strip())
-                if in_strategy:
-                    m = re.match(r"^\s*(?:Angle\s*)?\d+[.):]\s*(.*)", s)
-                    if m and angle_idx < len(sub_questions):
-                        queries = [q.strip().strip('"\'') for q in m.group(1).split("|") if q.strip()]
-                        search_queries[angle_idx] = queries[:2]
-                        angle_idx += 1
-
-            sub_questions = (sub_questions or [query])[:cfg["sections"]]
-
-        if not sub_questions:
-            sub_questions = [query]
-
-        # Initialize notes dict
-        for sq in sub_questions:
-            notes[sq] = []
-
-        push("progress", step="planning", pct=7, total_steps=total_steps, current_step=1,
-             message=f"Research plan ready: {len(sub_questions)} investigation angles identified.",
-             plan_angles=sub_questions)
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 2: SCOUTING — Budget-capped web searches
-        # Each failed search marks the section as "weak" but continues
-        # ══════════════════════════════════════════════════════════════
-        push("progress", step="scouting", pct=8, total_steps=total_steps, current_step=2,
-             message=f"Scouting phase: searching with budget of {cfg['scout_budget']} queries...")
-
-        for sq_idx, sq in enumerate(sub_questions):
-            if is_cancelled():
-                push("cancelled"); job["status"] = "cancelled"; return
-            if scout_used >= cfg["scout_budget"]:
-                break
-
-            queries = search_queries.get(sq_idx, [sq])[:2]
-            if not queries:
-                queries = [sq]
-
-            for search_q in queries:
-                if scout_used >= cfg["scout_budget"]:
-                    break
-                scout_used += 1
-                pct = 8 + int((scout_used / max(cfg["scout_budget"], 1)) * 20)
-                push("progress", step="scouting", pct=min(pct, 28), total_steps=total_steps, current_step=2,
-                     message=f"Searching [{scout_used}/{cfg['scout_budget']}]: {search_q[:65]}...")
-
-                try:
-                    results = _ddg_search(search_q, max_results=5)
-                    for r in results:
-                        if r["url"] and r["url"] not in seen_urls:
-                            seen_urls.add(r["url"])
-                            r["section"] = sq
-                            all_sources.append(r)
-                except Exception as e:
-                    print(f"  [research] Scout search failed for '{search_q[:50]}': {e}")
-                    # Section stays weak but pipeline continues
-
-            # Also search main query once (first section only)
-            if sq_idx == 0:
-                try:
-                    for r in _ddg_search(query, max_results=6):
-                        if r["url"] and r["url"] not in seen_urls:
-                            seen_urls.add(r["url"])
-                            r["section"] = sq
-                            all_sources.append(r)
-                except Exception:
-                    pass
-
-        # Broader fallback if we found nothing
-        if not all_sources:
-            push("progress", step="scouting", pct=27, total_steps=total_steps, current_step=2,
-                 message="No results found. Attempting broader fallback search...")
-            try:
-                for r in _ddg_search(query.split()[0] if query.split() else query, max_results=10):
-                    if r["url"] and r["url"] not in seen_urls:
-                        seen_urls.add(r["url"])
-                        r["section"] = sub_questions[0]
-                        all_sources.append(r)
-            except Exception:
-                pass
-
-        push("progress", step="scouting", pct=28, total_steps=total_steps, current_step=2,
-             message=f"Scouting complete: {len(all_sources)} sources found across {scout_used} searches.")
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 3: READ & SUMMARIZE — Parallel fetch + bullet notes
-        # Wrapped in own try/except so failure here doesn't kill pipeline
-        # ══════════════════════════════════════════════════════════════
-        fetched = []
-        try:
-            push("progress", step="reading", pct=29, total_steps=total_steps, current_step=3,
-                 message=f"Reading up to {min(len(all_sources), cfg['max_fetch'])} sources...")
-
-            fetch_total = min(len(all_sources), cfg["max_fetch"])
-            to_fetch = all_sources[:fetch_total]
-
-            def _fetch_one(result):
-                if is_cancelled():
-                    return None
-                try:
-                    return (result, _fetch_url_text(result["url"], timeout=8))
-                except Exception:
-                    return (result, None)
-
-            done_count = 0
-            # Reduced workers (3) to limit memory usage on constrained hosts
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                futures = {pool.submit(_fetch_one, r): r for r in to_fetch}
-                for future in as_completed(futures):
-                    if is_cancelled():
-                        push("cancelled"); job["status"] = "cancelled"; return
-                    try:
-                        pair = future.result(timeout=15)
-                        if pair:
-                            result, text = pair
-                            if text and len(text) > 150:
-                                fetched.append({**result, "text": text})
-                    except Exception:
-                        pass
-                    done_count += 1
-                    # Push progress every single source (keeps proxy connection alive)
-                    pct = 29 + int((done_count / max(fetch_total, 1)) * 8)
-                    push("progress", step="reading", pct=min(pct, 37), total_steps=total_steps, current_step=3,
-                         message=f"Read {done_count}/{fetch_total} sources ({len(fetched)} useful)...")
-
-            push("progress", step="reading", pct=37, total_steps=total_steps, current_step=3,
-                 message=f"Read phase done: {len(fetched)} sources extracted.")
-
-        except Exception as read_err:
-            print(f"  [research] Read phase error (non-fatal): {read_err}")
-            push("progress", step="reading", pct=37, total_steps=total_steps, current_step=3,
-                 message=f"Read phase completed partially ({len(fetched)} extracted). Continuing...")
-
-        # Fall back to snippets if fetching yielded little
-        if len(fetched) < 3:
-            for r in all_sources[:20]:
-                if r.get("snippet") and len(r["snippet"]) > 80:
-                    fetched.append({**r, "text": r["snippet"]})
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ── Summarize into section notes ──
-        try:
-            push("progress", step="reading", pct=38, total_steps=total_steps, current_step=3,
-                 message=f"{len(fetched)} sources ready. Generating section notes...")
-
-            section_sources = {}
-            for f in fetched:
-                sec = f.get("section", sub_questions[0])
-                section_sources.setdefault(sec, []).append(f)
-
-            def _summarize_section(sq, sources_for_section):
-                if not sources_for_section or is_cancelled():
-                    return sq, []
-                source_text = "\n\n".join(
-                    f"Source: {s.get('title','Untitled')} ({s['url']})\n{s['text'][:3000]}"
-                    for s in sources_for_section[:5]
-                )
-                summary = safe_ai_call(
-                    f"""Extract key facts from these sources about: {sq}
-
-{source_text[:10000]}
-
-List the most important facts, statistics, and insights as bullet points.""",
-                    max_tokens=800, timeout=60, retries=0, fallback=""
-                )
-                bullets = [line.strip().lstrip("\u2022-* ") for line in (summary or "").split("\n")
-                           if line.strip() and len(line.strip()) > 10 and not line.strip().startswith("#")]
-                return sq, bullets
-
-            # Summarize sections sequentially (more stable than parallel on constrained hosts)
-            for sq_idx, sq in enumerate(sub_questions):
-                if is_cancelled():
-                    push("cancelled"); job["status"] = "cancelled"; return
-                try:
-                    _, bullets = _summarize_section(sq, section_sources.get(sq, []))
-                    notes[sq] = bullets
-                except Exception as e:
-                    print(f"  [research] Section summary failed for '{sq[:40]}' (non-fatal): {e}")
-                pct = 38 + int(((sq_idx + 1) / max(len(sub_questions), 1)) * 12)
-                push("progress", step="reading", pct=min(pct, 50), total_steps=total_steps, current_step=3,
-                     message=f"Summarized {sq_idx + 1}/{len(sub_questions)} sections...")
-
-        except Exception as summ_err:
-            print(f"  [research] Summary phase error (non-fatal): {summ_err}")
-            push("progress", step="reading", pct=50, total_steps=total_steps, current_step=3,
-                 message="Summary phase completed with errors. Continuing...")
-
-        # Checkpoint: notes saved
-        total_notes = sum(len(v) for v in notes.values())
-        push("progress", step="reading", pct=50, total_steps=total_steps, current_step=3,
-             message=f"Read phase complete: {total_notes} notes across {len(notes)} sections.")
-        job["notes"] = dict(notes)
-        job["sources_list"] = list(all_sources)
-        _gc.collect()  # free memory from fetch/parse before next phase
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 4: DEEPENING — Fill gaps in weak sections
-        # Only runs for sections with < 3 notes; budget-capped
-        # Each gap search can fail independently
-        # ══════════════════════════════════════════════════════════════
-        weak_sections = [sq for sq in sub_questions if len(notes.get(sq, [])) < 3]
-
-        if weak_sections and cfg["deepen_budget"] > 0:
-            push("progress", step="deepening", pct=51, total_steps=total_steps, current_step=4,
-                 message=f"Deepening: {len(weak_sections)} sections need more data (budget: {cfg['deepen_budget']})...")
-
-            deepen_per = max(1, cfg["deepen_budget"] // len(weak_sections))
-
-            for sq in weak_sections:
-                if is_cancelled():
-                    push("cancelled"); job["status"] = "cancelled"; return
-                if deepen_used >= cfg["deepen_budget"]:
-                    break
-
-                # AI suggests targeted gap-filling queries
-                gap_queries_raw = safe_ai_call(
-                    f"""I'm researching: {query}
-Specifically the sub-topic: {sq}
-Current notes are thin. Suggest 1-{deepen_per} specific search queries to find better sources.
-Output one query per line, nothing else.""",
-                    max_tokens=200, timeout=30, retries=0, fallback=sq
-                )
-
-                gap_queries = [line.strip().strip('"') for line in (gap_queries_raw or sq).split("\n")
-                               if line.strip() and len(line.strip()) > 5][:deepen_per]
-                if not gap_queries:
-                    gap_queries = [sq]
-
-                for gq in gap_queries:
-                    if deepen_used >= cfg["deepen_budget"]:
-                        break
-                    deepen_used += 1
-                    pct = 51 + int((deepen_used / max(cfg["deepen_budget"], 1)) * 9)
-                    push("progress", step="deepening", pct=min(pct, 60), total_steps=total_steps, current_step=4,
-                         message=f"Gap search [{deepen_used}/{cfg['deepen_budget']}]: {gq[:60]}...")
-
-                    try:
-                        results = _ddg_search(gq, max_results=4)
-                        for r in results:
-                            if r["url"] and r["url"] not in seen_urls:
-                                seen_urls.add(r["url"])
-                                text = _fetch_url_text(r["url"])
-                                if text and len(text) > 150:
-                                    summary = safe_ai_call(
-                                        f"Extract key facts about '{sq}' from this source:\n\n{text[:5000]}\n\nList bullet points only.",
-                                        max_tokens=500, timeout=30, retries=0, fallback=""
-                                    )
-                                    new_bullets = [line.strip().lstrip("\u2022-* ") for line in (summary or "").split("\n")
-                                                   if line.strip() and len(line.strip()) > 10 and not line.strip().startswith("#")]
-                                    notes[sq].extend(new_bullets)
-                                    all_sources.append({**r, "section": sq})
-                    except Exception as e:
-                        print(f"  [research] Deepen search failed for '{gq[:50]}' (non-fatal): {e}")
-
-            push("progress", step="deepening", pct=60, total_steps=total_steps, current_step=4,
-                 message=f"Deepening complete. {sum(len(v) for v in notes.values())} total notes.")
-        else:
-            push("progress", step="deepening", pct=60, total_steps=total_steps, current_step=4,
-                 message="All sections have sufficient data. Skipping deepening pass.")
-
-        # Checkpoint: deepened notes
-        job["notes"] = dict(notes)
-        job["sources_list"] = list(all_sources)
-        _gc.collect()  # free memory before synthesis
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 5: SYNTHESIS — Generate report from notes
-        # Multi-pass writing (core → enhance → polish)
-        # If synthesis fails, fall back to partial report from notes
-        # ══════════════════════════════════════════════════════════════
-        push("progress", step="synthesizing", pct=61, total_steps=total_steps, current_step=5,
-             message="Synthesizing findings into comprehensive report (pass 1: core content)...")
-
-        # Build notes context for the AI
-        notes_context = "\n\n".join(
-            f"### {section}\n" + "\n".join(f"- {b}" for b in bullets)
-            for section, bullets in notes.items() if bullets
-        )
-
-        sources_context = "\n".join(
-            f"- {s.get('title','Untitled')} ({s.get('url','')}): {s.get('snippet','')[:150]}"
-            for s in all_sources[:30]
-        )
-
-        if not notes_context.strip() and not all_sources:
-            push("progress", step="synthesizing", pct=62, total_steps=total_steps, current_step=5,
-                 message="No web sources found. Generating report from AI knowledge...")
-
-        report_md = safe_ai_call(
-            f"""You are an expert research synthesizer producing a {cfg['detail']} report.
-
-TOPIC: {query}
-
-RESEARCH NOTES (organized by section):
-{notes_context[:20000]}
-
-SOURCES FOUND:
-{sources_context[:4000]}
-
-Write a {cfg['detail']} research report. Structure (use markdown headers):
-# {query}
-## Executive Summary
-(250-400 words)
-## Key Takeaways
-(5-8 bullet points)
-## Background & Context
-## Key Findings
-### [Finding 1 Title]
-### [Finding 2 Title]
-(continue for each major finding)
-## Current Landscape & Trends
-## Competing Perspectives
-## Implications & Impact
-## Recommendations
-## Conclusion
-
-REQUIREMENTS:
-- Minimum {cfg['report_min']} words
-- Cite specific facts and data from the research notes
-- Use **bold** for key terms
-- Use bullet/numbered lists for clarity
-- Be analytical and insightful — explain WHY things matter
-- Draw connections between different findings""",
-            max_tokens=cfg["report_tokens"], timeout=120, retries=1,
-            fallback=""
-        )
-
-        if not report_md or len(report_md) < 200:
-            report_md = _build_partial_report()
-
-        push("progress", step="synthesizing", pct=75, total_steps=total_steps, current_step=5,
-             message="Core report generated.")
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # Enhancement pass (standard/deep) — can fail gracefully
-        if depth in ("standard", "deep") and "partial data" not in report_md:
-            push("progress", step="synthesizing", pct=76, total_steps=total_steps, current_step=5,
-                 message="Enhancing report (pass 2: depth and polish)...")
-            enhanced = safe_ai_call(
-                f"""You are a senior editor enhancing a research report. Improve it by:
-1. Adding more specific data points and evidence where thin
-2. Strengthening the executive summary
-3. Improving transitions between sections
-4. Making recommendations concrete and actionable
-5. Ensuring every section has sufficient depth
-
-Output the COMPLETE enhanced report in markdown. Do not truncate.
-
-REPORT:
-{report_md[:20000]}
-
-ADDITIONAL RESEARCH NOTES:
-{notes_context[:10000]}""",
-                max_tokens=cfg["report_tokens"], timeout=120, retries=0, fallback=""
-            )
-            if enhanced and len(enhanced) > len(report_md) * 0.7:
-                report_md = enhanced
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # Deep polish pass — can fail gracefully
-        if depth == "deep" and "partial data" not in report_md:
-            push("progress", step="synthesizing", pct=80, total_steps=total_steps, current_step=5,
-                 message="Final polish (pass 3: expert review)...")
-            polished = safe_ai_call(
-                f"""Final editorial polish on this research report. Focus on:
-1. No section feels rushed or superficial
-2. Add nuance where claims are too absolute
-3. Narrative flows logically start to finish
-4. Evidence properly supports all major claims
-5. Add a "Future Outlook" subsection before Conclusion if absent
-6. Make writing engaging and authoritative
-
-Output the COMPLETE polished report. Do not truncate.
-
-REPORT:
-{report_md[:22000]}""",
-                max_tokens=cfg["report_tokens"], timeout=120, retries=0, fallback=""
-            )
-            if polished and len(polished) > len(report_md) * 0.7:
-                report_md = polished
-
-        push("progress", step="synthesizing", pct=85, total_steps=total_steps, current_step=5,
-             message="Report synthesis complete.")
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 6: VERIFY — Optional fact-check (can fail gracefully)
-        # If this phase fails entirely, the report is still usable
-        # ══════════════════════════════════════════════════════════════
-        push("progress", step="verifying", pct=86, total_steps=total_steps, current_step=6,
-             message="Running quick verification pass...")
-
-        try:
-            quality_check = safe_ai_call(
-                f"""Quick quality review of this research report.
-Check for: unsupported claims, contradictions, missing perspectives.
-If issues found, list specific corrections. Otherwise say "QUALITY: PASS".
-Also provide a one-paragraph "Research Limitations" section.
-
-REPORT:
-{report_md[:16000]}""",
-                max_tokens=1000, timeout=60, retries=0, fallback="QUALITY: PASS"
-            )
-
-            if quality_check and "QUALITY: PASS" not in quality_check:
-                corrections = quality_check.split("Research Limitations")[0] if "Research Limitations" in quality_check else quality_check
-                if len(corrections.strip()) > 50 and "partial data" not in report_md:
-                    push("progress", step="verifying", pct=89, total_steps=total_steps, current_step=6,
-                         message="Verifier found issues — applying corrections...")
-                    fixed = safe_ai_call(
-                        f"Apply these corrections. Output the COMPLETE corrected report.\n\nCORRECTIONS:\n{corrections[:3000]}\n\nREPORT:\n{report_md[:20000]}",
-                        max_tokens=cfg["report_tokens"], timeout=90, retries=0, fallback=""
-                    )
-                    if fixed and len(fixed) > len(report_md) * 0.7:
-                        report_md = fixed
-
-            if quality_check and "Research Limitations" in quality_check:
-                lim_start = quality_check.find("Research Limitations")
-                limitations = quality_check[lim_start:]
-                if not report_md.rstrip().endswith("---"):
-                    report_md += "\n\n---\n\n"
-                report_md += f"## {limitations}"
-
-        except Exception as e:
-            print(f"  [research] Verify phase failed (non-fatal): {e}")
-            push("progress", step="verifying", pct=90, total_steps=total_steps, current_step=6,
-                 message=f"Verification skipped due to error. Proceeding to export.")
-
-        push("progress", step="verifying", pct=91, total_steps=total_steps, current_step=6,
-             message="Verification complete.")
-
-        if is_cancelled():
-            push("cancelled"); job["status"] = "cancelled"; return
-
-        # ══════════════════════════════════════════════════════════════
-        # PHASE 7: EXPORT — Save markdown (always), try PDF (can fail)
-        # Source citations added here
-        # ══════════════════════════════════════════════════════════════
-        push("progress", step="exporting", pct=93, total_steps=total_steps, current_step=7,
-             message="Compiling sources and exporting files...")
-
-        # De-duplicate and build source list
-        source_list = []
-        seen_src_urls = set()
-        for s in all_sources:
-            u = s.get("url", "")
-            if u and u not in seen_src_urls:
-                seen_src_urls.add(u)
-                source_list.append({"title": s.get("title", "Untitled"), "url": u, "snippet": s.get("snippet", "")})
-
-        # Append source citations to report
-        if source_list:
-            report_md += "\n\n---\n\n## Sources & References\n\n"
-            for idx, src in enumerate(source_list, 1):
-                report_md += f"{idx}. [{src['title']}]({src['url']})\n"
-
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_q = re.sub(r"[^\w\s-]", "", query[:40]).strip().replace(" ", "_")
-        md_fn = f"research_{safe_q}_{ts}.md"
-        pdf_fn = f"research_{safe_q}_{ts}.pdf"
-        rdir = WORKSPACE / "notes" / "research"
-        rdir.mkdir(parents=True, exist_ok=True)
-
-        # Markdown — always save
-        try:
-            (rdir / md_fn).write_text(report_md, encoding="utf-8")
-        except Exception as md_err:
-            print(f"  [research] Markdown save failed: {md_err}")
-
-        # PDF — try but don't crash if it fails
-        pdf_ok = False
-        try:
-            _generate_research_pdf(query, report_md, source_list, rdir / pdf_fn)
-            pdf_ok = True
-        except Exception as pdf_err:
-            print(f"  [research] PDF generation failed (non-fatal): {pdf_err}")
-            push("progress", step="exporting", pct=97, total_steps=total_steps, current_step=7,
-                 message=f"PDF skipped: {str(pdf_err)[:80]}. Markdown saved successfully.")
-
-        push("progress", step="exporting", pct=100, total_steps=total_steps, current_step=7,
-             message="Export complete!")
-
-        job["report"] = report_md
-        push("done",
-             report=report_md,
-             pdf_file=pdf_fn if pdf_ok else None,
-             md_file=md_fn,
-             sources=source_list,
-             sub_questions=sub_questions,
-             source_count=len(source_list),
-        )
-        job["status"] = "done"
-
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"  [research] Pipeline crashed: {e}\n{tb}")
-
-        # Crash recovery: always try to return SOMETHING rather than error
-        try:
-            partial = _build_partial_report() if (notes and any(v for v in notes.values())) else ""
-            if not partial and all_sources:
-                # Even without notes, list the sources we found
-                partial = f"# {query}\n\n*Research was interrupted. Sources found below.*\n\n"
-                partial += "\n".join(f"- [{s.get('title','Untitled')}]({s.get('url','')})" for s in all_sources[:20])
-            if partial:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_q = re.sub(r"[^\w\s-]", "", query[:40]).strip().replace(" ", "_")
-                md_fn = f"research_{safe_q}_{ts}_partial.md"
-                rdir = WORKSPACE / "notes" / "research"
-                rdir.mkdir(parents=True, exist_ok=True)
-                try:
-                    (rdir / md_fn).write_text(partial, encoding="utf-8")
-                except Exception:
-                    md_fn = None
-                push("done",
-                     report=partial,
-                     partial=True,
-                     pdf_file=None,
-                     md_file=md_fn,
-                     sources=[{"title": s.get("title", ""), "url": s.get("url", ""), "snippet": s.get("snippet", "")}
-                              for s in all_sources[:20]],
-                     sub_questions=list(notes.keys()) if notes else [query],
-                     source_count=len(all_sources),
-                     error_note=f"Research completed partially: {str(e)[:200]}"
-                )
-                job["status"] = "done"
-            else:
-                push("error", error=f"Research failed: {str(e)[:200]}")
-                job["status"] = "error"
-        except Exception:
-            push("error", error=f"Research failed: {str(e)[:200]}")
-            job["status"] = "error"
-
 
 @app.route("/api/research/plan", methods=["POST"])
 @require_auth_or_guest
@@ -4668,38 +4202,17 @@ def cancel_research(job_id):
 def start_research():
     d = request.get_json() or {}
     query = (d.get("query") or "").strip()
-    depth = d.get("depth", "standard")
-    user_plan = (d.get("plan") or "").strip()  # User-confirmed/edited plan text
     if not query:
         return jsonify({"error": "Query required"}), 400
-    if depth not in ("quick", "standard", "deep"):
-        depth = "standard"
 
     settings = load_settings()
-    # Pick best available model for research — try pro models, fall back to default
-    available_model = None
-    for mid in ("gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash"):
-        mi = MODELS.get(mid, {})
-        if not mi:
-            continue
-        api_key, _ = resolve_provider_key(settings, mi.get("provider", "google"))
-        if api_key:
-            available_model = mid
-            break
-    if not available_model:
-        available_model = DEFAULT_MODEL
-    resolved = {
-        "provider": MODELS[available_model]["provider"],
-        "actual_model": available_model,
-        "api_key": resolve_provider_key(settings, MODELS[available_model]["provider"])[0],
-        "base_url": None,
-    }
-    if not resolved["api_key"]:
-        return jsonify({"error": "No AI API key configured. Add a key in Settings first."}), 400
+    api_key, _ = resolve_provider_key(settings, "google")
+    if not api_key:
+        return jsonify({"error": "No Google AI API key configured. Add a key in Settings first."}), 400
 
     job_id = str(uuid.uuid4())[:12]
     _research_jobs[job_id] = {"status": "running", "events": [], "cancelled": False, "created": datetime.datetime.now().isoformat()}
-    _threading.Thread(target=_run_research_job, args=(job_id, query, depth, resolved, user_plan or None), daemon=True).start()
+    _threading.Thread(target=_run_research_job, args=(job_id, query, api_key), daemon=True).start()
 
     import time as _time
 

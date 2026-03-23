@@ -1911,11 +1911,11 @@ async function cancelCurrentResearch(){
 }
 
 async function runDeepResearch(query,contentEl,area,planText){
-  const depth=deepResearchDepth||'standard';
+  const depth='standard';
 
-  const stepNames=['Plan','Scout','Read','Deepen','Synthesize','Verify','Export'];
-  const stepIcons=['1','2','3','4','5','6','7'];
-  let currentPct=0, currentStep=0, lastMessage='Preparing research pipeline...';
+  const stepNames=['Start','Research','Export'];
+  const stepIcons=['1','2','3'];
+  let currentPct=0, currentStep=0, lastMessage='Initializing Gemini Deep Research...';
   let wasCancelled=false;
   let researchCompleted=false;
   let finalReport='';
@@ -1927,7 +1927,7 @@ async function runDeepResearch(query,contentEl,area,planText){
     return `<div class="research-step" data-rs="${i}"><div class="research-step-dot">${i+1}</div><div class="research-step-label">${name}</div></div>`;
   }).join('');
   contentEl.innerHTML=`
-    <div class="research-badge">🔬 Deep Research · ${esc(depth)}</div>
+    <div class="research-badge">🔬 Gemini Deep Research</div>
     <div class="research-progress" id="_rp">
       <div class="research-progress-header">
         <span class="research-progress-title" id="_rpTitle">Plan...</span>
@@ -1942,9 +1942,9 @@ async function runDeepResearch(query,contentEl,area,planText){
       </div>
       <div class="research-activity">
         <span class="research-activity-dot"></span>
-        <span id="_rpMsg">Preparing research pipeline...</span>
+        <span id="_rpMsg">Initializing Gemini Deep Research...</span>
       </div>
-      <div class="research-log" id="_rpLog"><div class="rline">⏳ Starting research pipeline...</div></div>
+      <div class="research-log" id="_rpLog"><div class="rline">⏳ Starting Gemini Deep Research...</div></div>
     </div>`;
   area.scrollTop=area.scrollHeight;
   let _logLines=1;
@@ -1985,8 +1985,7 @@ async function runDeepResearch(query,contentEl,area,planText){
     }
   };
 
-  const bodyObj={query,depth};
-  if(planText)bodyObj.plan=planText;
+  const bodyObj={query};
   const response=await apiFetch('/api/research',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(bodyObj)
@@ -2043,7 +2042,7 @@ async function runDeepResearch(query,contentEl,area,planText){
       }else if(evt.type==='cancelled'){
         wasCancelled=true;
         contentEl.innerHTML=`
-          <div class="research-badge">⏹ Research stopped · ${esc(depth)}</div>
+          <div class="research-badge">⏹ Research stopped</div>
           <div style="margin-top:10px;color:var(--text-secondary)">Research was cancelled.</div>
           <button class="research-regen-btn" onclick="regenerateResearch('${esc(query).replace(/'/g,"\\'")}')">🔄 Regenerate</button>`;
         setStatus('Research cancelled.');
@@ -2064,9 +2063,9 @@ async function runDeepResearch(query,contentEl,area,planText){
         const ppBtns=[];
         if(!evt.pdf_file)ppBtns.push(`<button class="choice-btn" onclick="postprocessPDF(this)" data-query="${esc(query).replace(/"/g,'&quot;')}">📄 Generate PDF</button>`);
         ppBtns.push(`<button class="choice-btn" onclick="postprocessMindmap(this)" data-query="${esc(query).replace(/"/g,'&quot;')}">🧠 Build Mind Map</button>`);
-        const partialNote=isPartial?`<div class="research-partial-note" style="background:var(--surface-2);border-left:3px solid var(--amber);padding:8px 12px;margin:8px 0;border-radius:6px;font-size:0.9em;color:var(--text-secondary)">⚠️ This report was generated from partial data. ${evt.error_note||'Some pipeline phases may have been skipped.'}</div>`:'';
+        const partialNote=isPartial?`<div class="research-partial-note" style="background:var(--surface-2);border-left:3px solid var(--amber);padding:8px 12px;margin:8px 0;border-radius:6px;font-size:0.9em;color:var(--text-secondary)">⚠️ This report was generated from partial data. ${evt.error_note||'Research may have been interrupted.'}</div>`:'';
         contentEl.innerHTML=`
-          <div class="research-badge">${isPartial?'⚠️ Research (partial)':'✅ Research complete'} · ${esc(depth)} · ${Number(evt.source_count||srcs.length)} sources</div>
+          <div class="research-badge">${isPartial?'⚠️ Research (partial)':'✅ Gemini Deep Research complete'} · ${Number(evt.source_count||srcs.length)} sources</div>
           ${partialNote}
           <div class="research-actions">${dl.join('')}</div>
           <div class="research-postprocess" style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap">${ppBtns.join('')}</div>
@@ -2088,7 +2087,7 @@ async function runDeepResearch(query,contentEl,area,planText){
   _currentResearchReader=null;
   // If stream ended but we never got a 'done' event, it stalled
   if(!researchCompleted&&!wasCancelled){
-    throw new Error('Research pipeline ended unexpectedly. This may be a server-side timeout or search failure. Try again with a simpler query or "quick" depth.');
+    throw new Error('Research ended unexpectedly. Try again with a different query.');
   }
 }
 
@@ -2184,13 +2183,13 @@ function _renderMindmapNode(node,level){
 }
 
 /* ─── Inline Research Plan (in-chat + canvas) ─────── */
-let _inlineResearchState=null; // {query, depth, cardEl, contentEl}
+let _inlineResearchState=null; // {query, cardEl, contentEl}
 
 async function startInlineResearchPlan(query,depth){
-  depth=depth||deepResearchDepth||'standard';
+  // Gemini Deep Research handles planning internally — start directly
   const area=document.getElementById('chatArea');
 
-  // Create inline plan card in chat
+  // Create inline card in chat
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
   const contentEl=document.createElement('div');
@@ -2200,64 +2199,26 @@ async function startInlineResearchPlan(query,depth){
   area.appendChild(msgDiv);
   area.scrollTop=area.scrollHeight;
 
-  // Loading state
-  contentEl.innerHTML=`
-    <div class="ri-card">
-      <div class="ri-header">
-        <span class="research-plan-badge">Deep Research</span>
-        <span class="ri-depth">${esc(depth)}</span>
-      </div>
-      <div class="ri-query">${esc(query)}</div>
-      <div class="ri-loading">
-        <div class="dots" style="display:inline-flex"><span></span><span></span><span></span></div>
-        <span>Generating research plan...</span>
-      </div>
-    </div>`;
+  _inlineResearchState={query,cardEl:msgDiv,contentEl};
 
-  _inlineResearchState={query,depth,cardEl:msgDiv,contentEl};
-
+  const targetChatId=curChat;
+  setChatRunning(targetChatId,true,{type:'research'});
   try{
-    const r=await apiFetch('/api/research/plan',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query,depth})});
-    const d=await r.json();
-    if(!r.ok||d.error) throw new Error(d.error||'Failed to generate plan.');
-
-    const angles=d.angles||[];
-    const planText=angles.map((a,i)=>`${i+1}. ${a}`).join('\n');
-    _inlineResearchState.planText=planText;
-    _inlineResearchState.angles=angles;
-
-    // Show plan preview in chat with expandable card
-    const previewHtml=angles.map((a,i)=>`<div class="ri-angle"><span class="ri-angle-num">${i+1}</span>${esc(a)}</div>`).join('');
-    contentEl.innerHTML=`
-      <div class="ri-card">
-        <div class="ri-header">
-          <span class="research-plan-badge">Research Plan</span>
-          <span class="ri-depth">${esc(depth)}</span>
-        </div>
-        <div class="ri-query">${esc(query)}</div>
-        <button class="ri-toggle" id="riTogglePlan" onclick="toggleResearchPlan()">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          <span>${angles.length} research angles</span>
-        </button>
-        <div class="ri-angles" id="riAnglesWrap">${previewHtml}</div>
-        <div class="ri-actions">
-          <button class="ri-btn-cancel" onclick="cancelInlineResearch()" title="Cancel">✕</button>
-          <button class="ri-btn-confirm" onclick="confirmInlineResearchPlan()" title="Confirm & Start">✓</button>
-        </div>
-      </div>`;
-    area.scrollTop=area.scrollHeight;
+    await runDeepResearch(query,contentEl,area);
+    await refreshChats();
+    // Auto-continue with summary
+    setChatRunning(targetChatId,false);
+    try{
+      const inp=document.getElementById('msgInput');
+      inp.value='The deep research report above is now complete. Provide a brief executive summary highlighting the 3-5 most important findings, key takeaways, and any actionable recommendations. Be concise.';
+      sendMessage({silent:true,noThinking:true});
+    }catch(_){}
   }catch(e){
-    contentEl.innerHTML=`
-      <div class="ri-card ri-card-error">
-        <div class="ri-header"><span class="research-plan-badge">Deep Research</span></div>
-        <div style="color:var(--red);margin-top:10px">${esc(e.message||'Failed to generate plan.')}</div>
-        <div class="ri-actions">
-          <button class="research-btn-back" onclick="cancelInlineResearch()">Dismiss</button>
-        </div>
-      </div>`;
-    _inlineResearchState=null;
+    contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;
+    setStatus('Research failed.');
+    setChatRunning(targetChatId,false);
   }
+  _inlineResearchState=null;
 }
 
 function toggleResearchPlan(){
@@ -2268,36 +2229,18 @@ function toggleResearchPlan(){
   btn.classList.toggle('expanded');
 }
 
-function editResearchPlanInCanvas(){
-  if(!_inlineResearchState)return;
-  openCanvas(_inlineResearchState.planText||'','Research Plan',false,{sourcePath:'__research_plan__',openPanel:true});
-}
+function editResearchPlanInCanvas(){}
 
 async function confirmInlineResearchPlan(){
   if(!_inlineResearchState)return;
-  // Use stored plan text (user can edit via canvas if they opened it)
-  const tab=canvasTabs.find(t=>t.sourcePath==='__research_plan__');
-  let planText=tab?tab.content:(_inlineResearchState.planText||'');
-  if(!planText.trim()){showToast('Plan cannot be empty.','info');return;}
-
-  const {query,depth,contentEl}=_inlineResearchState;
+  const {query,contentEl}=_inlineResearchState;
   _inlineResearchState=null;
 
-  // Close canvas plan tab
-  if(tab){
-    canvasTabs=canvasTabs.filter(t=>t.id!==tab.id);
-    if(activeCanvasTabId===tab.id){
-      if(canvasTabs.length)switchCanvasTab(canvasTabs[canvasTabs.length-1].id);
-      else closeCanvas();
-    }else{renderCanvasTabs();}
-  }
-
-  // Start research inline
   const targetChatId=curChat;
   setChatRunning(targetChatId,true,{type:'research'});
   const area=document.getElementById('chatArea');
   try{
-    await runDeepResearch(query,contentEl,area,planText);
+    await runDeepResearch(query,contentEl,area);
     await refreshChats();
   }catch(e){
     contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;
@@ -2375,67 +2318,136 @@ function renderImageBlock(ir){
   return renderImageCarousel(ir.query, ir.images);
 }
 
-function renderChoiceBlock(choices,question,multi){
+function renderChoiceWizard(choiceBlocks){
+  // Wizard-style single-card that cycles through questions one at a time
+  const total=choiceBlocks.length;
+  const blocksJSON=JSON.stringify(choiceBlocks).replace(/'/g,"&#39;").replace(/"/g,'&quot;');
+  const first=choiceBlocks[0];
   const letters='ABCDEFGH';
-  const qHTML=question?`<div class="cq-question">${esc(question)}</div>`:'';
-  const multiAttr=multi?'data-multi="true"':'';
-  const optsHTML=choices.map((c,i)=>{
+  const qHTML=first.question?`<div class="cq-question">${esc(first.question)}</div>`:'';
+  const multiAttr=first.multi?'data-multi="true"':'';
+  const optsHTML=first.choices.map((c,i)=>{
     const letter=letters[i]||String(i+1);
     const safeText=esc(c.trim()).replace(/'/g,"\\'");
-    return `<button class="cq-opt" onclick="pickChoice(this,'${safeText}')">`
+    return `<button class="cq-opt" onclick="pickWizardChoice(this,'${safeText}')">`
       +`<span class="cq-letter">${letter}</span>`
       +`<span class="cq-text">${esc(c.trim())}</span>`
       +`</button>`;
   }).join('');
-  const multiHint=multi?'<div class="cq-multi-hint">Select multiple</div>':'';
-  return `<div class="cq-block" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
-    +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickCustomChoice(this)}"/>`
-    +`<button class="cq-send" onclick="pickCustomChoice(this.previousElementSibling)" title="Send">→</button></div></div>`;
+  const multiHint=first.multi?'<div class="cq-multi-hint">Select multiple, then press Next</div>':'';
+  const progressHTML=total>1?`<div class="cq-progress"><span class="cq-step-label">Question <span class="cq-step-num">1</span> of ${total}</span><div class="cq-progress-bar"><div class="cq-progress-fill" style="width:${(1/total)*100}%"></div></div></div>`:'';
+  const nextBtnHTML=first.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next →</button>`:'';
+  return `<div class="cq-wizard" data-blocks="${blocksJSON}" data-current="0" data-total="${total}" data-answers="[]">`
+    +progressHTML
+    +`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
+    +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickWizardCustom(this)}"/>`
+    +`<button class="cq-send" onclick="pickWizardCustom(this.previousElementSibling)" title="Send">→</button></div>`
+    +nextBtnHTML
+    +`</div></div>`;
 }
 
-function pickChoice(btn,text){
-  const block=btn.closest('.cq-block');
-  const isMulti=block.dataset.multi==='true';
+function renderChoiceBlock(choices,question,multi){
+  // Single-block fallback for backwards compat — renders inside wizard
+  return renderChoiceWizard([{choices,question,multi}]);
+}
+
+function pickWizardChoice(btn,text){
+  const card=btn.closest('.cq-card');
+  const wizard=btn.closest('.cq-wizard');
+  const isMulti=card.dataset.multi==='true';
   if(isMulti){
     btn.classList.toggle('cq-selected');
-    const selected=[...block.querySelectorAll('.cq-opt.cq-selected')].map(b=>b.querySelector('.cq-text').textContent.trim());
-    block.dataset.answer=selected.join(', ');
-  } else {
-    block.querySelectorAll('.cq-opt').forEach(b=>b.classList.remove('cq-selected'));
+    const selected=[...card.querySelectorAll('.cq-opt.cq-selected')].map(b=>b.querySelector('.cq-text').textContent.trim());
+    card.dataset.answer=selected.join(', ');
+    const nextBtn=card.querySelector('.cq-next-btn');
+    if(nextBtn)nextBtn.disabled=!selected.length;
+  }else{
+    card.querySelectorAll('.cq-opt').forEach(b=>b.classList.remove('cq-selected'));
     btn.classList.add('cq-selected');
-    block.dataset.answer=text;
+    card.dataset.answer=text;
+    // Auto-advance for single-select
+    setTimeout(()=>wizardNext(btn),250);
   }
-  _afterChoicePick(block);
 }
 
-function pickCustomChoice(input){
+function pickWizardCustom(input){
   const text=(input.value||'').trim();
   if(!text)return;
-  const block=input.closest('.cq-block');
-  block.querySelectorAll('.cq-opt').forEach(b=>b.classList.remove('cq-selected'));
-  block.dataset.answer=text;
-  _afterChoicePick(block);
+  const card=input.closest('.cq-card');
+  card.querySelectorAll('.cq-opt').forEach(b=>b.classList.remove('cq-selected'));
+  card.dataset.answer=text;
+  setTimeout(()=>wizardNext(input),150);
 }
 
-function _afterChoicePick(block){
-  const group=block.closest('.cq-group');
-  const blocks=group?group.querySelectorAll('.cq-block'):[block];
-  const isMulti=block.dataset.multi==='true';
-  const hasSubmitBtn=group&&group.querySelector('.cq-submit-all');
-  if(blocks.length<=1&&!isMulti){
-    // Single question, single-select — send immediately (old behavior)
-    block.querySelectorAll('.cq-opt').forEach(b=>{b.disabled=true;b.style.pointerEvents='none';});
-    const cr=block.querySelector('.cq-custom');if(cr)cr.style.display='none';
-    sendQ(block.dataset.answer);
+function wizardNext(el){
+  const wizard=el.closest('.cq-wizard');
+  if(!wizard)return;
+  const card=wizard.querySelector('.cq-card');
+  const answer=card.dataset.answer||'';
+  if(!answer)return;
+  const blocks=JSON.parse(wizard.dataset.blocks.replace(/&quot;/g,'"').replace(/&#39;/g,"'"));
+  let answers=JSON.parse(wizard.dataset.answers||'[]');
+  const current=parseInt(wizard.dataset.current,10);
+  const total=parseInt(wizard.dataset.total,10);
+  const q=blocks[current];
+  answers.push({question:q.question||'',answer:answer});
+  wizard.dataset.answers=JSON.stringify(answers);
+  const next=current+1;
+  if(next>=total){
+    // All questions answered — submit
+    card.style.opacity='0';card.style.transform='translateX(-20px)';
+    setTimeout(()=>{
+      const parts=answers.map(a=>a.question?(a.question+' '+a.answer):a.answer);
+      // Disable the wizard
+      wizard.innerHTML=`<div class="cq-done"><span class="cq-done-icon">✓</span> Answered ${total} question${total>1?'s':''}</div>`;
+      sendQ(parts.join('\n'));
+    },200);
     return;
   }
-  // Multiple questions or multi-select — enable submit button when all answered
-  const allAnswered=[...blocks].every(b=>b.dataset.answer);
-  const submitBtn=group.querySelector('.cq-submit-all');
-  if(submitBtn)submitBtn.disabled=!allAnswered;
+  // Animate to next card
+  wizard.dataset.current=String(next);
+  card.style.opacity='0';card.style.transform='translateX(-20px)';
+  setTimeout(()=>{
+    const nb=blocks[next];
+    const letters='ABCDEFGH';
+    const qHTML=nb.question?`<div class="cq-question">${esc(nb.question)}</div>`:'';
+    const multiAttr=nb.multi?'data-multi="true"':'';
+    const optsHTML=nb.choices.map((c,i)=>{
+      const letter=letters[i]||String(i+1);
+      const safeText=esc(c.trim()).replace(/'/g,"\\'");
+      return `<button class="cq-opt" onclick="pickWizardChoice(this,'${safeText}')">`
+        +`<span class="cq-letter">${letter}</span>`
+        +`<span class="cq-text">${esc(c.trim())}</span>`
+        +`</button>`;
+    }).join('');
+    const multiHint=nb.multi?'<div class="cq-multi-hint">Select multiple, then press Next</div>':'';
+    const nextBtnHTML=nb.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next →</button>`:'';
+    card.outerHTML=`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
+      +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickWizardCustom(this)}"/>`
+      +`<button class="cq-send" onclick="pickWizardCustom(this.previousElementSibling)" title="Send">→</button></div>`
+      +nextBtnHTML+`</div>`;
+    // Update progress
+    const fill=wizard.querySelector('.cq-progress-fill');
+    const stepNum=wizard.querySelector('.cq-step-num');
+    if(fill)fill.style.width=`${((next+1)/total)*100}%`;
+    if(stepNum)stepNum.textContent=String(next+1);
+    // Animate in
+    const newCard=wizard.querySelector('.cq-card');
+    newCard.style.opacity='0';newCard.style.transform='translateX(20px)';
+    requestAnimationFrame(()=>{
+      newCard.style.transition='opacity .25s ease, transform .25s ease';
+      newCard.style.opacity='1';newCard.style.transform='translateX(0)';
+    });
+  },200);
 }
 
+function pickChoice(btn,text){pickWizardChoice(btn,text);}
+function pickCustomChoice(input){pickWizardCustom(input);}
+
 function submitAllChoices(btn){
+  const wizard=btn.closest('.cq-wizard');
+  if(wizard){wizardNext(btn);return;}
+  // Legacy fallback
   const group=btn.closest('.cq-group');
   const blocks=group.querySelectorAll('.cq-block');
   const parts=[...blocks].map(b=>{
@@ -2488,6 +2500,7 @@ function stripMetaBlocks(text){
     .replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?(<<<END_CHOICES>>>|$)/g,'')
     .replace(/<<<IMAGE_SEARCH:\s*.+?>>>/g,'')
     .replace(/%%%IMAGE_SEARCH:\s*.+?(?:>>>|%%%)/g,'')
+    .replace(/<<<IMAGE_GENERATE:\s*.+?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .trim();
@@ -2520,6 +2533,7 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;MEMORY_ADD:[^&]*?&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;IMAGE_SEARCH:[^&]*?&gt;&gt;&gt;/g,'');
   html=html.replace(/%%%IMAGE_SEARCH:[^%]*?(?:&gt;&gt;&gt;|%%%)/g,'');
+  html=html.replace(/&lt;&lt;&lt;IMAGE_GENERATE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🎨</span> Generating image...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   // Completed CODE_EXECUTE blocks — hide raw tags, show placeholder
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Executing code...</div>');
@@ -2932,12 +2946,8 @@ async function sendMessage(opts){
               finalHTML+=fmt(displayReply);
             }
             if(!devRawMode&&choiceBlocks.length){
-              finalHTML+='<div class="cq-group">';
-              for(const cb of choiceBlocks){
-                if(cb.choices.length)finalHTML+=renderChoiceBlock(cb.choices,cb.question,cb.multi);
-              }
-              if(choiceBlocks.length>1||choiceBlocks.some(cb=>cb.multi))finalHTML+='<button class="cq-submit-all" onclick="submitAllChoices(this)" disabled>Submit Answers</button>';
-              finalHTML+='</div>';
+              const validBlocks=choiceBlocks.filter(cb=>cb.choices.length);
+              if(validBlocks.length)finalHTML+=renderChoiceWizard(validBlocks);
             }
             const artifactIds=registerArtifactsFromReply(displayReply,data.files||[]);
             if(!devRawMode&&data.files?.length){
@@ -2998,6 +3008,33 @@ async function sendMessage(opts){
             if(!devRawMode&&data.failed_images?.length){
               for(const fq of data.failed_images){
                 finalHTML+=`<div class="img-search-fail"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(fq)}" couldn't load — try again or search manually.</div>`;
+              }
+            }
+
+            // ── AI image generation — show loading placeholders ──
+            if(!devRawMode&&data.pending_generations?.length){
+              for(const pg of data.pending_generations){
+                const loaderId=`imggen-loader-${pg.index}`;
+                const loaderHTML=`<div class="img-grid-wrap img-loading-placeholder" id="${loaderId}" data-imggen-index="${pg.index}"><div class="img-grid-header"><span class="img-gen-icon">🎨</span> Generating image...</div><div class="img-gen-prompt-preview">${esc(pg.prompt.length>80?pg.prompt.slice(0,80)+'…':pg.prompt)}</div><div class="img-loading-shimmer"><div class="img-shimmer-bar"></div><div class="img-shimmer-bar"></div><div class="img-shimmer-bar short"></div></div></div>`;
+                const re=new RegExp(`<p>\\s*%%%IMGGEN:${pg.index}%%%\\s*</p>|%%%IMGGEN:${pg.index}%%%`,'g');
+                const before=finalHTML;
+                finalHTML=finalHTML.replace(re,loaderHTML);
+                if(finalHTML===before){
+                  finalHTML+=loaderHTML;
+                }
+              }
+            }
+
+            // Handle generated images on reload/history
+            if(!devRawMode&&data.generated_images?.length){
+              for(const gi of data.generated_images){
+                const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span> Generated Image</div><img src="${gi.url}" alt="${esc(gi.prompt)}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-prompt">${esc(gi.prompt)}</div></div>`;
+                const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
+                const before=finalHTML;
+                finalHTML=finalHTML.replace(re,genHTML);
+                if(finalHTML===before){
+                  finalHTML+=genHTML;
+                }
               }
             }
 
@@ -3095,6 +3132,28 @@ async function sendMessage(opts){
               const loader=contentEl.querySelector(`#img-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(data.query)}" couldn't load — try again or search manually.</div>`;
+                loader.classList.remove('img-loading-placeholder');
+                loader.classList.add('img-search-fail-block');
+              }
+            }
+          }else if(data.type==='image_generated'){
+            // AI-generated image arrived — replace loader with the actual image
+            if(!devRawMode&&canRender()){
+              const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
+              const html=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span> Generated Image</div><img src="${data.image.url}" alt="${esc(data.image.prompt)}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.parentElement.innerHTML='<div class=\\'img-search-fail\\'>Image failed to load</div>'"><div class="img-gen-prompt">${esc(data.image.prompt)}</div></div>`;
+              if(loader){
+                const temp=document.createElement('div');
+                temp.innerHTML=html;
+                loader.replaceWith(temp.firstElementChild||temp);
+              }
+              area.scrollTop=area.scrollHeight;
+            }
+          }else if(data.type==='image_gen_failed'){
+            // Image generation failed
+            if(!devRawMode&&canRender()){
+              const loader=contentEl.querySelector(`#imggen-loader-${data.index}`);
+              if(loader){
+                loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🎨</span> Image generation failed: ${esc(data.error||'Unknown error')}</div>`;
                 loader.classList.remove('img-loading-placeholder');
                 loader.classList.add('img-search-fail-block');
               }
@@ -3220,6 +3279,18 @@ function addMsg(role,text,files,extra={}){
     if(!hasPlaceholders){
       for(const ir of extra.image_results){
         html+=renderImageBlock(ir);
+      }
+    }
+  }
+  // Render persisted generated images on reload
+  if(!devRawMode&&extra.generated_images?.length){
+    for(const gi of extra.generated_images){
+      const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span> Generated Image</div><img src="${gi.url}" alt="${esc(gi.prompt)}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-prompt">${esc(gi.prompt)}</div></div>`;
+      const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
+      const before=html;
+      html=html.replace(re,genHTML);
+      if(html===before){
+        html+=genHTML;
       }
     }
   }
