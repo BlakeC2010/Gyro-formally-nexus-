@@ -5,7 +5,7 @@ let _continueCount=0;const _MAX_CONTINUES=5;
 let _codeRepromptCount=0;const _MAX_CODE_REPROMPTS=3;
 let _nextStreamId=0;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
-let googleInitDone=false,thinkingEnabled=false,guestAuthMode='register';
+let googleInitDone=false,thinkingLevel='off',guestAuthMode='register';
 let deepResearchDepth='standard';
 let onboardingChecked=false;
 let selectMode=false;
@@ -1812,14 +1812,17 @@ async function selectModel(id,label,provider,skipUpdate=false){
 function refreshModeMenuUI(){
   const thinkItem=document.getElementById('thinkMenuItem');
   const thinkBadge=document.getElementById('thinkMenuBadge');
-  if(thinkItem)thinkItem.classList.toggle('active',thinkingEnabled);
-  if(thinkBadge)thinkBadge.textContent=thinkingEnabled?'ON':'OFF';
+  const isOn=thinkingLevel&&thinkingLevel!=='off';
+  if(thinkItem)thinkItem.classList.toggle('active',isOn);
+  if(thinkBadge)thinkBadge.textContent=isOn?thinkingLevel.toUpperCase():'OFF';
 }
 
 function toggleThinking(force){
-  thinkingEnabled=(typeof force==='boolean')?force:!thinkingEnabled;
+  const levels=['off','minimal','low','medium','high'];
+  if(typeof force==='string'){thinkingLevel=force;}
+  else{const i=levels.indexOf(thinkingLevel);thinkingLevel=levels[(i+1)%levels.length];}
   refreshModeMenuUI();
-  showToast(`Thinking ${thinkingEnabled?'enabled':'disabled'}.`,thinkingEnabled?'success':'info');
+  showToast(`Thinking: ${thinkingLevel==='off'?'off':thinkingLevel}`,thinkingLevel==='off'?'info':'success');
 }
 
 document.addEventListener('click',e=>{
@@ -2487,33 +2490,22 @@ async function _fetchStockData(ticker,cardId){
     const fmtNumRaw=(n)=>{if(n==null)return'—';if(n>=1e12)return(n/1e12).toFixed(2)+'T';if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString();};
     const fmtPct=(n)=>n!=null?(n*100).toFixed(2)+'%':'—';
 
-    // Analyst badge
-    let recBadge='';
-    if(d.recommendation){
-      const recMap={strong_buy:'Strong Buy',buy:'Buy',hold:'Hold',sell:'Sell',strong_sell:'Strong Sell'};
-      const recCls={strong_buy:'stock-rec-buy',buy:'stock-rec-buy',hold:'stock-rec-hold',sell:'stock-rec-sell',strong_sell:'stock-rec-sell'};
-      const analystCount=d.numAnalysts?` (${d.numAnalysts} analysts)`:'';
-      recBadge=`<span class="stock-rec-badge ${recCls[d.recommendation]||'stock-rec-hold'}">${recMap[d.recommendation]||d.recommendation}${analystCount}</span>`;
-    }
+    // ── Verdict banner ──
+    const verdict=d.verdict||'hold';
+    const verdictLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[verdict]||'HOLD';
+    const verdictCls={buy:'stock-verdict-buy',hold:'stock-verdict-hold',sell:'stock-verdict-sell'}[verdict]||'stock-verdict-hold';
+    const hs=d.health&&d.health.score;
+    const scoreTag=hs!=null?`<span class="stock-verdict-score">${hs}/100</span>`:'';
 
-    // Risk badge
+    // ── Risk badge ──
     let riskBadge='';
     if(d.risk){
-      const riskMap={low:'Low Risk',moderate:'Moderate Risk',high:'High Risk',very_high:'Very High Risk'};
+      const riskMap={low:'Low Risk',moderate:'Moderate',high:'High Risk',very_high:'Very High'};
       const riskCls={low:'stock-risk-low',moderate:'stock-risk-mod',high:'stock-risk-high',very_high:'stock-risk-high'};
       riskBadge=`<span class="stock-risk-badge ${riskCls[d.risk]||'stock-risk-mod'}">${riskMap[d.risk]||d.risk}</span>`;
     }
 
-    // Health score gauge
-    let healthHtml='';
-    const hs=d.health&&d.health.score;
-    if(hs!=null){
-      const hc=_stockHealthColor(hs);
-      const hLabel=hs>=70?'Strong':hs>=45?'Fair':'Weak';
-      healthHtml=`<div class="stock-health"><div class="stock-health-gauge"><svg viewBox="0 0 36 36" class="stock-health-svg"><path d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="var(--border)" stroke-width="3"/><path d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="${hc}" stroke-width="3" stroke-dasharray="${hs}, 100" stroke-linecap="round"/></svg><span class="stock-health-num" style="color:${hc}">${hs}</span></div><span class="stock-health-label">${hLabel}</span></div>`;
-    }
-
-    // Key metrics grid
+    // ── Key metrics ──
     const metrics=[
       {label:'Open',value:d.open!=null?'$'+d.open.toFixed(2):'—'},
       {label:'Day Range',value:(d.dayLow!=null&&d.dayHigh!=null)?'$'+d.dayLow.toFixed(2)+' – $'+d.dayHigh.toFixed(2):'—'},
@@ -2527,9 +2519,8 @@ async function _fetchStockData(ticker,cardId){
       {label:'Beta',value:d.beta!=null?d.beta.toFixed(2):'—'},
     ];
 
-    // Technical indicators row
+    // ── Technical indicators ──
     const p=d.perf||{};
-    let techHtml='';
     const techItems=[];
     if(p.sma50!=null)techItems.push(`<span class="stock-tech-item">SMA50: <b class="${d.price>=p.sma50?'stock-up':'stock-down'}">$${p.sma50.toFixed(2)}</b></span>`);
     if(p.sma200!=null)techItems.push(`<span class="stock-tech-item">SMA200: <b class="${d.price>=p.sma200?'stock-up':'stock-down'}">$${p.sma200.toFixed(2)}</b></span>`);
@@ -2538,21 +2529,19 @@ async function _fetchStockData(ticker,cardId){
       const rsiLabel=p.rsi>70?'Overbought':p.rsi<30?'Oversold':'Neutral';
       techItems.push(`<span class="stock-tech-item">RSI(14): <b class="${rsiCls}">${p.rsi} (${rsiLabel})</b></span>`);
     }
-    if(techItems.length) techHtml=`<div class="stock-tech-row">${techItems.join('')}</div>`;
+    let techHtml=techItems.length?`<div class="stock-tech-row">${techItems.join('')}</div>`:'';
 
-    // 52-week position bar
+    // ── 52-week position ──
     let pos52Html='';
     if(d.pos52!=null&&d.low52!=null&&d.high52!=null){
-      pos52Html=`<div class="stock-52w"><span class="stock-52w-label">52W Position</span><div class="stock-52w-bar-wrap"><span class="stock-52w-lo">$${d.low52.toFixed(2)}</span><div class="stock-52w-track"><div class="stock-52w-fill" style="width:${Math.max(Math.min(d.pos52,100),0)}%"></div><div class="stock-52w-dot" style="left:${Math.max(Math.min(d.pos52,100),0)}%"></div></div><span class="stock-52w-hi">$${d.high52.toFixed(2)}</span></div></div>`;
+      pos52Html=`<div class="stock-52w"><span class="stock-52w-label">52W Range</span><div class="stock-52w-bar-wrap"><span class="stock-52w-lo">$${d.low52.toFixed(2)}</span><div class="stock-52w-track"><div class="stock-52w-fill" style="width:${Math.max(Math.min(d.pos52,100),0)}%"></div><div class="stock-52w-dot" style="left:${Math.max(Math.min(d.pos52,100),0)}%"></div></div><span class="stock-52w-hi">$${d.high52.toFixed(2)}</span></div></div>`;
     }
 
-    // Performance bars
-    let perfHtml='';
+    // ── Performance bars ──
     const perfItems=[_stockPerfBar('1W',p['1w']),_stockPerfBar('1M',p['1m']),_stockPerfBar('3M',p['3m']),_stockPerfBar('6M',p['6m']),_stockPerfBar('YTD',p['ytd']),_stockPerfBar('1Y',p['1y'])].filter(x=>x);
-    if(perfItems.length) perfHtml=`<div class="stock-perf-section"><span class="stock-section-title">Performance</span><div class="stock-perf-grid">${perfItems.join('')}</div></div>`;
+    let perfHtml=perfItems.length?`<div class="stock-perf-section"><span class="stock-section-title">Performance</span><div class="stock-perf-grid">${perfItems.join('')}</div></div>`:'';
 
-    // Financial health details
-    let healthDetailHtml='';
+    // ── Financial health ──
     const h=d.health||{};
     const hItems=[];
     if(h.profitMargin!=null) hItems.push({l:'Profit Margin',v:fmtPct(h.profitMargin),good:h.profitMargin>0.1});
@@ -2564,9 +2553,9 @@ async function _fetchStockData(ticker,cardId){
     if(h.currentRatio!=null) hItems.push({l:'Current Ratio',v:h.currentRatio.toFixed(2),good:h.currentRatio>1.5});
     if(h.freeCashflow!=null) hItems.push({l:'Free Cash Flow',v:fmtNum(h.freeCashflow),good:h.freeCashflow>0});
     if(h.priceToBook!=null) hItems.push({l:'P/B Ratio',v:h.priceToBook.toFixed(2),good:h.priceToBook<3});
-    if(hItems.length) healthDetailHtml=`<div class="stock-health-detail"><span class="stock-section-title">Financial Health</span><div class="stock-health-grid">${hItems.map(i=>`<div class="stock-health-item"><span>${i.l}</span><span class="${i.good?'stock-up':'stock-down'}">${i.v}</span></div>`).join('')}</div></div>`;
+    let healthDetailHtml=hItems.length?`<div class="stock-health-detail"><span class="stock-section-title">Financial Health</span><div class="stock-health-grid">${hItems.map(i=>`<div class="stock-health-item"><span>${i.l}</span><span class="${i.good?'stock-up':'stock-down'}">${i.v}</span></div>`).join('')}</div></div>`:'';
 
-    // Analyst targets
+    // ── Analyst targets ──
     let targetHtml='';
     if(d.targetPrice){
       const tParts=[`Target: <b>$${d.targetPrice.toFixed(2)}</b>`];
@@ -2578,27 +2567,41 @@ async function _fetchStockData(ticker,cardId){
       targetHtml=`<div class="stock-analyst-target">${tParts.join(' · ')}</div>`;
     }
 
-    // Earnings date
+    // ── Earnings ──
     let earningsHtml='';
     if(d.earningsDate) earningsHtml=`<span class="stock-earnings">Earnings: ${esc(d.earningsDate)}</span>`;
 
+    // ── Collapsible details content ──
+    const detailsContent=pos52Html+techHtml
+      +`<div class="stock-card-metrics">${metrics.map(m=>`<div class="stock-metric"><span class="stock-metric-label">${m.label}</span><span class="stock-metric-value">${m.value}</span></div>`).join('')}</div>`
+      +perfHtml+healthDetailHtml+targetHtml;
+
+    const detailId=cardId+'_det';
+
     el.querySelector('.stock-card').innerHTML=
-      `<div class="stock-card-header">`
+      // ── Verdict banner ──
+      `<div class="stock-verdict-banner ${verdictCls}">`
+        +`<span class="stock-verdict-label">${verdictLabel}</span>`
+        +scoreTag
+      +`</div>`
+      // ── Header: ticker, price, badges ──
+      +`<div class="stock-card-header">`
         +`<div class="stock-card-title-row">`
           +`<div class="stock-card-title"><span class="stock-ticker">${esc(d.ticker)}</span><span class="stock-name">${esc(d.name)}</span></div>`
-          +`<div class="stock-badges">${recBadge}${riskBadge}</div>`
+          +`<div class="stock-badges">${riskBadge}</div>`
         +`</div>`
         +`<div class="stock-card-price-row">`
           +`<div class="stock-card-price"><span class="stock-price">$${d.price.toFixed(2)}</span><span class="stock-change ${cls}">${arrow} $${Math.abs(d.change).toFixed(2)} (${Math.abs(d.changePct).toFixed(2)}%)</span></div>`
-          +healthHtml
         +`</div>`
       +`</div>`
-      +pos52Html
-      +techHtml
-      +`<div class="stock-card-metrics">${metrics.map(m=>`<div class="stock-metric"><span class="stock-metric-label">${m.label}</span><span class="stock-metric-value">${m.value}</span></div>`).join('')}</div>`
-      +perfHtml
-      +healthDetailHtml
-      +targetHtml
+      // ── Collapsible details toggle ──
+      +`<button class="stock-details-toggle" onclick="var det=document.getElementById('${detailId}');var open=det.classList.toggle('open');this.querySelector('.stock-toggle-arrow').textContent=open?'▾':'▸';this.querySelector('.stock-toggle-text').textContent=open?'Hide Details':'View Details'">`
+        +`<span class="stock-toggle-arrow">▸</span> <span class="stock-toggle-text">View Details</span>`
+      +`</button>`
+      +`<div class="stock-details-body" id="${detailId}">`
+        +detailsContent
+      +`</div>`
+      // ── Footer ──
       +`<div class="stock-card-footer">`
         +`<a href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener" class="stock-yahoo-link">Yahoo Finance ↗</a>`
         +`<a href="https://www.google.com/finance/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener" class="stock-yahoo-link">Google Finance ↗</a>`
@@ -3144,7 +3147,7 @@ async function sendMessage(opts){
     }
 
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking:_noThinking?false:thinkingEnabled,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation()}),signal:controller.signal});
+      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation()}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){

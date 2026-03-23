@@ -2151,6 +2151,14 @@ button:focus:not(:focus-visible){outline:none}
 .stock-shimmer{width:20px;height:20px;border-radius:50%;background:linear-gradient(90deg,var(--bg-deep) 25%,var(--border) 50%,var(--bg-deep) 75%);background-size:200% 100%;animation:shimmer 1.2s ease-in-out infinite}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .stock-card-error{padding:16px;color:var(--text-secondary);font-size:13px}
+/* Verdict banner */
+.stock-verdict-banner{display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 18px;font-weight:800;font-size:20px;letter-spacing:1.5px;text-transform:uppercase}
+.stock-verdict-buy{background:linear-gradient(135deg,#16a34a,#22c55e);color:#fff}
+.stock-verdict-hold{background:linear-gradient(135deg,#4b5563,#6b7280);color:#fff}
+.stock-verdict-sell{background:linear-gradient(135deg,#dc2626,#ef4444);color:#fff}
+.stock-verdict-label{font-size:22px}
+.stock-verdict-score{font-size:13px;font-weight:600;opacity:.85;background:rgba(255,255,255,.2);padding:2px 10px;border-radius:12px}
+/* Header */
 .stock-card-header{padding:16px 18px 12px;border-bottom:1px solid var(--border)}
 .stock-card-title-row{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .stock-card-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -2169,12 +2177,13 @@ button:focus:not(:focus-visible){outline:none}
 .stock-risk-low{background:rgba(34,197,94,.1);color:#22c55e}
 .stock-risk-mod{background:rgba(234,179,8,.1);color:#eab308}
 .stock-risk-high{background:rgba(239,68,68,.1);color:#ef4444}
-/* Health gauge */
-.stock-health{display:flex;flex-direction:column;align-items:center;gap:2px}
-.stock-health-gauge{position:relative;width:48px;height:48px}
-.stock-health-svg{width:48px;height:48px;transform:rotate(-90deg)}
-.stock-health-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
-.stock-health-label{font-size:9px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+/* Details toggle */
+.stock-details-toggle{display:flex;align-items:center;gap:6px;width:100%;padding:10px 18px;border:none;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg-deep);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;transition:background .15s}
+.stock-details-toggle:hover{background:var(--bg-hover);color:var(--text-primary)}
+.stock-toggle-arrow{font-size:11px}
+/* Collapsible details body */
+.stock-details-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.stock-details-body.open{max-height:2000px}
 /* 52-week position bar */
 .stock-52w{padding:8px 18px;border-bottom:1px solid var(--border)}
 .stock-52w-label{font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;display:block}
@@ -2218,6 +2227,8 @@ button:focus:not(:focus-visible){outline:none}
 .stock-yahoo-link:hover{text-decoration:underline}
 .stock-sector{font-size:11px;color:var(--text-secondary);margin-left:auto}
 .stock-disclaimer{padding:10px 18px;font-size:10px;color:var(--text-secondary);background:var(--bg-deep);border:1px solid var(--border);border-top:0;border-radius:0 0 var(--r-md) var(--r-md);line-height:1.5}
+/* Thinking level hint in plus menu */
+.pi-hint{display:block;font-size:9px;color:var(--text-muted);margin-top:2px;opacity:.7}
 
 /* ══════════════════════════════════════════════════
    AI IMAGE GENERATION
