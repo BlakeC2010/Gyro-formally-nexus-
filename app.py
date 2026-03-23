@@ -3638,6 +3638,105 @@ def chat_message_stream(chat_id):
     def generate():
         pieces = []
         thinking_pieces = []
+        # ── Mid-stream media detection: detect image/stock/gen tags AS tokens arrive,
+        #    start async fetches immediately, and yield result events interleaved with
+        #    text deltas so the frontend can render media inline while streaming. ──
+        from concurrent.futures import ThreadPoolExecutor
+        emit_buffer = ""
+        _media_executor = ThreadPoolExecutor(max_workers=4)
+        _media_fetches = []   # [(kind, entry, future), ...]
+        _fetched_images = []
+        _fetched_stocks = []
+        _fetched_gens = []
+        _media_idx = {"img": 0, "gen": 0, "stock": 0}
+        _MEDIA_TAG_RE = re.compile(r'<<<(IMAGE_SEARCH|IMG_SEARCH|IMAGE_GENERATE|STOCK):\s*(.*?)>>>')
+
+        def _start_media_fetch(tag_type, tag_value):
+            """Parse a detected media tag and start async fetch. Returns event dict or None."""
+            if tag_type in ("IMAGE_SEARCH", "IMG_SEARCH"):
+                parts = [p.strip() for p in tag_value.split('|', 1)]
+                query = parts[0]
+                count = 8
+                if len(parts) > 1:
+                    for param in parts[1].split(','):
+                        p = param.strip()
+                        if p.lower().startswith('count='):
+                            try: count = max(1, min(int(p.split('=', 1)[1].strip()), 20))
+                            except: pass
+                idx = _media_idx["img"]
+                _media_idx["img"] += 1
+                entry = {"query": query, "index": idx, "count": count}
+                future = _media_executor.submit(search_images, query, num=count)
+                _media_fetches.append(("image_search", entry, future))
+                return {"type": "media_loading", "kind": "image_search", "index": idx, "query": query}
+            elif tag_type == "IMAGE_GENERATE":
+                prompt = tag_value
+                aspect = "1:1"
+                if '|' in tag_value:
+                    parts = [p.strip() for p in tag_value.split('|', 1)]
+                    prompt = parts[0]
+                    for param in parts[1].split(','):
+                        p = param.strip()
+                        if p.lower().startswith(('aspect_ratio=', 'ratio=')):
+                            val = p.split('=', 1)[1].strip()
+                            if val in ("1:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"):
+                                aspect = val
+                idx = _media_idx["gen"]
+                _media_idx["gen"] += 1
+                entry = {"prompt": prompt, "index": idx, "aspect_ratio": aspect}
+                _api_key = resolved.get("api_key", "")
+                future = _media_executor.submit(generate_image_gemini, prompt, aspect, api_key=_api_key)
+                _media_fetches.append(("image_gen", entry, future))
+                return {"type": "media_loading", "kind": "image_gen", "index": idx, "prompt": prompt}
+            elif tag_type == "STOCK":
+                ticker = re.sub(r'[^A-Za-z0-9.\-^=]', '', tag_value).upper()
+                if ticker:
+                    idx = _media_idx["stock"]
+                    _media_idx["stock"] += 1
+                    entry = {"ticker": ticker, "index": idx}
+                    future = _media_executor.submit(_fetch_stock_data_dict, ticker)
+                    _media_fetches.append(("stock", entry, future))
+                    return {"type": "media_loading", "kind": "stock", "index": idx, "ticker": ticker}
+            return None
+
+        def _drain_completed():
+            """Check for completed async fetches. Returns list of event dicts."""
+            events = []
+            still_pending = []
+            for kind, entry, future in _media_fetches:
+                if future.done():
+                    try:
+                        result = future.result()
+                        if kind == "image_search":
+                            if result:
+                                ir = {"query": entry['query'], "images": result, "index": entry['index'], "count": entry['count']}
+                                _fetched_images.append(ir)
+                                events.append({"type": "image_result", "image": ir})
+                            else:
+                                events.append({"type": "image_failed", "query": entry['query'], "index": entry['index']})
+                        elif kind == "stock":
+                            if result and not result.get("error"):
+                                sr = {"ticker": entry['ticker'], "index": entry['index'], "data": result}
+                                _fetched_stocks.append(sr)
+                                events.append({"type": "stock_data", "stock": sr})
+                            else:
+                                events.append({"type": "stock_failed", "ticker": entry['ticker'], "index": entry['index'], "error": (result or {}).get("error", "Unknown error")})
+                        elif kind == "image_gen":
+                            img_b64, gen_result = result
+                            if img_b64:
+                                data_uri = f"data:{gen_result};base64,{img_b64}"
+                                gr = {"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": gen_result}
+                                _fetched_gens.append(gr)
+                                events.append({"type": "image_generated", "image": gr})
+                            else:
+                                events.append({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": gen_result})
+                    except Exception:
+                        pass
+                else:
+                    still_pending.append((kind, entry, future))
+            _media_fetches[:] = still_pending
+            return events
+
         try:
             stream_fn = STREAM_PROVIDERS.get(resolved["provider"])
             if stream_fn:
@@ -3651,14 +3750,39 @@ def chat_message_stream(chat_id):
                     thinking_level=thinking_level,
                     web_search=web_search,
                 ):
-                    # Check if chunk is a thinking dict from google/anthropic
                     if isinstance(chunk, dict) and chunk.get("__thinking__"):
                         thinking_pieces.append(chunk["text"])
                         if chunk["text"]:
                             yield event({"type": "thinking_delta", "text": chunk["text"]})
                         continue
                     pieces.append(chunk)
-                    yield event({"type": "delta", "text": chunk})
+                    emit_buffer += chunk
+                    # Extract complete media tags from the buffer
+                    while True:
+                        m = _MEDIA_TAG_RE.search(emit_buffer)
+                        if not m:
+                            break
+                        before = emit_buffer[:m.start()]
+                        if before:
+                            yield event({"type": "delta", "text": before})
+                        tag_evt = _start_media_fetch(m.group(1), m.group(2).strip())
+                        if tag_evt:
+                            yield event(tag_evt)
+                        emit_buffer = emit_buffer[m.end():]
+                    # Emit text that is safe (not part of an incomplete <<<...>>> tag)
+                    open_pos = emit_buffer.rfind('<<<')
+                    if open_pos >= 0 and '>>>' not in emit_buffer[open_pos:]:
+                        safe = emit_buffer[:open_pos]
+                        if safe:
+                            yield event({"type": "delta", "text": safe})
+                        emit_buffer = emit_buffer[open_pos:]
+                    else:
+                        if emit_buffer:
+                            yield event({"type": "delta", "text": emit_buffer})
+                        emit_buffer = ""
+                    # Drain any completed async media fetches
+                    for evt in _drain_completed():
+                        yield event(evt)
             else:
                 full = PROVIDERS.get(resolved["provider"], call_openai)(
                     resolved["api_key"],
@@ -3671,28 +3795,70 @@ def chat_message_stream(chat_id):
                     web_search=web_search,
                 )
                 pieces.append(full)
-                yield event({"type": "delta", "text": full})
+                emit_buffer = full
+                while True:
+                    m = _MEDIA_TAG_RE.search(emit_buffer)
+                    if not m:
+                        break
+                    before = emit_buffer[:m.start()]
+                    if before:
+                        yield event({"type": "delta", "text": before})
+                    tag_evt = _start_media_fetch(m.group(1), m.group(2).strip())
+                    if tag_evt:
+                        yield event(tag_evt)
+                    emit_buffer = emit_buffer[m.end():]
+                if emit_buffer:
+                    yield event({"type": "delta", "text": emit_buffer})
+                emit_buffer = ""
 
+            # Flush any remaining buffer
+            if emit_buffer:
+                yield event({"type": "delta", "text": emit_buffer})
+
+            # Wait for all remaining pending media fetches
+            for kind, entry, future in _media_fetches:
+                try:
+                    result = future.result(timeout=30)
+                    if kind == "image_search":
+                        if result:
+                            ir = {"query": entry['query'], "images": result, "index": entry['index'], "count": entry['count']}
+                            _fetched_images.append(ir)
+                            yield event({"type": "image_result", "image": ir})
+                        else:
+                            yield event({"type": "image_failed", "query": entry['query'], "index": entry['index']})
+                    elif kind == "stock":
+                        if result and not result.get("error"):
+                            sr = {"ticker": entry['ticker'], "index": entry['index'], "data": result}
+                            _fetched_stocks.append(sr)
+                            yield event({"type": "stock_data", "stock": sr})
+                        else:
+                            yield event({"type": "stock_failed", "ticker": entry['ticker'], "index": entry['index'], "error": (result or {}).get("error", "Unknown error")})
+                    elif kind == "image_gen":
+                        img_b64, gen_result = result
+                        if img_b64:
+                            data_uri = f"data:{gen_result};base64,{img_b64}"
+                            gr = {"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": gen_result}
+                            _fetched_gens.append(gr)
+                            yield event({"type": "image_generated", "image": gr})
+                        else:
+                            yield event({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": gen_result})
+                except Exception:
+                    pass
+            _media_fetches.clear()
+            _media_executor.shutdown(wait=False)
+
+            # ── Post-stream processing ──
             raw_text = "".join(pieces)
-            # Prepend thinking content if we got structured thinking from the API
             if thinking_pieces:
                 think_text = "".join(thinking_pieces).strip()
                 if think_text:
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
-            # Preserve original raw text for dev mode before tag extraction
             original_raw_text = raw_text
-            # Check if AI triggered deep research
             raw_text, research_query = extract_research_trigger(raw_text)
-            # Extract image search queries — placeholders will be replaced on the client
             raw_text, image_searches = extract_image_searches(raw_text)
-            # Extract image generation requests
             raw_text, image_generations = extract_image_generation(raw_text)
-            # Extract stock ticker tags — placeholders will be replaced on the client
             raw_text, stock_tickers = extract_stock_tickers(raw_text)
-            # Detect <<<CONTINUE>>> BEFORE clean_response strips it
             should_continue = '<<<CONTINUE>>>' in raw_text
-            # BLOCK continue if there are pending generative operations (images, image gen)
-            # The frontend will decide whether to continue AFTER all ops complete
             has_pending_ops = bool(image_searches or image_generations or stock_tickers)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
             done_payload = {
@@ -3705,11 +3871,9 @@ def chat_message_stream(chat_id):
             if should_continue and not has_pending_ops:
                 done_payload["should_continue"] = True
             elif should_continue and has_pending_ops:
-                # Tell client: continue was requested but ops are pending — wait for them
                 done_payload["continue_after_ops"] = True
             if code_results:
                 done_payload["code_results"] = code_results
-                # Build execution summary for auto-reprompt
                 summary_parts = []
                 all_success = True
                 for i, cr in enumerate(code_results):
@@ -3725,111 +3889,43 @@ def chat_message_stream(chat_id):
                 done_payload["code_execution_summary"] = "\n".join(summary_parts)
             if research_query:
                 done_payload["research_trigger"] = research_query
-            # Tell the client which image searches are pending so it can show loaders
             if image_searches:
                 done_payload["pending_images"] = [{"query": s["query"], "index": s["index"], "count": s["count"]} for s in image_searches]
-            # Tell the client which image generations are pending
             if image_generations:
                 done_payload["pending_generations"] = [{"prompt": g["prompt"], "index": g["index"], "aspect_ratio": g["aspect_ratio"]} for g in image_generations]
             if stock_tickers:
                 done_payload["pending_stocks"] = [{"ticker": s["ticker"], "index": s["index"]} for s in stock_tickers]
+            # Tell frontend which results were already delivered mid-stream
+            if _fetched_images:
+                done_payload["preloaded_image_indices"] = [r["index"] for r in _fetched_images]
+            if _fetched_stocks:
+                done_payload["preloaded_stock_indices"] = [r["index"] for r in _fetched_stocks]
+            if _fetched_gens:
+                done_payload["preloaded_gen_indices"] = [r["index"] for r in _fetched_gens]
             yield event(done_payload)
 
-            # Now fetch images AFTER the done event so the text renders immediately
-            if image_searches:
-                image_results = []
-                failed_image_queries = []
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                def _img_search(entry):
-                    imgs = search_images(entry['query'], num=entry['count'])
-                    return entry, imgs
-                with ThreadPoolExecutor(max_workers=min(len(image_searches), 4)) as pool:
-                    futs = {pool.submit(_img_search, entry): entry for entry in image_searches}
-                    for fut in as_completed(futs):
-                        entry, imgs = fut.result()
-                        if imgs:
-                            result = {"query": entry['query'], "images": imgs, "index": entry['index'], "count": entry['count']}
-                            image_results.append(result)
-                            # Stream each image result as it completes
-                            yield event({"type": "image_result", "image": result})
-                        else:
-                            failed_image_queries.append(entry['query'])
-                            yield event({"type": "image_failed", "query": entry['query'], "index": entry['index']})
-                # Persist image results in the saved message so they survive reload
-                if image_results:
-                    chat["messages"][-1]["image_results"] = image_results
-                    save_chat(chat)
+            # Persist mid-stream results in chat history
+            if _fetched_images:
+                chat["messages"][-1]["image_results"] = _fetched_images
+            if _fetched_stocks:
+                chat["messages"][-1]["stock_results"] = _fetched_stocks
+            if _fetched_gens:
+                chat["messages"][-1]["generated_images"] = _fetched_gens
+            if _fetched_images or _fetched_stocks or _fetched_gens:
+                save_chat(chat)
 
-            # Fetch stock data AFTER done event so text renders immediately with loaders
-            if stock_tickers:
-                stock_results = []
-                from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed_stock
-                def _stock_fetch(entry):
-                    data = _fetch_stock_data_dict(entry['ticker'])
-                    return entry, data
-                with ThreadPoolExecutor(max_workers=min(len(stock_tickers), 4)) as pool:
-                    futs = {pool.submit(_stock_fetch, entry): entry for entry in stock_tickers}
-                    for fut in _as_completed_stock(futs):
-                        entry, data = fut.result()
-                        if data and not data.get("error"):
-                            result = {"ticker": entry['ticker'], "index": entry['index'], "data": data}
-                            stock_results.append(result)
-                            yield event({"type": "stock_data", "stock": result})
-                        else:
-                            yield event({"type": "stock_failed", "ticker": entry['ticker'], "index": entry['index'], "error": data.get("error", "Unknown error")})
-                if stock_results:
-                    chat["messages"][-1]["stock_results"] = stock_results
-                    save_chat(chat)
+            # gen_ops_complete signal
+            if image_searches or image_generations or stock_tickers:
+                total_ops = len(image_searches) + len(image_generations) + len(stock_tickers)
+                total_success = len(_fetched_images) + len(_fetched_gens) + len(_fetched_stocks)
+                _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
+                if stock_tickers and _fetched_stocks:
+                    _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(_fetched_stocks)
+                yield event(_gen_complete)
 
-            # Generate images AFTER the done event so text renders immediately
-            if image_generations:
-                gen_results = []
-                api_key = resolved.get("api_key", "")
-                from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-                def _gen_one(entry):
-                    img_b64, result = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
-                    return entry, img_b64, result
-                with ThreadPoolExecutor(max_workers=min(len(image_generations), 2)) as pool:
-                    futs = {pool.submit(_gen_one, entry): entry for entry in image_generations}
-                    for fut in _as_completed(futs):
-                        entry, img_b64, result = fut.result()
-                        if img_b64:
-                            data_uri = f"data:{result};base64,{img_b64}"
-                            gen_result = {
-                                "prompt": entry['prompt'],
-                                "index": entry['index'],
-                                "url": data_uri,
-                                "mime": result,
-                            }
-                            gen_results.append(gen_result)
-                            yield event({"type": "image_generated", "image": gen_result})
-                        else:
-                            yield event({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": result})
-                if gen_results:
-                    chat["messages"][-1]["generated_images"] = gen_results
-                    save_chat(chat)
-                # Signal that all generation operations are complete
-                _stock_s = len(stock_results) if stock_tickers else 0
-                _stock_t = len(stock_tickers) if stock_tickers else 0
-                total_ops = len(image_generations) + (len(image_searches) if image_searches else 0) + _stock_t
-                total_success = len(gen_results) + (len(image_results) if image_searches else 0) + _stock_s
-                _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
-                if stock_tickers and stock_results:
-                    _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(stock_results)
-                yield event(_gen_complete)
-            # If only image searches and/or stocks (no image generations), send signal after
-            elif image_searches or stock_tickers:
-                _img_ok = len(image_results) if image_searches else 0
-                _img_total = len(image_searches) if image_searches else 0
-                _stock_ok = len(stock_results) if stock_tickers else 0
-                _stock_total = len(stock_tickers) if stock_tickers else 0
-                total_ops = _img_total + _stock_total
-                total_success = _img_ok + _stock_ok
-                _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
-                if stock_tickers and stock_results:
-                    _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(stock_results)
-                yield event(_gen_complete)
         except Exception as e:
+            try: _media_executor.shutdown(wait=False)
+            except: pass
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
                 yield event({"type": "error", "error": f"Rate limit hit \u2014 wait a moment and try again. ({err[:200]})"})

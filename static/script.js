@@ -2877,6 +2877,27 @@ function fmtLive(raw){
   // Escape HTML entities
   html=html.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
+  // ── Inline media markers: [[[MEDIA:kind:index:info]]] ──
+  // These are injected by the media_loading handler during streaming.
+  // Render as actual content (if loaded) or loading card (if still pending).
+  const _liveBlocks=[];
+  html=html.replace(/\[\[\[MEDIA:(\w+):(\d+):(.*?)\]\]\]/g,(_,kind,idx,info)=>{
+    const key=`${kind}-${idx}`;
+    const result=window._streamMediaResults&&window._streamMediaResults[key];
+    let content;
+    if(result){
+      if(kind==='image_search') content=renderImageBlock(result);
+      else if(kind==='stock') content=renderStockCard(result.ticker,result.data);
+      else if(kind==='image_gen') content=`<div class="img-gen-card" style="border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--bg-surface)"><img src="${result.url}" style="width:100%;display:block;border-radius:14px"><div style="padding:10px 14px;font-size:12px;color:var(--text-secondary)">🎨 ${esc(result.prompt||'Generated')}</div></div>`;
+      else content='';
+    }else{
+      const labels={image_search:'🔍 Finding images...',stock:'📈 Loading stock data...',image_gen:'🎨 Generating image...'};
+      content=`<div class="stream-placeholder"><span class="sp-icon">${(labels[kind]||'⏳').split(' ')[0]}</span> ${labels[kind]||'Loading...'}</div>`;
+    }
+    _liveBlocks.push(content);
+    return `%%%LIVEBLOCK${_liveBlocks.length-1}%%%`;
+  });
+
   // Detect special blocks mid-stream and show placeholders
   // Unclosed DEEP_RESEARCH tag mid-stream (after HTML escaping, <<< becomes &lt;&lt;&lt;)
   if(/&lt;&lt;&lt;DEEP_RESEARCH/i.test(html)){
@@ -2950,6 +2971,8 @@ function fmtLive(raw){
   html=html.replace(/^(\d+)\.\s+(.+)$/gm,'<div style="display:flex;gap:8px;padding:1px 0"><span style="color:var(--accent);flex-shrink:0;min-width:16px;text-align:right">$1.</span><span>$2</span></div>');
   // Newlines
   html=html.replace(/\n/g,'<br>');
+  // Restore live media blocks (protected from markdown processing)
+  _liveBlocks.forEach((b,i)=>{html=html.replace(`%%%LIVEBLOCK${i}%%%`,b);});
   // Add cursor at end
   html+='<span class="stream-cursor"></span>';
   return html;
@@ -3197,6 +3220,10 @@ async function sendMessage(opts){
     let buffer='',fullText='',thinkText='',isThinking=false;
     let _pendingContinueAfterOps=false;
     let _genFailures=[];
+    // ── Mid-stream media loading state ──
+    let _mediaLoadingCount=0;     // How many media items are currently loading
+    let _doneReceived=false;      // Whether the 'done' event has been processed
+    window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
 
     // Create a live thinking panel (collapsed by default — click to expand)
     let thinkPanel=null;
@@ -3271,7 +3298,10 @@ async function sendMessage(opts){
             }
             stopThinkingPhrases();
             fullText+=data.text;
-            if(canRender()&&!_renderScheduled){
+            // When media is loading, buffer deltas but skip visible rendering
+            if(_mediaLoadingCount>0){
+              // Text is still accumulated in fullText but not rendered
+            }else if(canRender()&&!_renderScheduled){
               _renderScheduled=true;
               requestAnimationFrame(()=>{
                 _renderScheduled=false;
@@ -3287,7 +3317,25 @@ async function sendMessage(opts){
                 area.scrollTop=area.scrollHeight;
               });
             }
+          // ── Mid-stream media loading event ──
+          }else if(data.type==='media_loading'){
+            _mediaLoadingCount++;
+            // Insert an inline marker into fullText so fmtLive renders a loading card
+            const info=data.query||data.ticker||data.prompt||'';
+            fullText+=`\n[[[MEDIA:${data.kind}:${data.index}:${info}]]]\n`;
+            // Render immediately to show the loading card
+            if(canRender()&&!_renderScheduled){
+              _renderScheduled=true;
+              requestAnimationFrame(()=>{
+                _renderScheduled=false;
+                if(!canRender())return;
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                area.scrollTop=area.scrollHeight;
+              });
+            }
           }else if(data.type==='done'){
+            _doneReceived=true;
             // Collapse live thinking panel if present
             if(thinkPanel){
               thinkPanel.classList.add('ltp-done');
@@ -3533,6 +3581,38 @@ async function sendMessage(opts){
               });
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
               try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
+              // Apply preloaded media results that arrived during streaming (before done)
+              if(window._streamMediaResults){
+                for(const [key,result] of Object.entries(window._streamMediaResults)){
+                  const parts=key.split('-');
+                  const kind=parts[0];
+                  const idx=parts.slice(1).join('-');
+                  let loader=null;
+                  if(kind==='image_search'){
+                    loader=contentEl.querySelector(`#img-loader-${idx}`);
+                    if(loader){
+                      const temp=document.createElement('div');
+                      temp.innerHTML=renderImageBlock(result);
+                      loader.replaceWith(temp.firstElementChild||temp);
+                    }
+                  }else if(kind==='stock'){
+                    loader=contentEl.querySelector(`#stock-loader-${idx}`);
+                    if(loader){
+                      const temp=document.createElement('div');
+                      temp.innerHTML=renderStockCard(result.ticker,result.data);
+                      loader.replaceWith(temp.firstElementChild||temp);
+                    }
+                  }else if(kind==='image_gen'){
+                    loader=contentEl.querySelector(`#imggen-loader-${idx}`);
+                    if(loader){
+                      const img=result;
+                      const temp=document.createElement('div');
+                      temp.innerHTML=`<div class="img-gen-card" style="position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--bg-surface)"><img src="${img.url}" alt="${esc(img.prompt||'Generated image')}" style="width:100%;border-radius:14px;display:block;cursor:pointer" onclick="openLightbox(this.src)"><div style="padding:10px 14px;font-size:12px;color:var(--text-secondary)">🎨 ${esc(img.prompt||'Generated image')}</div></div>`;
+                      loader.replaceWith(temp.firstElementChild||temp);
+                    }
+                  }
+                }
+              }
             }
             refreshChats();
             // ── Auto-reprompt after code execution ──
@@ -3589,8 +3669,23 @@ async function sendMessage(opts){
           }else if(data.type==='error'){
             if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">${esc(data.error)}</div>`;
           }else if(data.type==='image_result'){
-            // Async image result — replace the loading placeholder
-            if(!devRawMode&&canRender()){
+            // Async image result — arrived during stream or after done
+            if(!_doneReceived){
+              // Pre-done: store for later application, resume rendering
+              window._streamMediaResults[`image_search-${data.image.index}`]=data.image;
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
+              // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#img-loader-${data.image.index}`);
               if(loader){
                 const html=renderImageBlock(data.image);
@@ -3601,9 +3696,20 @@ async function sendMessage(opts){
               area.scrollTop=area.scrollHeight;
             }
           }else if(data.type==='image_failed'){
-            // Async image search failed — replace loader with error
             _genFailures.push({type:'image_search',query:data.query||''});
-            if(!devRawMode&&canRender()){
+            if(!_doneReceived){
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
               const loader=contentEl.querySelector(`#img-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(data.query)}" couldn't load — try again or search manually.</div>`;
@@ -3612,8 +3718,22 @@ async function sendMessage(opts){
               }
             }
           }else if(data.type==='image_generated'){
-            // AI-generated image arrived — replace loader with the actual image
-            if(!devRawMode&&canRender()){
+            if(!_doneReceived){
+              // Pre-done: store for later, resume rendering
+              window._streamMediaResults[`image_gen-${data.image.index}`]=data.image;
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
+              // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
               const safePrompt=esc(data.image.prompt);
               const html=`<div class="img-gen-result">`
@@ -3640,9 +3760,20 @@ async function sendMessage(opts){
               area.scrollTop=area.scrollHeight;
             }
           }else if(data.type==='image_gen_failed'){
-            // Image generation failed
             _genFailures.push({type:'image_gen',prompt:data.prompt||'',error:data.error||''});
-            if(!devRawMode&&canRender()){
+            if(!_doneReceived){
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
               const loader=contentEl.querySelector(`#imggen-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🎨</span> Image generation failed: ${esc(data.error||'Unknown error')}</div>`;
@@ -3651,8 +3782,22 @@ async function sendMessage(opts){
               }
             }
           }else if(data.type==='stock_data'){
-            // Server-side stock data arrived — replace the loading placeholder
-            if(!devRawMode&&canRender()){
+            if(!_doneReceived){
+              // Pre-done: store for later, resume rendering
+              window._streamMediaResults[`stock-${data.stock.index}`]=data.stock;
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
+              // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#stock-loader-${data.stock.index}`);
               if(loader){
                 const html=renderStockCard(data.stock.ticker, data.stock.data);
@@ -3663,8 +3808,19 @@ async function sendMessage(opts){
               area.scrollTop=area.scrollHeight;
             }
           }else if(data.type==='stock_failed'){
-            // Stock data fetch failed
-            if(!devRawMode&&canRender()){
+            if(!_doneReceived){
+              _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
+              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
+                _renderScheduled=true;
+                requestAnimationFrame(()=>{
+                  _renderScheduled=false;
+                  if(!canRender())return;
+                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                  targetEl.innerHTML=fmtLive(fullText);
+                  area.scrollTop=area.scrollHeight;
+                });
+              }
+            }else if(!devRawMode&&canRender()){
               const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">⚠️ Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
