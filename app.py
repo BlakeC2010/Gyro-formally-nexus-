@@ -1096,23 +1096,66 @@ Examples:
 <<<STOCK: TSLA>>>
 <<<STOCK: MSFT>>>
 
-The card will automatically display real-time price, change, key metrics (P/E, EPS, market cap, 52-week range, volume, dividend yield, beta), analyst target price, and a link to Yahoo Finance. Use this whenever the user asks about a stock, company valuation, or investment research.
+The card automatically displays: real-time price, change, 52-week position bar, health score gauge (0–100), RSI(14), SMA(50/200), performance bars (1W/1M/3M/6M/YTD/1Y), full financial health breakdown (profit margin, ROE, debt/equity, current ratio, revenue growth, earnings growth, free cash flow, P/B), analyst target with upside %, earnings date, risk badge, and links to Yahoo Finance & Google Finance.
 
-INVESTMENT ANALYSIS FRAMEWORK:
-When the user asks for a buy/hold/sell recommendation or investment analysis:
+Use <<<STOCK: TICKER>>> whenever the user asks about a stock, company valuation, or investment research. You can embed MULTIPLE stock cards to compare companies.
+
+INVESTMENT ANALYSIS FRAMEWORK — 10-POINT SCORING SYSTEM:
+When the user asks for a buy/hold/sell recommendation or investment analysis, follow this rigorous process:
+
 1. ALWAYS embed the stock card first: <<<STOCK: TICKER>>>
-2. Use web search (Google Grounding) to find RECENT news, earnings reports, and analyst updates
-3. Provide analysis covering:
-   - Fundamental Analysis: P/E ratio, EPS growth, revenue trends, debt levels, profit margins
-   - Technical Signals: 52-week range positioning, volume trends, price momentum
-   - Market Sentiment: Recent news, analyst ratings, institutional activity
-   - Risk Factors: Industry headwinds, competition, regulatory concerns, macro trends
-4. Give a clear BUY, HOLD, or SELL assessment with reasoning
-5. MANDATORY DISCLAIMER — you MUST include this disclaimer with EVERY investment opinion or recommendation:
+2. Use web search (Google Grounding) to find RECENT news (within last 30 days), latest earnings reports, SEC filings, insider trading, and analyst updates
+3. Score the stock on these 10 factors (1-10 each, 100 total):
 
-> ⚠️ **Disclaimer:** This analysis is for informational and educational purposes only and does NOT constitute financial advice, investment advice, or a recommendation to buy or sell any security. I am an AI assistant, not a licensed financial advisor, broker, or fiduciary. Stock markets are volatile and past performance does not guarantee future results. You could lose some or all of your investment. Always conduct your own due diligence and consult with a qualified, licensed financial professional before making any investment decisions. Never invest money you cannot afford to lose.
+   📊 FUNDAMENTAL ANALYSIS (40 points max)
+   a) Valuation (0-10): P/E vs industry avg, P/B, PEG ratio. <15 P/E = strong, >30 = expensive
+   b) Profitability (0-10): Profit margin >20% = great, operating margin, ROE >15% = strong
+   c) Growth (0-10): Revenue growth >10% = good, earnings growth trajectory, forward guidance
+   d) Balance Sheet (0-10): Debt/equity <50 = healthy, current ratio >1.5, free cash flow positive
 
-This disclaimer is NON-NEGOTIABLE. Include it every single time you discuss specific stocks, give price targets, or make buy/hold/sell assessments. No exceptions.
+   📈 TECHNICAL ANALYSIS (30 points max)
+   e) Trend (0-10): Price vs SMA50/SMA200. Above both = bullish. Below both = bearish. Golden/death cross
+   f) Momentum (0-10): RSI 30-70 = neutral. <30 = oversold (opportunity). >70 = overbought (risk). Volume trends
+   g) 52-Week Position (0-10): Near low = potential value. Near high = potential overextension. Context matters
+
+   🌍 SENTIMENT & EXTERNAL (30 points max)
+   h) Analyst Consensus (0-10): Strong buy consensus from many analysts = high score. Mixed/sell = low
+   i) News & Catalysts (0-10): Recent positive catalysts, product launches, partnerships, earnings beats. Negative: lawsuits, scandals, misses
+   j) Macro & Sector (0-10): Industry tailwinds/headwinds, interest rate impact, regulatory environment, competition
+
+4. Calculate total score and give verdict:
+   - 75-100: STRONG BUY — Exceptional across multiple factors
+   - 60-74: BUY — More strengths than weaknesses, positive outlook
+   - 45-59: HOLD — Mixed signals, wait for clarity
+   - 30-44: SELL — Significant concerns outweigh positives
+   - 0-29: STRONG SELL — Major red flags across multiple factors
+
+5. Present your analysis with:
+   - Individual scores for each of the 10 factors with brief justification
+   - Total score prominently displayed (e.g., "**Overall Score: 72/100 — BUY**")
+   - Key bull case (top 3 reasons to buy)
+   - Key bear case (top 3 risks)
+   - Price target range with timeframe (if enough data)
+   - What to watch for (upcoming catalysts, earnings dates, technical levels)
+
+6. For COMPARISON requests (e.g., "AAPL vs MSFT"), embed BOTH stock cards and do side-by-side scoring on all 10 factors.
+
+7. MANDATORY DISCLAIMERS — you MUST include ALL of the following with EVERY investment opinion or recommendation:
+
+> ⚠️ **IMPORTANT DISCLAIMER:**
+> This analysis is generated by an AI assistant and is for **informational and educational purposes ONLY**. It does **NOT** constitute financial advice, investment advice, trading advice, or a recommendation to buy, sell, or hold any security.
+>
+> **Key risks you must understand:**
+> • I am an AI, not a licensed financial advisor, broker, dealer, or fiduciary
+> • Stock markets are inherently volatile — prices can drop significantly without warning
+> • Past performance does NOT guarantee future results
+> • You could lose some or ALL of your invested capital
+> • AI analysis may contain errors, outdated data, or misinterpretations
+> • This analysis does not account for your personal financial situation, risk tolerance, or investment goals
+>
+> **Always:** Conduct your own thorough due diligence. Consult a qualified, licensed financial professional. Never invest money you cannot afford to lose. Consider your own risk tolerance and financial goals.
+
+These disclaimers are NON-NEGOTIABLE. Include them every single time you discuss specific stocks, give price targets, score stocks, or make buy/hold/sell assessments. No exceptions. Even for casual stock mentions, include at minimum: "*Not financial advice. Do your own research.*"
 
 LOCATION-AWARE RESPONSES:
 When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
@@ -3253,7 +3296,7 @@ def chat_message(chat_id):
 @app.route("/api/stock/<ticker>")
 @require_auth_or_guest
 def stock_data(ticker):
-    """Fetch real-time stock data for a ticker using yfinance."""
+    """Fetch comprehensive stock data for a ticker using yfinance."""
     ticker = re.sub(r'[^A-Za-z0-9.\-^=]', '', ticker).upper()
     if not ticker or len(ticker) > 12:
         return jsonify({"error": "Invalid ticker"}), 400
@@ -3267,6 +3310,129 @@ def stock_data(ticker):
         prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose") or price
         change = price - prev_close if price and prev_close else 0
         change_pct = (change / prev_close * 100) if prev_close else 0
+
+        # Historical performance (1W, 1M, 3M, 6M, 1Y, YTD)
+        perf = {}
+        try:
+            hist = tk.history(period="1y")
+            if not hist.empty and len(hist) > 1:
+                cur = hist["Close"].iloc[-1]
+                def _perf(days):
+                    if len(hist) > days:
+                        old = hist["Close"].iloc[-days-1]
+                        return round((cur - old) / old * 100, 2) if old else None
+                    return None
+                perf["1w"] = _perf(5)
+                perf["1m"] = _perf(21)
+                perf["3m"] = _perf(63)
+                perf["6m"] = _perf(126)
+                perf["1y"] = _perf(252) if len(hist) >= 252 else _perf(len(hist)-1)
+                # YTD
+                import datetime as _dt
+                ytd_start = _dt.date(datetime.datetime.now().year, 1, 1)
+                ytd_data = hist[hist.index.date >= ytd_start]
+                if len(ytd_data) > 1:
+                    perf["ytd"] = round((cur - ytd_data["Close"].iloc[0]) / ytd_data["Close"].iloc[0] * 100, 2)
+                # SMA 50 & 200 (simple moving avg)
+                if len(hist) >= 50:
+                    perf["sma50"] = round(hist["Close"].iloc[-50:].mean(), 2)
+                if len(hist) >= 200:
+                    perf["sma200"] = round(hist["Close"].iloc[-200:].mean(), 2)
+                # RSI(14)
+                if len(hist) >= 15:
+                    delta = hist["Close"].diff()
+                    gain = delta.clip(lower=0).rolling(14).mean()
+                    loss = (-delta.clip(upper=0)).rolling(14).mean()
+                    rs = gain / loss
+                    rsi_series = 100 - (100 / (1 + rs))
+                    rsi_val = rsi_series.iloc[-1]
+                    if not (rsi_val != rsi_val):  # NaN check
+                        perf["rsi"] = round(float(rsi_val), 1)
+        except Exception:
+            pass
+
+        # Financial health indicators
+        health = {}
+        health["profitMargin"] = info.get("profitMargins")
+        health["operatingMargin"] = info.get("operatingMargins")
+        health["revenueGrowth"] = info.get("revenueGrowth")
+        health["earningsGrowth"] = info.get("earningsGrowth")
+        health["debtToEquity"] = info.get("debtToEquity")
+        health["currentRatio"] = info.get("currentRatio")
+        health["returnOnEquity"] = info.get("returnOnEquity")
+        health["returnOnAssets"] = info.get("returnOnAssets")
+        health["freeCashflow"] = info.get("freeCashflow")
+        health["revenuePerShare"] = info.get("revenuePerShare")
+        health["bookValue"] = info.get("bookValue")
+        health["priceToBook"] = info.get("priceToBook")
+
+        # Compute a simple health score (0–100)
+        score_parts = []
+        # Profitability
+        pm = health.get("profitMargin")
+        if pm is not None:
+            score_parts.append(min(max(pm * 200, 0), 100))  # 50%+ margin = 100
+        # Revenue growth
+        rg = health.get("revenueGrowth")
+        if rg is not None:
+            score_parts.append(min(max((rg + 0.1) * 200, 0), 100))  # >40% growth = 100
+        # Debt safety
+        dte = health.get("debtToEquity")
+        if dte is not None:
+            score_parts.append(max(100 - dte * 0.5, 0))  # Low debt = high score
+        # Current ratio (liquidity)
+        cr = health.get("currentRatio")
+        if cr is not None:
+            score_parts.append(min(cr * 40, 100))  # 2.5+ = 100
+        # ROE
+        roe = health.get("returnOnEquity")
+        if roe is not None:
+            score_parts.append(min(max(roe * 300, 0), 100))  # 33%+ = 100
+        # P/E reasonableness (lower is better, but negative is bad)
+        pe_val = info.get("trailingPE")
+        if pe_val and pe_val > 0:
+            score_parts.append(max(100 - pe_val * 2, 0))  # P/E < 15 = 70+
+        # Analyst sentiment
+        rec = info.get("recommendationKey")
+        rec_scores = {"strong_buy": 95, "buy": 80, "hold": 50, "sell": 20, "strong_sell": 5}
+        if rec and rec in rec_scores:
+            score_parts.append(rec_scores[rec])
+        health["score"] = round(sum(score_parts) / len(score_parts)) if score_parts else None
+
+        # Risk level from beta
+        beta_val = info.get("beta")
+        risk = None
+        if beta_val is not None:
+            if beta_val < 0.8:
+                risk = "low"
+            elif beta_val < 1.2:
+                risk = "moderate"
+            elif beta_val < 1.8:
+                risk = "high"
+            else:
+                risk = "very_high"
+
+        # 52-week position (0-100%)
+        h52 = info.get("fiftyTwoWeekHigh")
+        l52 = info.get("fiftyTwoWeekLow")
+        pos52 = None
+        if h52 and l52 and h52 != l52 and price:
+            pos52 = round((price - l52) / (h52 - l52) * 100, 1)
+
+        # Earnings date
+        earnings_date = None
+        try:
+            cal = tk.calendar
+            if cal is not None:
+                if isinstance(cal, dict):
+                    ed_list = cal.get("Earnings Date", [])
+                    if ed_list:
+                        earnings_date = str(ed_list[0])[:10]
+                elif hasattr(cal, 'iloc'):
+                    earnings_date = str(cal.iloc[0, 0])[:10] if cal.shape[0] > 0 else None
+        except Exception:
+            pass
+
         data = {
             "ticker": ticker,
             "name": info.get("shortName") or info.get("longName") or ticker,
@@ -3291,7 +3457,15 @@ def stock_data(ticker):
             "exchange": info.get("exchange"),
             "beta": info.get("beta"),
             "targetPrice": info.get("targetMeanPrice"),
+            "targetLow": info.get("targetLowPrice"),
+            "targetHigh": info.get("targetHighPrice"),
+            "numAnalysts": info.get("numberOfAnalystOpinions"),
             "recommendation": info.get("recommendationKey"),
+            "perf": perf,
+            "health": health,
+            "risk": risk,
+            "pos52": pos52,
+            "earningsDate": earnings_date,
         }
         return jsonify(data)
     except Exception as e:

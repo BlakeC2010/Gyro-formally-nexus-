@@ -2151,27 +2151,72 @@ button:focus:not(:focus-visible){outline:none}
 .stock-shimmer{width:20px;height:20px;border-radius:50%;background:linear-gradient(90deg,var(--bg-deep) 25%,var(--border) 50%,var(--bg-deep) 75%);background-size:200% 100%;animation:shimmer 1.2s ease-in-out infinite}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .stock-card-error{padding:16px;color:var(--text-secondary);font-size:13px}
-.stock-card-header{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 18px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px}
+.stock-card-header{padding:16px 18px 12px;border-bottom:1px solid var(--border)}
+.stock-card-title-row{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .stock-card-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stock-badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.stock-card-price-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
 .stock-ticker{font-size:16px;font-weight:700;color:var(--text-primary);letter-spacing:.5px}
 .stock-name{font-size:12px;color:var(--text-secondary);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.stock-card-price{text-align:right}
+.stock-card-price{display:flex;flex-direction:column;gap:2px}
 .stock-price{font-size:22px;font-weight:700;color:var(--text-primary);display:block;line-height:1.2}
 .stock-change{font-size:12px;font-weight:600}
-.stock-up{color:#22c55e}
-.stock-down{color:#ef4444}
-.stock-rec-badge{font-size:10px;font-weight:600;padding:3px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.3px}
+.stock-up{color:#22c55e}.stock-down{color:#ef4444}.stock-neutral{color:var(--text-secondary)}
+.stock-rec-badge,.stock-risk-badge{font-size:10px;font-weight:600;padding:3px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.3px}
 .stock-rec-buy{background:rgba(34,197,94,.15);color:#22c55e}
 .stock-rec-hold{background:rgba(234,179,8,.15);color:#eab308}
 .stock-rec-sell{background:rgba(239,68,68,.15);color:#ef4444}
+.stock-risk-low{background:rgba(34,197,94,.1);color:#22c55e}
+.stock-risk-mod{background:rgba(234,179,8,.1);color:#eab308}
+.stock-risk-high{background:rgba(239,68,68,.1);color:#ef4444}
+/* Health gauge */
+.stock-health{display:flex;flex-direction:column;align-items:center;gap:2px}
+.stock-health-gauge{position:relative;width:48px;height:48px}
+.stock-health-svg{width:48px;height:48px;transform:rotate(-90deg)}
+.stock-health-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
+.stock-health-label{font-size:9px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+/* 52-week position bar */
+.stock-52w{padding:8px 18px;border-bottom:1px solid var(--border)}
+.stock-52w-label{font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;display:block}
+.stock-52w-bar-wrap{display:flex;align-items:center;gap:8px}
+.stock-52w-lo,.stock-52w-hi{font-size:10px;color:var(--text-secondary);font-family:var(--mono);white-space:nowrap}
+.stock-52w-track{flex:1;height:6px;background:var(--bg-deep);border-radius:3px;position:relative}
+.stock-52w-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,#ef4444,#eab308,#22c55e)}
+.stock-52w-dot{position:absolute;top:50%;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-surface);transform:translate(-50%,-50%);box-shadow:0 0 4px rgba(0,0,0,.3)}
+/* Tech indicators row */
+.stock-tech-row{display:flex;flex-wrap:wrap;gap:12px;padding:8px 18px;border-bottom:1px solid var(--border);font-size:11px}
+.stock-tech-item{color:var(--text-secondary)}
+.stock-tech-item b{font-weight:600}
+/* Metrics grid */
 .stock-card-metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:1px;background:var(--border)}
 .stock-metric{display:flex;justify-content:space-between;padding:8px 14px;background:var(--bg-surface);font-size:12px}
 .stock-metric-label{color:var(--text-secondary)}
 .stock-metric-value{color:var(--text-primary);font-weight:500;font-family:var(--mono);font-size:11px}
-.stock-card-footer{display:flex;justify-content:space-between;align-items:center;padding:10px 18px;border-top:1px solid var(--border);flex-wrap:wrap;gap:6px}
+/* Performance bars */
+.stock-perf-section,.stock-health-detail{padding:10px 18px;border-top:1px solid var(--border)}
+.stock-section-title{font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px}
+.stock-perf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 16px}
+.stock-perf-item{display:flex;align-items:center;gap:6px;font-size:11px}
+.stock-perf-label{width:28px;color:var(--text-secondary);font-weight:500;flex-shrink:0}
+.stock-perf-bar-wrap{flex:1;height:5px;background:var(--bg-deep);border-radius:3px;overflow:hidden}
+.stock-perf-bar{height:100%;border-radius:3px;transition:width .6s ease}
+.stock-perf-up{background:#22c55e;color:#22c55e}
+.stock-perf-down{background:#ef4444;color:#ef4444}
+.stock-perf-val{font-size:10px;font-weight:600;min-width:48px;text-align:right;font-family:var(--mono)}
+/* Financial health grid */
+.stock-health-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:2px 16px}
+.stock-health-item{display:flex;justify-content:space-between;font-size:11px;padding:2px 0}
+.stock-health-item span:first-child{color:var(--text-secondary)}
+.stock-health-item span:last-child{font-weight:600;font-family:var(--mono)}
+/* Analyst target row */
+.stock-analyst-target{padding:8px 18px;font-size:11px;color:var(--text-secondary);border-top:1px solid var(--border)}
+.stock-analyst-target b{color:var(--text-primary)}
+.stock-earnings{font-size:10px;color:var(--text-secondary)}
+/* Footer */
+.stock-card-footer{display:flex;align-items:center;padding:10px 18px;border-top:1px solid var(--border);flex-wrap:wrap;gap:8px}
 .stock-yahoo-link{font-size:11px;color:var(--accent);text-decoration:none;font-weight:500}
 .stock-yahoo-link:hover{text-decoration:underline}
-.stock-sector{font-size:11px;color:var(--text-secondary)}
+.stock-sector{font-size:11px;color:var(--text-secondary);margin-left:auto}
 .stock-disclaimer{padding:10px 18px;font-size:10px;color:var(--text-secondary);background:var(--bg-deep);border:1px solid var(--border);border-top:0;border-radius:0 0 var(--r-md) var(--r-md);line-height:1.5}
 
 /* ══════════════════════════════════════════════════
