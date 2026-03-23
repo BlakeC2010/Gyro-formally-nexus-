@@ -1,5 +1,6 @@
 // ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
+let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
 let _continueCount=0;const _MAX_CONTINUES=5;
 let _nextStreamId=0;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
@@ -1773,7 +1774,7 @@ function handleFiles(input){
       try{
         const r=await fetch('/api/upload',{method:'POST',body:form});
         const d=await r.json();
-        pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||''});
+        pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||'',doc_data:d.doc_data||''});
         renderPF();
       }catch(e){console.error('Upload failed',e)}
     };
@@ -1784,11 +1785,41 @@ function handleFiles(input){
 
 function renderPF(){
   document.getElementById('filePreview').innerHTML=pendingFiles.map((f,i)=>{
-    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:'▪';
+    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:f.doc_data?'📄':'▪';
     return`<div class="file-chip">${t} ${esc(f.name)} <button class="fc-x" onclick="pendingFiles.splice(${i},1);renderPF()">✕</button></div>`;
   }).join('');
   if(pendingFiles.length)setStatus(`${pendingFiles.length} file${pendingFiles.length===1?'':'s'} attached and ready.`);
 }
+
+/* ─── Reply Context (images + text from chat) ─── */
+function addReplyImage(url,title){
+  if(pendingReplies.some(r=>r.type==='image'&&r.url===url))return;
+  pendingReplies.push({type:'image',url:url,title:title||''});
+  renderReplyContext();
+}
+function addReplyText(text){
+  if(!text||!text.trim())return;
+  pendingReplies.push({type:'text',text:text.trim()});
+  renderReplyContext();
+}
+function removeReply(i){
+  pendingReplies.splice(i,1);
+  renderReplyContext();
+}
+function renderReplyContext(){
+  const wrap=document.getElementById('replyContext');
+  if(!wrap)return;
+  if(!pendingReplies.length){wrap.innerHTML='';wrap.style.display='none';return;}
+  wrap.style.display='flex';
+  wrap.innerHTML=pendingReplies.map((r,i)=>{
+    if(r.type==='image'){
+      return `<div class="reply-chip reply-chip-img"><img src="${esc(r.url)}" alt="${esc(r.title)}"><span class="reply-chip-label">${esc(r.title?r.title.slice(0,30):'Image')}</span><button class="rc-x" onclick="removeReply(${i})">✕</button></div>`;
+    }
+    const short=r.text.length>50?r.text.slice(0,50)+'…':r.text;
+    return `<div class="reply-chip reply-chip-text"><span class="reply-chip-icon">💬</span><span class="reply-chip-label">${esc(short)}</span><button class="rc-x" onclick="removeReply(${i})">✕</button></div>`;
+  }).join('');
+}
+function clearReplyContext(){pendingReplies=[];renderReplyContext();}
 
 function initDropzone(){
   const area=document.querySelector('.input-area');
@@ -1812,7 +1843,7 @@ function initDropzone(){
         const form=new FormData();
         form.append('file',blob,'pasted_image.png');
         fetch('/api/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
-          pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||''});
+          pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||'',doc_data:d.doc_data||''});
           renderPF();showToast('Image pasted','success');
         }).catch(()=>showToast('Paste upload failed','error'));
         break;
@@ -1844,7 +1875,7 @@ async function pasteFromClipboard(){
           const blob=await item.getType(type);
           const form=new FormData();form.append('file',blob,'pasted_image.png');
           const r=await fetch('/api/upload',{method:'POST',body:form});const d=await r.json();
-          pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||''});
+          pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||'',doc_data:d.doc_data||''});
           renderPF();showToast('Image pasted','success');return;
         }
       }
@@ -2382,7 +2413,6 @@ function renderImageCarousel(query, images){
     +`</div>`
     +`</div>`;
 }
-}
 
 function renderImageBlock(ir){
   if(!ir||!ir.images||!ir.images.length)return'';
@@ -2748,7 +2778,7 @@ async function sendMessage(opts){
   const _noThinking=opts&&opts.noThinking;
   const input=document.getElementById('msgInput');
   const text=(opts&&opts.message)?opts.message:input.value.trim();
-  if(!text&&!pendingFiles.length)return;
+  if(!text&&!pendingFiles.length&&!pendingReplies.length)return;
   // Reset continue counter when user sends a new (non-continue) message
   if(!_silent&&!text.startsWith('Continue'))_continueCount=0;
   if(curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
@@ -2786,11 +2816,39 @@ async function sendMessage(opts){
     setTimeout(()=>{if(w.parentNode)w.remove();},400);
   }
   const files=[...pendingFiles];
+  const replies=[...pendingReplies];
 
-  if(!_silent)addMsg('user',text,[],{fileNames:files.map(f=>f.name),files});
+  // Build reply context prefix for the message
+  let replyPrefix='';
+  let displayPrefix='';
+  if(replies.length){
+    const apiParts=[];
+    const dispParts=[];
+    for(const r of replies){
+      if(r.type==='text'){
+        apiParts.push(`[Replying to text:]\n> ${r.text.replace(/\n/g,'\n> ')}`);
+        dispParts.push(`> ${r.text.replace(/\n/g,'\n> ')}`);
+      } else if(r.type==='image'){
+        apiParts.push(`[Replying to image: ${r.title||'image'}]`);
+        dispParts.push(`*Replying to: ${r.title||'image'}*`);
+      }
+    }
+    replyPrefix='[REPLY CONTEXT — the user is referencing the following content from a previous response]\n'+apiParts.join('\n')+'\n\n';
+    displayPrefix=dispParts.join('\n')+'\n\n';
+  }
+  // Add reply images as file attachments so Gemini can see them
+  for(const r of replies){
+    if(r.type==='image'&&r.url){
+      files.push({name:r.title||'image.jpg',mime:'image/jpeg',data:'',text:'',url:r.url});
+    }
+  }
+
+  const displayText=displayPrefix+text;
+  if(!_silent)addMsg('user',displayText,[],{fileNames:files.filter(f=>!f.url).map(f=>f.name),files:files.filter(f=>!f.url),replyImages:replies.filter(r=>r.type==='image')});
   setStatus('Working on it...');
   if(!(opts&&opts.message)){input.value='';input.style.height='auto';}
   pendingFiles=[];renderPF();
+  pendingReplies=[];renderReplyContext();
   if(!_silent)for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
   // ── Research when explicitly activated via tool ──
@@ -2818,7 +2876,7 @@ async function sendMessage(opts){
     renderToolBadges();
 
     // If canvas is open, include canvas context for select-to-edit
-    let messageToSend=text;
+    let messageToSend=replyPrefix?replyPrefix+text:text;
     const cCtx=getCanvasContext();
     if(cCtx){
       let canvasPrefix='';
@@ -2828,7 +2886,7 @@ async function sendMessage(opts){
       }else{
         canvasPrefix=`[CANVAS CONTEXT — "${cCtx.title}"]\nThe canvas currently contains:\n${cCtx.fullContent}\n\n[USER REQUEST]\n`;
       }
-      messageToSend=canvasPrefix+text;
+      messageToSend=canvasPrefix+messageToSend;
     }
 
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3337,6 +3395,10 @@ function addMsg(role,text,files,extra={}){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
   div.className=`msg ${role}`;let html='';
   if(role==='kairo')html+='<div class="lbl">gyro</div>';
+  if(role==='user'&&extra.replyImages?.length){
+    const imgs=extra.replyImages.map(r=>`<div class="user-file-preview image reply-img"><img src="${esc(r.url)}" alt="${esc(r.title||'image')}" loading="lazy"></div>`).join('');
+    html+=`<div class="msg-user-files">${imgs}</div>`;
+  }
   if(role==='user'&&extra.files?.length){
     const previews=extra.files.map(f=>{
       const name=esc(f.name||'upload');
@@ -3836,13 +3898,11 @@ function lbNav(dir){
 function lbAskAI(){
   const cur=_lbImages[_lbIndex];
   if(!cur)return;
+  addReplyImage(cur.url,cur.title);
   closeImageLightbox();
   const inp=document.getElementById('msgInput');
-  if(inp){
-    inp.value=`[Referring to this image: ${cur.title}]\n${cur.url}\n\nTell me more about this image and what it shows.`;
-    inp.focus();
-    autoResize(inp);
-  }
+  if(inp){inp.focus();}
+  showToast('Image added to reply','success');
 }
 function closeImageLightbox(){
   const lb=document.getElementById('imgLightbox');
@@ -3891,12 +3951,10 @@ function replyToSelection(e){
   if(!text)return;
   const tip=document.querySelector('.sel-tooltip');
   if(tip)tip.classList.remove('visible');
+  addReplyText(text);
   const inp=document.getElementById('msgInput');
-  if(inp){
-    inp.value=`> ${text.replace(/\n/g,'\\n> ')}\n\n`;
-    inp.focus();
-    autoResize(inp);
-  }
+  if(inp)inp.focus();
+  showToast('Text added to reply','success');
   sel.removeAllRanges();
 }
 

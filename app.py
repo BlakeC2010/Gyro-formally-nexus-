@@ -1530,6 +1530,12 @@ def _google_contents_from_messages(messages, types):
                 parts.append(types.Part.from_bytes(data=base64.b64decode(img["data"]), mime_type=img["mime"]))
             except:
                 pass
+        for doc in msg.get("documents", []):
+            try:
+                parts.append(types.Part.from_text(text=f"[Attached document: {doc.get('name', 'document')}]"))
+                parts.append(types.Part.from_bytes(data=base64.b64decode(doc["data"]), mime_type=doc["mime"]))
+            except Exception:
+                pass
         if msg.get("file_text"):
             parts.append(types.Part.from_text(text=f"[Attached: {msg.get('file_name','')}]\n{msg['file_text']}"))
         if parts:
@@ -1672,14 +1678,31 @@ def prepare_chat_turn(chat, payload):
         user_msg["hidden"] = True
     images = []
     file_texts = []
+    documents = []
     for f in attached:
         mime = f.get("mime", "")
-        if mime.startswith("image/"):
+        # Reply images from search results — download from URL
+        if f.get("url") and not f.get("data"):
+            try:
+                import requests as _req
+                resp = _req.get(f["url"], timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+                    img_b64 = base64.b64encode(resp.content).decode()
+                    img_mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                    images.append({"data": img_b64, "mime": img_mime})
+            except Exception:
+                pass
+            continue
+        if mime.startswith("image/") and f.get("data"):
             images.append({"data": f["data"], "mime": mime})
+        elif f.get("doc_data"):
+            documents.append({"data": f["doc_data"], "mime": mime, "name": f.get("name", "document")})
         elif f.get("text"):
             file_texts.append(f"[File: {f['name']}]\n{f['text']}")
     if images:
         user_msg["images"] = images
+    if documents:
+        user_msg["documents"] = documents
     if file_texts:
         user_msg["file_text"] = "\n\n".join(file_texts)
         user_msg["file_name"] = ", ".join(f["name"] for f in attached if f.get("text"))
@@ -1701,9 +1724,13 @@ def prepare_chat_turn(chat, payload):
     if yt_urls:
         user_msg["youtube_urls"] = yt_urls
 
-    # --- Workspace context: inject only relevant files (capped at 40k chars) ---
+    # --- Workspace context: inject only relevant files (capped at 40k chars, 120k for code) ---
     all_files = read_workspace_files()
-    relevant = select_relevant_files(user_text, all_files, max_chars=40_000)
+    _is_code_task = 'code' in active_tools or bool(attached and any(
+        (f.get('mime','').startswith('text/') or f.get('text')) for f in attached
+    )) or '```' in user_text
+    _ws_cap = 120_000 if _is_code_task else 40_000
+    relevant = select_relevant_files(user_text, all_files, max_chars=_ws_cap)
     ws = format_workspace_context(relevant)
 
     memory = load_memory()
@@ -2401,7 +2428,7 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
         cfg["max_output_tokens"] = 65536
         print(f"  [thinking] Google non-stream: thinking enabled, budget=16000")
     else:
-        cfg["max_output_tokens"] = 16384
+        cfg["max_output_tokens"] = 65536
     if web_search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     r = client.models.generate_content(model=model, contents=contents,
@@ -3459,10 +3486,19 @@ def upload_file():
         try: text = file_bytes.decode("utf-8", errors="replace")
         except: pass
     img_data = None
+    doc_data = None
     if mime.startswith("image/"):
         img_data = base64.b64encode(file_bytes).decode()
+    elif not text:
+        # Non-text, non-image files (PDFs, Word docs, etc.) — store raw bytes
+        DOC_MIMES = ("application/pdf", "application/msword",
+                     "application/vnd.openxmlformats-officedocument",
+                     "application/rtf", "application/epub", "text/rtf")
+        if any(mime.startswith(dm) for dm in DOC_MIMES) or safe.lower().endswith(('.pdf','.doc','.docx','.rtf','.epub')):
+            doc_data = base64.b64encode(file_bytes).decode()
     return jsonify({"id": fid, "name": f.filename, "mime": mime,
-                    "size": len(file_bytes), "text": text, "image_data": img_data})
+                    "size": len(file_bytes), "text": text, "image_data": img_data,
+                    "doc_data": doc_data})
 
 @app.route("/api/memory")
 @require_auth
