@@ -1072,6 +1072,29 @@ You CAN and SHOULD save mind maps, reports, and visualizations to files using FI
 Memory saves:
 <<<MEMORY_ADD: fact to remember>>>
 
+13. GOOGLE MAPS — you can embed interactive Google Maps directly in your response. When discussing places, restaurants, directions, or locations, use:
+<<<MAP: search query or place name>>>
+
+Examples:
+<<<MAP: pizza restaurants near Times Square NYC>>>
+<<<MAP: Golden Gate Bridge, San Francisco>>>
+<<<MAP: best ramen in Austin TX>>>
+
+The map will be embedded inline with a link to open it in Google Maps. Use this whenever you recommend places, give directions, or discuss locations.
+
+14. GOOGLE FLIGHTS — you can link to Google Flights for travel/flight searches:
+<<<FLIGHTS: flights from New York to Tokyo>>>
+
+This will render a styled link to Google Flights with the search pre-filled. Use this when the user asks about flights, vacations, or travel planning.
+
+LOCATION-AWARE RESPONSES:
+When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
+- Recommend nearby restaurants, cafes, attractions with <<<MAP>>> embeds
+- Suggest flights from their nearest major airport with <<<FLIGHTS>>> links
+- Reference local weather, events, or news when relevant
+- Always use <<<MAP>>> when recommending physical places so the user can see them on a map
+- For food/restaurant recommendations, include both the <<<MAP>>> embed AND relevant web-searched details (ratings, hours, etc.)
+
 Output Quality Rules:
 - Think step by step before answering. For complex or multi-part questions, reason through it before giving your final answer.
 - NEVER cut off your response mid-sentence or mid-thought. If a response needs to be long, complete it fully. Never truncate.
@@ -1746,6 +1769,26 @@ def prepare_chat_turn(chat, payload):
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
         sysprompt += tool_instructions
+
+    # --- User location context ---
+    user_location = payload.get("user_location")
+    if user_location and isinstance(user_location, dict):
+        loc_parts = []
+        if user_location.get("display"):
+            loc_parts.append(f"Location: {user_location['display']}")
+        if user_location.get("lat") and user_location.get("lng"):
+            loc_parts.append(f"Coordinates: {user_location['lat']}, {user_location['lng']}")
+        if loc_parts:
+            sysprompt += (
+                "\n\n[USER LOCATION]\n"
+                "The user has shared their current location with you:\n"
+                + "\n".join(loc_parts) + "\n"
+                "Use this location to give personalized, location-aware recommendations when relevant "
+                "(e.g. nearby restaurants, local events, weather, travel suggestions, flights from their nearest airport). "
+                "You can embed interactive Google Maps using: <<<MAP: search query or place name>>>\n"
+                "You can link to Google Flights using: <<<FLIGHTS: flights from [city] to [destination]>>>\n"
+                "Use these proactively when discussing places, food, travel, or directions."
+            )
 
     # --- Per-chat pinned files context ---
     pinned = chat.get("pinned_files") or []

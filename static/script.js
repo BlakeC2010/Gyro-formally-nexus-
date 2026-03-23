@@ -31,6 +31,68 @@ const FOLDER_META_KEY='gyro_folder_meta_v1';
 let homeWidgetRefreshTimer=null;
 let homeWidgetRefreshInFlight=false;
 
+// ─── Location ─────────────────────────────────────
+function isLocationEnabled(){ return localStorage.getItem('gyro_location_enabled')==='true'; }
+function getUserLocation(){
+  if(!isLocationEnabled()) return null;
+  try{
+    const raw=localStorage.getItem('gyro_user_location');
+    return raw?JSON.parse(raw):null;
+  }catch{return null;}
+}
+function toggleLocationSharing(on){
+  if(on){
+    localStorage.setItem('gyro_location_enabled','true');
+    requestUserLocation();
+  }else{
+    localStorage.setItem('gyro_location_enabled','false');
+    localStorage.removeItem('gyro_user_location');
+  }
+  updateLocationToggleUI();
+}
+function requestUserLocation(){
+  if(!navigator.geolocation){showToast('Geolocation not supported by your browser','error');return;}
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const loc={lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:pos.coords.accuracy,ts:Date.now()};
+    // Reverse geocode to get city/region
+    fetch(`https://nominatim.openstreetmap.org/reverse?lat=${loc.lat}&lon=${loc.lng}&format=json&zoom=10`,{headers:{'User-Agent':'Gyro-AI/1.0'}})
+      .then(r=>r.json()).then(d=>{
+        loc.city=d.address?.city||d.address?.town||d.address?.village||'';
+        loc.state=d.address?.state||'';
+        loc.country=d.address?.country||'';
+        loc.display=`${loc.city}${loc.state?', '+loc.state:''}${loc.country?', '+loc.country:''}`;
+        localStorage.setItem('gyro_user_location',JSON.stringify(loc));
+        showToast(`Location set: ${loc.display}`,'success');
+        updateLocationToggleUI();
+      }).catch(()=>{
+        localStorage.setItem('gyro_user_location',JSON.stringify(loc));
+        showToast('Location saved (coordinates only)','success');
+        updateLocationToggleUI();
+      });
+  },err=>{
+    console.warn('Geolocation error:',err);
+    showToast('Could not get your location — check browser permissions','error');
+    localStorage.setItem('gyro_location_enabled','false');
+    updateLocationToggleUI();
+  },{enableHighAccuracy:false,timeout:10000,maximumAge:300000});
+}
+function updateLocationToggleUI(){
+  const tog=document.getElementById('locationToggle');
+  const dot=document.getElementById('locationDot');
+  const info=document.getElementById('locationInfo');
+  if(!tog)return;
+  const on=isLocationEnabled();
+  tog.checked=on;
+  if(dot)dot.style.transform=on?'translateX(18px)':'translateX(0)';
+  if(dot)dot.style.background=on?'var(--accent)':'var(--text-muted)';
+  if(info){
+    const loc=getUserLocation();
+    info.textContent=loc&&loc.display?loc.display:(on?'Locating...':'Off');
+  }
+}
+// Refresh location periodically (every 30 min) if enabled
+setInterval(()=>{if(isLocationEnabled())requestUserLocation();},1800000);
+
 function startThinkingPhrases(el){
   let i=0;
   if(_thinkInterval)clearInterval(_thinkInterval);
@@ -2371,6 +2433,23 @@ function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMe
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
 function sendQ(t){document.getElementById('msgInput').value=t;sendMessage()}
 
+// ─── Map Embeds ───────────────────────────────────
+function renderMapEmbed(query, label){
+  const q=encodeURIComponent(query);
+  const loc=getUserLocation();
+  let src=`https://www.google.com/maps?q=${q}&output=embed`;
+  if(loc&&loc.lat&&loc.lng){
+    src=`https://www.google.com/maps?q=${q}&ll=${loc.lat},${loc.lng}&z=13&output=embed`;
+  }
+  const mapsLink=`https://www.google.com/maps/search/${q}`;
+  return `<div class="map-embed-wrap"><div class="map-embed-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg><span>${esc(label||query)}</span><a href="${mapsLink}" target="_blank" rel="noopener" class="map-open-btn">Open in Maps ↗</a></div><iframe class="map-embed-iframe" src="${src}" allowfullscreen loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe></div>`;
+}
+
+function renderFlightsLink(query){
+  const q=encodeURIComponent(query);
+  return `<div class="flights-link-wrap"><a href="https://www.google.com/travel/flights?q=${q}" target="_blank" rel="noopener" class="flights-link-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5 5.2 3 -2 2-1.8-.6c-.4-.1-.8 0-1 .3l-.3.3 2.5 1.5 1.5 2.5.3-.3c.3-.3.4-.7.3-1l-.6-1.8 2-2 3 5.2.5-.3c.4-.2.6-.6.5-1.1z"/></svg> Search flights: ${esc(query)}</a></div>`;
+}
+
 function renderImageGrid(query, images){
   if(!images||!images.length)return'';
   const cards=images.map((img,i)=>{
@@ -2636,6 +2715,8 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;IMAGE_SEARCH:[^&]*?&gt;&gt;&gt;/g,'');
   html=html.replace(/%%%IMAGE_SEARCH:[^%]*?(?:&gt;&gt;&gt;|%%%)/g,'');
   html=html.replace(/&lt;&lt;&lt;IMAGE_GENERATE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🎨</span> Generating image...</div>');
+  html=html.replace(/&lt;&lt;&lt;MAP:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📍</span> Loading map...</div>');
+  html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈️</span> Finding flights...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   // Completed CODE_EXECUTE blocks — hide raw tags, show placeholder
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Executing code...</div>');
@@ -2897,7 +2978,7 @@ async function sendMessage(opts){
     }
 
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking:_noThinking?false:thinkingEnabled,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue)}),signal:controller.signal});
+      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking:_noThinking?false:thinkingEnabled,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation()}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -3842,6 +3923,19 @@ function fmt(text){
   t=t.replace(/\[([^\]]+)\]\((\/api\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Bare URLs — auto-link any https?:// not already inside an <a> tag
   t=t.replace(/(?<!href=")(?<!src=")(?<!">)(https?:\/\/[^\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
+  // Map embeds: <<<MAP: query>>> or <<<MAP: query | label>>>
+  t=t.replace(/&lt;&lt;&lt;MAP:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
+    const parts=raw.replace(/&amp;/g,'&').split('|').map(p=>p.trim());
+    const query=parts[0];const label=parts[1]||query;
+    blocks.push(renderMapEmbed(query,label));
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
+  // Flights links: <<<FLIGHTS: query>>>
+  t=t.replace(/&lt;&lt;&lt;FLIGHTS:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
+    const query=raw.replace(/&amp;/g,'&').trim();
+    blocks.push(renderFlightsLink(query));
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
   t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   t=t.replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>');
   t=t.replace(/\n/g,'<br>');
@@ -3994,6 +4088,7 @@ async function openSettings(){
     light.style.cssText=(theme==='light'?activeStyle:inactiveStyle)+'padding:7px 14px;font-size:11px;font-weight:500;border:none;cursor:pointer;transition:all .2s;';
   }
   if(curUser)document.getElementById('profileName').value=curUser.name||'';
+  updateLocationToggleUI();
   initDevRawToggle();
 }
 
