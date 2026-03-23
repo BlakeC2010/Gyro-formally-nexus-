@@ -2099,13 +2099,13 @@ async function runDeepResearch(query,contentEl,area,planText){
   const decoder=new TextDecoder();
   let buffer='';
   let lastEventTime=Date.now();
-  const STALL_TIMEOUT=300000; // 5 minutes — research AI calls can be very long
+  const STALL_TIMEOUT=600000; // 10 minutes — deep research can take up to 20 min
 
   while(true){
     // Race between reading and a stall timeout
     let stallTimer;
     const timeoutPromise=new Promise((_,reject)=>{
-      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server for 5 minutes. Try again with a simpler query.')),STALL_TIMEOUT);
+      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server for 10 minutes. Try again with a simpler query.')),STALL_TIMEOUT);
     });
     let readResult;
     try{
@@ -2716,7 +2716,7 @@ function registerArtifactsFromReply(reply,filesModified=[]){
     const lang=(m[1]||'text').toLowerCase();
     if(lang==='todolist'||lang==='mermaid')continue;
     const content=m[2]||'';
-    const isCode=lang!=='text'&&lang!=='md'&&lang!=='markdown';
+    const isCode=true; // all code blocks open in canvas
     // Try to detect a filename from the line before the code block
     const before=reply.substring(0,m.index).trim();
     const lastLine=before.split('\n').pop().trim();
@@ -2735,10 +2735,17 @@ function registerArtifactsFromReply(reply,filesModified=[]){
     if(!f?.path)continue;
     ids.push(registerArtifact({title:f.path.split('/').pop()||f.path,path:f.path,content:'',isCode:true,action:f.action||'updated'}));
   }
-  // Auto-open first code block in canvas
+  // Auto-open first code/file block in canvas
   if(codeBlocks.length>0&&!_suppressCanvasAutoOpen){
     const first=codeBlocks[0];
     setTimeout(()=>openCanvas(first.content,first.title,true,{openPanel:true}),100);
+  }
+  // Also auto-open first modified file in canvas
+  if(!codeBlocks.length&&filesModified?.length&&!_suppressCanvasAutoOpen){
+    const firstFile=filesModified[0];
+    if(firstFile?.path){
+      setTimeout(()=>openWorkspaceFile(encodeURIComponent(firstFile.path)),200);
+    }
   }
   return [...new Set(ids)];
 }
@@ -2890,7 +2897,7 @@ async function sendMessage(opts){
     }
 
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:messageToSend,files,thinking:_noThinking?false:thinkingEnabled,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue)}),signal:controller.signal});
+      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking:_noThinking?false:thinkingEnabled,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue)}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -3084,7 +3091,7 @@ async function sendMessage(opts){
             const artifactIds=registerArtifactsFromReply(displayReply,data.files||[]);
             if(!devRawMode&&data.files?.length){
               finalHTML+='<div class="fops">';
-              for(const f of data.files){const fname=f.path.split('/').pop().split('\\').pop();finalHTML+=`<div class="fo"><a href="/api/files/download?path=${encodeURIComponent(f.path)}" target="_blank" class="fo-link">⬇ ${esc(f.action==='created'?'Created':'Updated')}: ${esc(fname)}</a></div>`;}
+              for(const f of data.files){const fname=f.path.split('/').pop().split('\\').pop();finalHTML+=`<div class="fo"><a href="#" onclick="event.preventDefault();openWorkspaceFile('${encodeURIComponent(f.path)}')" class="fo-link">📄 ${esc(f.action==='created'?'Created':'Updated')}: ${esc(fname)}</a></div>`;}
               finalHTML+='</div>';
             }
             if(!devRawMode)finalHTML+=renderArtifactCards(artifactIds,'ready');
@@ -3448,7 +3455,7 @@ function addMsg(role,text,files,extra={}){
   }
   let artifactIds=[];
   if(role==='kairo')artifactIds=registerArtifactsFromReply(displayText,files||[]);
-  if(files?.length){html+='<div class="fops">';for(const f of files){const fname=f.path.split('/').pop().split('\\').pop();html+=`<div class="fo"><a href="/api/files/download?path=${encodeURIComponent(f.path)}" target="_blank" class="fo-link">⬇ ${esc(f.action==='created'?'Created':'Updated')}: ${esc(fname)}</a></div>`;}html+='</div>'}
+  if(files?.length){html+='<div class="fops">';for(const f of files){const fname=f.path.split('/').pop().split('\\').pop();html+=`<div class="fo"><a href="#" onclick="event.preventDefault();openWorkspaceFile('${encodeURIComponent(f.path)}')" class="fo-link">📄 ${esc(f.action==='created'?'Created':'Updated')}: ${esc(fname)}</a></div>`;}html+='</div>'}
   if(artifactIds.length)html+=renderArtifactCards(artifactIds,'ready');
   if(extra.code_results?.length){
     for(const cr of extra.code_results){
@@ -4221,12 +4228,26 @@ async function deleteUserFile(encodedPath,isFolder){
 async function openWorkspaceFile(encodedPath){
   const path=decodeURIComponent(encodedPath||'');
   if(!path)return;
+  const title=path.split('/').pop()||path;
+  const ext=(title.split('.').pop()||'').toLowerCase();
+  const imgExts=['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+  if(imgExts.includes(ext)){
+    // Open image in canvas image viewer
+    const imgUrl=`/api/files/view?path=${encodeURIComponent(path)}`;
+    const tab={
+      id:'tab_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7),
+      title,content:'',isCode:false,sourcePath:path,imageUrl:imgUrl
+    };
+    const existing=canvasTabs.find(t=>t.sourcePath===path);
+    if(existing){existing.imageUrl=imgUrl;activeCanvasTabId=existing.id;switchCanvasTab(existing.id);}
+    else{canvasTabs.push(tab);activeCanvasTabId=tab.id;switchCanvasTab(tab.id);}
+    closeFileBrowser();
+    return;
+  }
   try{
     const r=await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
     const d=await r.json();
     if(d.error){showToast(d.error,'error');return;}
-    const title=path.split('/').pop()||path;
-    const ext=(title.split('.').pop()||'').toLowerCase();
     const codeExts=new Set(['py','js','ts','tsx','jsx','css','html','json','md','yaml','yml','sql','sh','ps1','java','cpp','c','rs','go','php','rb']);
     openCanvas(d.content||'',title,codeExts.has(ext),{openPanel:true,sourcePath:path});
     closeFileBrowser();
@@ -4374,12 +4395,22 @@ function switchCanvasTab(id){
   canvasIsCode=!!tab.isCode;
   const panel=document.getElementById('canvasPanel');
   const editor=document.getElementById('canvasEditor');
+  const imgViewer=document.getElementById('canvasImageViewer');
   const langEl=document.getElementById('canvasLang');
   const titleEl=document.getElementById('canvasTitle');
   const runBtn=document.getElementById('canvasRunBtn');
-  editor.value=tab.content||'';
-  editor.className=tab.isCode?'canvas-editor code-mode':'canvas-editor';
+  // Check if this tab is an image
   const lang=detectCanvasLang(tab.title);
+  const imgExts=['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+  if(imgExts.includes(lang)&&tab.imageUrl){
+    editor.style.display='none';
+    if(imgViewer){imgViewer.style.display='flex';document.getElementById('canvasImageEl').src=tab.imageUrl;}
+  }else{
+    editor.style.display='';
+    if(imgViewer)imgViewer.style.display='none';
+    editor.value=tab.content||'';
+    editor.className=tab.isCode?'canvas-editor code-mode':'canvas-editor';
+  }
   langEl.textContent=lang||( tab.isCode?'code':'');
   titleEl.textContent=tab.title||'Document';
   // Show run button for Python and HTML
@@ -4390,7 +4421,7 @@ function switchCanvasTab(id){
   closeCanvasOutput();
   panel.classList.add('open');
   document.getElementById('canvasResizer').classList.add('visible');
-  editor.focus();
+  if(!imgExts.includes(lang))editor.focus();
   canvasSelection=null;
   editor.oninput=()=>{
     tab.content=editor.value;
@@ -4429,6 +4460,58 @@ function closeCanvas(){
   panel.style.width='';
   resizer.classList.remove('visible');
   closeCanvasOutput();
+}
+
+/* ─── Canvas File Explorer ──────────────────────── */
+function toggleCanvasFiles(){
+  const panel=document.getElementById('canvasFilesPanel');
+  if(!panel)return;
+  const isOpen=panel.classList.toggle('open');
+  if(isOpen)refreshCanvasFiles();
+}
+
+async function refreshCanvasFiles(){
+  const body=document.getElementById('canvasFilesBody');
+  if(!body)return;
+  try{
+    const r=await fetch('/api/user-files');
+    const d=await r.json();
+    const files=d.files||[];
+    if(!files.length){body.innerHTML='<div style="padding:10px;font-size:10px;color:var(--text-muted)">No files yet.</div>';return;}
+    const folders={};
+    files.forEach(f=>{const fld=f.folder||'';if(!folders[fld])folders[fld]=[];folders[fld].push(f);});
+    let html='';
+    const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
+    for(const fld of sortedFolders){
+      if(!folders[fld])continue;
+      if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ ${esc(fld)}</div><div>`;
+      for(const f of folders[fld]){
+        const ext=(f.name.split('.').pop()||'').toLowerCase();
+        const isImg=['png','jpg','jpeg','gif','webp','svg','bmp','ico'].includes(ext);
+        const icon=isImg?'🖼':ext==='md'?'◆':ext==='pdf'?'📄':'▪';
+        html+=`<div class="cfp-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="cfp-icon">${icon}</span><span class="cfp-name">${esc(f.name)}</span></div>`;
+      }
+      if(fld) html+='</div>';
+    }
+    body.innerHTML=html;
+  }catch{body.innerHTML='<div style="padding:10px;font-size:10px;color:var(--text-muted)">Error loading files.</div>';}
+}
+
+/* ─── Image viewing in canvas ───────────────────── */
+function showCanvasImage(url,title){
+  const panel=document.getElementById('canvasPanel');
+  const editor=document.getElementById('canvasEditor');
+  const imgViewer=document.getElementById('canvasImageViewer');
+  const imgEl=document.getElementById('canvasImageEl');
+  if(!imgViewer||!imgEl)return;
+  editor.style.display='none';
+  imgViewer.style.display='flex';
+  imgEl.src=url;
+  imgEl.alt=title||'Image';
+  document.getElementById('canvasTitle').textContent=title||'Image';
+  document.getElementById('canvasLang').textContent='image';
+  panel.classList.add('open');
+  document.getElementById('canvasResizer').classList.add('visible');
 }
 
 // ─── Canvas drag-to-resize ────────────────────────

@@ -1673,7 +1673,9 @@ def prepare_chat_turn(chat, payload):
     if resolved.get("error"):
         return None, jsonify({"reply": resolved["error"], "files": [], "locked": True}), 403
 
-    user_msg = {"role": "user", "text": user_text, "timestamp": datetime.datetime.now().isoformat()}
+    # Store the raw user text (without canvas/reply context) for display in chat history
+    display_text = (payload.get("raw_text") or user_text).strip()
+    user_msg = {"role": "user", "text": display_text, "timestamp": datetime.datetime.now().isoformat()}
     if is_continue:
         user_msg["hidden"] = True
     images = []
@@ -3842,6 +3844,10 @@ def _run_research_job(job_id, query, api_key):
             agent="deep-research-pro-preview-12-2025",
             background=True,
             stream=True,
+            agent_config={
+                "type": "deep-research",
+                "thinking_summaries": "auto",
+            },
         )
 
         push("progress", step="researching", pct=8, total_steps=total_steps, current_step=2,
@@ -3868,6 +3874,24 @@ def _run_research_job(job_id, query, api_key):
                 interaction = event.interaction
                 push("progress", step="researching", pct=10, total_steps=total_steps, current_step=2,
                      message="Research started — agent is searching the web...")
+
+            elif etype == "content.delta":
+                # Streaming progress updates from the agent
+                delta = getattr(event, "delta", None)
+                if delta:
+                    delta_type = getattr(delta, "type", "")
+                    if delta_type == "thought_summary":
+                        thought_text = ""
+                        content_obj = getattr(delta, "content", None)
+                        if content_obj:
+                            thought_text = getattr(content_obj, "text", "")
+                        if thought_text:
+                            pct = min(pct + 3, 85)
+                            push("progress", step="researching", pct=pct, total_steps=total_steps, current_step=2,
+                                 message=thought_text[:200])
+                    elif delta_type == "text":
+                        # Partial research text arriving — just bump progress
+                        pct = min(pct + 1, 85)
 
             elif etype == "interaction.status_update":
                 status = getattr(event, "status", "")
@@ -4288,7 +4312,7 @@ def start_research():
         sent = 0
         last_send = _time.time()
         job_start = _time.time()
-        JOB_TIMEOUT = 600  # 10 minute total timeout
+        JOB_TIMEOUT = 1500  # 25 minute total timeout
         while True:
             job = _research_jobs.get(job_id, {})
             evts = job.get("events", [])
@@ -4300,7 +4324,7 @@ def start_research():
                 break
             # Total job timeout
             if _time.time() - job_start > JOB_TIMEOUT:
-                yield json.dumps({"type": "error", "error": "Research timed out after 10 minutes. Try a narrower query or 'quick' depth."}) + "\n"
+                yield json.dumps({"type": "error", "error": "Research timed out after 25 minutes. Try a narrower query or 'quick' depth."}) + "\n"
                 job["cancelled"] = True
                 job["status"] = "error"
                 break

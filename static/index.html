@@ -232,6 +232,7 @@
           <span class="ch-lang" id="canvasLang"></span>
         </div>
         <div class="ch-actions">
+          <button class="ch-btn" id="canvasFilesBtn" onclick="toggleCanvasFiles()" title="Toggle file explorer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
           <button class="ch-btn" id="canvasRunBtn" onclick="runCanvasCode()" title="Run / Preview" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
           <button class="ch-btn" onclick="copyCanvas()" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           <button class="ch-btn" onclick="downloadCanvas()" title="Download file"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
@@ -240,11 +241,23 @@
       </div>
       <div class="canvas-body">
         <div class="canvas-tabs" id="canvasTabs"></div>
-        <div class="canvas-editor-wrap">
-          <textarea class="canvas-editor" id="canvasEditor" placeholder="Start writing or paste content here..." spellcheck="true"></textarea>
-          <div class="canvas-run-output" id="canvasRunOutput" style="display:none">
-            <div class="cro-head"><span>Output</span><button onclick="closeCanvasOutput()">✕</button></div>
-            <div class="cro-body" id="canvasRunBody"></div>
+        <div class="canvas-content-area">
+          <div class="canvas-files-panel" id="canvasFilesPanel">
+            <div class="cfp-head">
+              <span class="cfp-title">Files</span>
+              <button class="cfp-close" onclick="toggleCanvasFiles()" title="Hide files">✕</button>
+            </div>
+            <div class="cfp-body" id="canvasFilesBody"></div>
+          </div>
+          <div class="canvas-editor-wrap">
+            <div class="canvas-image-viewer" id="canvasImageViewer" style="display:none">
+              <img id="canvasImageEl" src="" alt="">
+            </div>
+            <textarea class="canvas-editor" id="canvasEditor" placeholder="Start writing or paste content here..." spellcheck="true"></textarea>
+            <div class="canvas-run-output" id="canvasRunOutput" style="display:none">
+              <div class="cro-head"><span>Output</span><button onclick="closeCanvasOutput()">✕</button></div>
+              <div class="cro-body" id="canvasRunBody"></div>
+            </div>
           </div>
         </div>
       </div>
