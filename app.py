@@ -1277,7 +1277,7 @@ def execute_code_blocks(text):
     pattern = r'<<<CODE_EXECUTE:\s*(\w+)>>>\r?\n(.*?)<<<END_CODE>>>'
     results = []
     # Protected dirs/files that code shouldn't claim credit for
-    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules'}
+    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data'}
     _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore'}
     for m in re.finditer(pattern, text, re.DOTALL):
         lang = m.group(1).strip().lower()
@@ -1856,23 +1856,15 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
     # Build a second version that keeps %%%IMGBLOCK:N%%% placeholders for the frontend
     clean_with_placeholders = clean_response(raw_response, keep_img_placeholders=True)
 
-    # Auto-inject file references from code execution into the response
+    # When code was executed, truncate display text to before the first CODE_EXECUTE block.
+    # The auto-reprompt mechanism will send execution results back to the AI so it can
+    # respond accurately instead of pre-emptively claiming success/failure.
     if code_results:
-        file_refs = []
-        for cr in code_results:
-            if cr.get("files"):
-                for gf in cr["files"]:
-                    fname = gf["name"]
-                    fpath = gf["path"]
-                    if gf.get("is_image"):
-                        file_refs.append(f"📎 **{fname}** — [View/Download](/api/files/view?path={urllib.parse.quote(fpath)})")
-                    else:
-                        file_refs.append(f"📎 **{fname}** — [Download](/api/files/download?path={urllib.parse.quote(fpath)})")
-        if file_refs:
-            # Only append if the clean text doesn't already reference these files
-            already_mentioned = any(gf["name"] in clean for cr in code_results for gf in cr.get("files", []))
-            if not already_mentioned:
-                clean += "\n\n---\n" + "\n".join(file_refs)
+        code_idx = raw_response.find('<<<CODE_EXECUTE')
+        if code_idx >= 0:
+            pre_code_raw = raw_response[:code_idx]
+            clean = clean_response(pre_code_raw).strip()
+            clean_with_placeholders = clean_response(pre_code_raw, keep_img_placeholders=True).strip()
 
     if not chat["messages"] and ctx["user_text"]:
         resolved = ctx["resolved"]
@@ -3333,6 +3325,20 @@ def chat_message_stream(chat_id):
                 done_payload["continue_after_ops"] = True
             if code_results:
                 done_payload["code_results"] = code_results
+                # Build execution summary for auto-reprompt
+                summary_parts = []
+                all_success = True
+                for i, cr in enumerate(code_results):
+                    if cr["success"]:
+                        file_names = [f["name"] for f in cr.get("files", [])]
+                        files_str = f" Files created/modified: {', '.join(file_names)}." if file_names else ""
+                        summary_parts.append(f"Code block {i+1} ({cr['language']}): SUCCESS. Output: {cr['output']}{files_str}")
+                    else:
+                        all_success = False
+                        summary_parts.append(f"Code block {i+1} ({cr['language']}): FAILED. Error: {cr['output']}")
+                done_payload["code_auto_reprompt"] = True
+                done_payload["code_all_success"] = all_success
+                done_payload["code_execution_summary"] = "\n".join(summary_parts)
             if research_query:
                 done_payload["research_trigger"] = research_query
             # Tell the client which image searches are pending so it can show loaders

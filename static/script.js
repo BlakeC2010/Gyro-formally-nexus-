@@ -2,6 +2,7 @@
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
 let _continueCount=0;const _MAX_CONTINUES=5;
+let _codeRepromptCount=0;const _MAX_CODE_REPROMPTS=3;
 let _nextStreamId=0;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
 let googleInitDone=false,thinkingEnabled=false,guestAuthMode='register';
@@ -2868,7 +2869,7 @@ async function sendMessage(opts){
   const text=(opts&&opts.message)?opts.message:input.value.trim();
   if(!text&&!pendingFiles.length&&!pendingReplies.length)return;
   // Reset continue counter when user sends a new (non-continue) message
-  if(!_silent&&!text.startsWith('Continue'))_continueCount=0;
+  if(!_silent&&!text.startsWith('Continue')){_continueCount=0;_codeRepromptCount=0;}
   if(curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
   if(!curChat){
@@ -3322,13 +3323,35 @@ async function sendMessage(opts){
               try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
             }
             refreshChats();
+            // ── Auto-reprompt after code execution ──
+            // When code was executed, automatically send execution results back to the AI
+            // so it can respond accurately (present files on success, debug on failure)
+            if(data.code_auto_reprompt&&_codeRepromptCount<_MAX_CODE_REPROMPTS){
+              _codeRepromptCount++;
+              shouldContinue=false; // code reprompt takes priority over auto-continue
+              const summary=data.code_execution_summary||'Code execution completed.';
+              let repromptMsg;
+              if(data.code_all_success){
+                repromptMsg=`[SYSTEM] Code execution completed. Results:\n${summary}\n\nPresent the created files to the user. Provide download links using the file paths above. Do NOT regenerate the code — just describe what was created and link to the files.`;
+              }else{
+                repromptMsg=`[SYSTEM] Code execution FAILED. Results:\n${summary}\n\nThe code you wrote failed to execute. Do NOT claim it was successful. Analyze the error, explain what went wrong to the user, and provide a corrected version of the code using <<<CODE_EXECUTE: python>>>...<<<END_CODE>>> tags.`;
+              }
+              setStatus(data.code_all_success?'Code executed — presenting results...':'Code failed — retrying...');
+              setTimeout(()=>{
+                const inp=document.getElementById('msgInput');
+                inp.value=repromptMsg;
+                sendMessage({silent:true,noThinking:data.code_all_success});
+              },800);
+            }
             // Auto-continue if AI signaled <<<CONTINUE>>> or if the response was truncated
             // NEVER auto-continue when choice blocks are present — user needs to answer first
-            if(choiceBlocks.length){
+            // Skip auto-continue if code reprompt is handling the follow-up
+            const _codeReprompting=data.code_auto_reprompt&&_codeRepromptCount<=_MAX_CODE_REPROMPTS;
+            if(choiceBlocks.length||_codeReprompting){
               shouldContinue=false;
             }
             // If gen ops are pending, defer continue decision until gen_ops_complete event
-            if(data.continue_after_ops){
+            if(data.continue_after_ops&&!_codeReprompting){
               // Don't continue yet — wait for gen_ops_complete event
               _pendingContinueAfterOps=true;
               shouldContinue=false;
@@ -3343,7 +3366,7 @@ async function sendMessage(opts){
               setTimeout(()=>{
                 sendMessage({silent:true,noThinking:true,isContinue:true,message:'Continue where you left off. Pick up exactly where you stopped.'});
               },600);
-            }else if(!_pendingContinueAfterOps){
+            }else if(!_pendingContinueAfterOps&&!_codeReprompting){
               _continueCount=0;
               setStatus('Done. Ask a follow-up or start something new.');
             }
