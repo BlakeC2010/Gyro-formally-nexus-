@@ -3440,16 +3440,22 @@ async function sendMessage(opts){
               }
             }
 
-            // ── Stock data — show loading placeholders for pending stocks ──
+            // ── Stock data — ensure loading placeholders exist for pending stocks ──
             if(!devRawMode&&data.pending_stocks?.length){
               for(const ps of data.pending_stocks){
                 const loaderId=`stock-loader-${ps.index}`;
+                // fmt() should have rendered these already, but update the loading text
+                // to show the ticker name, and ensure they exist as fallback
                 const loaderHTML=`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${ps.index}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ps.ticker)} data...</span></div></div></div>`;
-                const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${ps.index}%%%\\s*</p>|%%%STOCKBLOCK:${ps.index}%%%`,'g');
-                const before=finalHTML;
-                finalHTML=finalHTML.replace(re,loaderHTML);
-                if(finalHTML===before){
-                  finalHTML+=loaderHTML;
+                // Check if fmt() already created the loader element
+                if(!finalHTML.includes(`id="${loaderId}"`)){
+                  // Fallback: try to replace raw placeholder or append
+                  const re=new RegExp(`%%%STOCKBLOCK:${ps.index}%%%`,'g');
+                  const before=finalHTML;
+                  finalHTML=finalHTML.replace(re,loaderHTML);
+                  if(finalHTML===before){
+                    finalHTML+=loaderHTML;
+                  }
                 }
               }
             }
@@ -3666,7 +3672,20 @@ async function sendMessage(opts){
               }
             }
           }else if(data.type==='gen_ops_complete'){
-            // All generative operations (image gen, image search) are done
+            // All generative operations (image gen, image search, stock) are done
+            // Stock auto-reprompt: send fetched data back to AI for analysis
+            if(data.stock_reprompt&&!_genFailures.length){
+              setChatRunning(targetChatId,false);
+              _continueCount=0;
+              _pendingContinueAfterOps=false;
+              setStatus('Analyzing stock data...');
+              try{
+                const inp=document.getElementById('msgInput');
+                inp.value=`[SYSTEM] Stock data has been loaded. Here is the live data from Yahoo Finance for the stocks you just displayed:\n\n${data.stock_reprompt}\n\nNow analyze this data for the user. Reference the ACTUAL numbers shown above. The stock cards are already visible to the user — do NOT re-embed <<<STOCK>>> tags. Instead, provide your analysis, comparison, or recommendation based on the real data. Keep it concise (3-5 sentences max). Include the mandatory disclaimer.`;
+                sendMessage({silent:true,noThinking:true});
+              }catch(_){}
+              return; // skip the normal gen_ops_complete handling below
+            }
             if(_genFailures.length>0){
               // Some ops failed — notify the AI so it can report to user
               const failMsgs=_genFailures.map(f=>{
@@ -3844,9 +3863,20 @@ function addMsg(role,text,files,extra={}){
   if(!devRawMode&&extra.stock_results?.length){
     for(const sr of extra.stock_results){
       const stockHTML=renderStockCard(sr.ticker, sr.data);
-      const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${sr.index}%%%\\s*</p>|%%%STOCKBLOCK:${sr.index}%%%`,'g');
+      // fmt() renders %%%STOCKBLOCK:N%%% as loading cards with id="stock-loader-N"
+      // Replace those loaders with actual rendered cards
+      const loaderRe=new RegExp(`<div[^>]*id="stock-loader-${sr.index}"[^>]*>[\\s\\S]*?</div>\\s*</div>\\s*</div>`,'g');
       const before=html;
-      html=html.replace(re,stockHTML);
+      html=html.replace(loaderRe,stockHTML);
+      if(html===before){
+        // Fallback: try raw placeholder or append
+        const rawRe=new RegExp(`%%%STOCKBLOCK:${sr.index}%%%`,'g');
+        const before2=html;
+        html=html.replace(rawRe,stockHTML);
+        if(html===before2){
+          html+=stockHTML;
+        }
+      }
       if(html===before){
         html+=stockHTML;
       }
@@ -4209,8 +4239,12 @@ function fmt(text){
     blocks.push(renderStockCard(ticker));
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
-  // Stock placeholders from server-side extraction: %%%STOCKBLOCK:N%%% — kept as-is for done handler to replace
-  // (they'll be replaced after the done event by pending_stocks loaders or stock_data events)
+  // Stock placeholders from server-side extraction: %%%STOCKBLOCK:N%%% — render as loading cards
+  t=t.replace(/%%%STOCKBLOCK:(\d+)%%%/g,(_,idx)=>{
+    const loaderId=`stock-loader-${idx}`;
+    blocks.push(`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${idx}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading stock data...</span></div></div></div>`);
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
   t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   t=t.replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>');
   t=t.replace(/\n/g,'<br>');

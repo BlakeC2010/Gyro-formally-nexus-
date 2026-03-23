@@ -1108,16 +1108,27 @@ Compare with another stock
 Deep financial analysis
 <<<END_CHOICES>>>
 
-2. After the user answers, embed the stock card and keep your text SHORT (1-3 sentences max). The card shows the verdict and all data — don't repeat what the card already shows.
-   Good: "Here's AAPL — the card shows a BUY verdict with strong fundamentals. <<<STOCK: AAPL>>>"
-   Bad: [walls of text scoring each factor individually]
+2. After the user answers, embed the stock card(s) and write a BRIEF intro sentence. Wait for the system to load the data — it will be sent back to you automatically. Then you will provide your analysis using the REAL loaded data.
+   Good: "Let me pull up the data for AAPL. <<<STOCK: AAPL>>>"
+   Bad: [walls of text guessing at numbers before data loads]
 
-3. For COMPARISON requests, embed both cards side by side with a brief 2-3 sentence summary of which looks stronger and why.
+3. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
+   - Show loading cards to the user immediately
+   - Fetch real-time data from Yahoo Finance server-side
+   - Send the loaded data BACK to you automatically
+   - You will then analyze the REAL numbers in a follow-up message
+   So keep your initial message SHORT — just embed the tags and a brief intro. Your actual analysis comes AFTER the data loads.
 
-4. MANDATORY DISCLAIMER — include this SHORT disclaimer with EVERY stock response:
+4. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. Wait for the real data.
+
+5. For COMPARISON requests, embed both cards side by side. Your detailed comparison will come after the data loads.
+
+6. MANDATORY DISCLAIMER — include this SHORT disclaimer with EVERY stock response:
 *Not financial advice. AI analysis may be inaccurate. Always do your own research and consult a licensed financial advisor. You could lose money.*
 
-5. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly.
+7. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly.
+
+8. If you already received [LIVE STOCK DATA] in the context, you can reference those numbers directly without re-embedding cards.
 
 LOCATION-AWARE RESPONSES:
 When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
@@ -1738,6 +1749,40 @@ def _build_tool_instructions(active_tools):
     if parts:
         return "\n\n" + "\n\n".join(parts)
     return ""
+
+
+def _build_stock_reprompt_summary(stock_results):
+    """Build a concise summary of fetched stock data for auto-reprompt."""
+    lines = []
+    for sr in stock_results:
+        d = sr.get("data", {})
+        if not d or d.get("error"):
+            continue
+        line = f"{d['ticker']} ({d.get('name','')}) — ${d['price']:.2f}"
+        if d.get('changePct') is not None:
+            sign = '+' if d['changePct'] >= 0 else ''
+            line += f" ({sign}{d['changePct']:.2f}%)"
+        if d.get('verdict'): line += f" | Verdict: {d['verdict'].upper()}"
+        if d.get('health', {}).get('score') is not None:
+            line += f" | Health: {d['health']['score']}/100"
+        if d.get('pe'): line += f" | P/E: {d['pe']:.1f}"
+        if d.get('marketCap'):
+            mc = d['marketCap']
+            if mc >= 1e12: line += f" | MCap: ${mc/1e12:.2f}T"
+            elif mc >= 1e9: line += f" | MCap: ${mc/1e9:.2f}B"
+        if d.get('recommendation'): line += f" | Analyst: {d['recommendation']}"
+        perf = d.get('perf', {})
+        perf_parts = []
+        for k, label in [('1m','1M'),('ytd','YTD'),('1y','1Y')]:
+            if perf.get(k) is not None:
+                perf_parts.append(f"{label}: {'+' if perf[k]>=0 else ''}{perf[k]:.1f}%")
+        if perf_parts: line += f" | {', '.join(perf_parts)}"
+        h = d.get('health', {})
+        if h.get('profitMargin') is not None: line += f" | Margin: {h['profitMargin']*100:.1f}%"
+        if h.get('revenueGrowth') is not None: line += f" | RevGrowth: {h['revenueGrowth']*100:.1f}%"
+        if d.get('risk'): line += f" | Risk: {d['risk']}"
+        lines.append(line)
+    return "\n".join(lines) if lines else ""
 
 
 def _prefetch_stock_context(user_text):
@@ -3303,6 +3348,14 @@ def chat_message(chat_id):
     resp, research_query = extract_research_trigger(resp)
     resp, image_searches = extract_image_searches(resp)
     resp, image_generations = extract_image_generation(resp)
+    resp, stock_tickers_sync = extract_stock_tickers(resp)
+    # Fetch stock data synchronously for non-streaming path
+    stock_results_sync = []
+    if stock_tickers_sync:
+        for entry in stock_tickers_sync:
+            sdata = _fetch_stock_data_dict(entry['ticker'])
+            if sdata and not sdata.get("error"):
+                stock_results_sync.append({"ticker": entry['ticker'], "index": entry['index'], "data": sdata})
     image_results = []
     if image_searches:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3328,9 +3381,11 @@ def chat_message(chat_id):
         chat["messages"][-1]["image_results"] = image_results
     if gen_results:
         chat["messages"][-1]["generated_images"] = gen_results
-    if image_results or gen_results:
+    if stock_results_sync:
+        chat["messages"][-1]["stock_results"] = stock_results_sync
+    if image_results or gen_results or stock_results_sync:
         save_chat(chat)
-    result = {"reply": clean_wp if (image_searches or image_generations) else clean, "files": executed, "memory_added": new_facts}
+    result = {"reply": clean_wp if (image_searches or image_generations or stock_tickers_sync) else clean, "files": executed, "memory_added": new_facts}
     if code_results:
         result["code_results"] = code_results
     if research_query:
@@ -3339,6 +3394,8 @@ def chat_message(chat_id):
         result["image_results"] = image_results
     if gen_results:
         result["generated_images"] = gen_results
+    if stock_results_sync:
+        result["stock_results"] = stock_results_sync
     return jsonify(result)
 
 
@@ -3756,7 +3813,10 @@ def chat_message_stream(chat_id):
                 _stock_t = len(stock_tickers) if stock_tickers else 0
                 total_ops = len(image_generations) + (len(image_searches) if image_searches else 0) + _stock_t
                 total_success = len(gen_results) + (len(image_results) if image_searches else 0) + _stock_s
-                yield event({"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success})
+                _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
+                if stock_tickers and stock_results:
+                    _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(stock_results)
+                yield event(_gen_complete)
             # If only image searches and/or stocks (no image generations), send signal after
             elif image_searches or stock_tickers:
                 _img_ok = len(image_results) if image_searches else 0
@@ -3765,7 +3825,10 @@ def chat_message_stream(chat_id):
                 _stock_total = len(stock_tickers) if stock_tickers else 0
                 total_ops = _img_total + _stock_total
                 total_success = _img_ok + _stock_ok
-                yield event({"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success})
+                _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
+                if stock_tickers and stock_results:
+                    _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(stock_results)
+                yield event(_gen_complete)
         except Exception as e:
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
