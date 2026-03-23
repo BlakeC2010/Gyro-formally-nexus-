@@ -2458,10 +2458,16 @@ function renderFlightsLink(query){
 }
 
 // ─── Stock Cards ──────────────────────────────────
-function renderStockCard(ticker){
+function renderStockCard(ticker, prefetchedData){
   ticker=ticker.trim().toUpperCase();
   const cardId='stock_'+ticker+'_'+Date.now().toString(36);
-  setTimeout(()=>_fetchStockData(ticker,cardId),50);
+  if(prefetchedData && !prefetchedData.error){
+    // Data already fetched server-side — render immediately
+    setTimeout(()=>_fetchStockData(ticker,cardId,prefetchedData),0);
+  } else {
+    // Fallback: client-side fetch (shouldn't happen in normal flow)
+    setTimeout(()=>_fetchStockData(ticker,cardId),50);
+  }
   return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer">⚠️ <strong>Not financial advice.</strong> This is for informational and educational purposes only. AI-generated analysis may be inaccurate or outdated. Always do your own research and consult a licensed financial advisor before making investment decisions. You could lose money.</div></div>`;
 }
 function _stockHealthColor(score){
@@ -2476,13 +2482,18 @@ function _stockPerfBar(label,val){
   const sign=up?'+':'';
   return `<div class="stock-perf-item"><span class="stock-perf-label">${label}</span><div class="stock-perf-bar-wrap"><div class="stock-perf-bar ${cls}" style="width:${Math.min(Math.abs(val),50)*2}%"></div></div><span class="stock-perf-val ${cls}">${sign}${val.toFixed(1)}%</span></div>`;
 }
-async function _fetchStockData(ticker,cardId){
+async function _fetchStockData(ticker,cardId,prefetchedData){
   const el=document.getElementById(cardId);
   if(!el)return;
   try{
-    const r=await fetch('/api/stock/'+encodeURIComponent(ticker));
-    const d=await r.json();
-    if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ ${esc(d.error)}</div>`;return;}
+    let d;
+    if(prefetchedData && !prefetchedData.error){
+      d=prefetchedData;
+    } else {
+      const r=await fetch('/api/stock/'+encodeURIComponent(ticker));
+      d=await r.json();
+      if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ ${esc(d.error)}</div>`;return;}
+    }
     const up=d.change>=0;
     const arrow=up?'▲':'▼';
     const cls=up?'stock-up':'stock-down';
@@ -2881,6 +2892,7 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;MAP:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📍</span> Loading map...</div>');
   html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈️</span> Finding flights...</div>');
   html=html.replace(/&lt;&lt;&lt;STOCK:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
+  html=html.replace(/%%%STOCKBLOCK:\d+%%%/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   // Completed CODE_EXECUTE blocks — hide raw tags, show placeholder
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Executing code...</div>');
@@ -3428,6 +3440,32 @@ async function sendMessage(opts){
               }
             }
 
+            // ── Stock data — show loading placeholders for pending stocks ──
+            if(!devRawMode&&data.pending_stocks?.length){
+              for(const ps of data.pending_stocks){
+                const loaderId=`stock-loader-${ps.index}`;
+                const loaderHTML=`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${ps.index}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ps.ticker)} data...</span></div></div></div>`;
+                const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${ps.index}%%%\\s*</p>|%%%STOCKBLOCK:${ps.index}%%%`,'g');
+                const before=finalHTML;
+                finalHTML=finalHTML.replace(re,loaderHTML);
+                if(finalHTML===before){
+                  finalHTML+=loaderHTML;
+                }
+              }
+            }
+            // Handle stock results on reload/history
+            if(!devRawMode&&data.stock_results?.length){
+              for(const sr of data.stock_results){
+                const stockHTML=renderStockCard(sr.ticker, sr.data);
+                const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${sr.index}%%%\\s*</p>|%%%STOCKBLOCK:${sr.index}%%%`,'g');
+                const before=finalHTML;
+                finalHTML=finalHTML.replace(re,stockHTML);
+                if(finalHTML===before){
+                  finalHTML+=stockHTML;
+                }
+              }
+            }
+
             // ── AI-triggered deep research ──
             if(data.research_trigger&&!choiceBlocks.length){
               const rq=data.research_trigger;
@@ -3606,6 +3644,27 @@ async function sendMessage(opts){
                 loader.classList.add('img-search-fail-block');
               }
             }
+          }else if(data.type==='stock_data'){
+            // Server-side stock data arrived — replace the loading placeholder
+            if(!devRawMode&&canRender()){
+              const loader=contentEl.querySelector(`#stock-loader-${data.stock.index}`);
+              if(loader){
+                const html=renderStockCard(data.stock.ticker, data.stock.data);
+                const temp=document.createElement('div');
+                temp.innerHTML=html;
+                loader.replaceWith(temp.firstElementChild||temp);
+              }
+              area.scrollTop=area.scrollHeight;
+            }
+          }else if(data.type==='stock_failed'){
+            // Stock data fetch failed
+            if(!devRawMode&&canRender()){
+              const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
+              if(loader){
+                loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">⚠️ Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
+                loader.classList.remove('stock-loading-placeholder');
+              }
+            }
           }else if(data.type==='gen_ops_complete'){
             // All generative operations (image gen, image search) are done
             if(_genFailures.length>0){
@@ -3778,6 +3837,18 @@ function addMsg(role,text,files,extra={}){
       html=html.replace(re,genHTML);
       if(html===before){
         html+=genHTML;
+      }
+    }
+  }
+  // Render persisted stock results on reload
+  if(!devRawMode&&extra.stock_results?.length){
+    for(const sr of extra.stock_results){
+      const stockHTML=renderStockCard(sr.ticker, sr.data);
+      const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${sr.index}%%%\\s*</p>|%%%STOCKBLOCK:${sr.index}%%%`,'g');
+      const before=html;
+      html=html.replace(re,stockHTML);
+      if(html===before){
+        html+=stockHTML;
       }
     }
   }
@@ -4132,12 +4203,14 @@ function fmt(text){
     blocks.push(renderFlightsLink(query));
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
-  // Stock cards: <<<STOCK: TICKER>>>
+  // Stock cards: <<<STOCK: TICKER>>> (fallback, shouldn't appear if backend extracted)
   t=t.replace(/&lt;&lt;&lt;STOCK:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
     const ticker=raw.replace(/&amp;/g,'&').trim();
     blocks.push(renderStockCard(ticker));
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
+  // Stock placeholders from server-side extraction: %%%STOCKBLOCK:N%%% — kept as-is for done handler to replace
+  // (they'll be replaced after the done event by pending_stocks loaders or stock_data events)
   t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   t=t.replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>');
   t=t.replace(/\n/g,'<br>');

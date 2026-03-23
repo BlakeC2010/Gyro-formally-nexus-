@@ -1474,6 +1474,28 @@ def extract_image_searches(text):
     result_text = pattern.sub(_replace, text)
     return result_text, searches
 
+
+def extract_stock_tickers(text):
+    """Extract <<<STOCK: TICKER>>> tags from AI response.
+    Returns (text_with_placeholders, [{'ticker': str, 'index': int}]).
+    Tags are replaced with %%%STOCKBLOCK:index%%% placeholders."""
+    pattern = re.compile(r'(?:<<<|%%%|<<)STOCK:\s*(.+?)(?:>>>|%%%)')
+    tickers = []
+    idx = 0
+    def _replace(m):
+        nonlocal idx
+        ticker = m.group(1).strip().upper()
+        ticker = re.sub(r'[^A-Za-z0-9.\-^=]', '', ticker)
+        if ticker:
+            tickers.append({'ticker': ticker, 'index': idx})
+            placeholder = f'%%%STOCKBLOCK:{idx}%%%'
+            idx += 1
+            return placeholder
+        return m.group(0)
+    result_text = pattern.sub(_replace, text)
+    return result_text, tickers
+
+
 def search_images(query, num=8):
     """Search images with DuckDuckGo (single fast attempt) + Bing fallback."""
     # --- Attempt 1: DuckDuckGo via library (single attempt, fast timeout) ---
@@ -1552,10 +1574,11 @@ def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'(?:<<<|%%%|<<)IMAGE_SEARCH:\s*.+?(?:>>>|%%%)', '', text)
     text = re.sub(r'<<<IMAGE_GENERATE:\s*.+?>>>', '', text)
     text = re.sub(r'<<<CONTINUE>>>', '', text)
-    # Strip image placeholders so saved messages are clean (unless caller needs them)
+    # Strip image/stock placeholders so saved messages are clean (unless caller needs them)
     if not keep_img_placeholders:
         text = re.sub(r'%%%IMGBLOCK:\d+%%%', '', text)
         text = re.sub(r'%%%IMGGEN:\d+%%%', '', text)
+        text = re.sub(r'%%%STOCKBLOCK:\d+%%%', '', text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1717,6 +1740,60 @@ def _build_tool_instructions(active_tools):
     return ""
 
 
+def _prefetch_stock_context(user_text):
+    """Detect stock tickers in user message and pre-fetch data so the AI can analyze real numbers."""
+    if not user_text:
+        return ""
+    # Match $TICKER, explicit ticker mentions like "AAPL stock", or common patterns
+    ticker_pattern = re.compile(r'\$([A-Z]{1,5})\b')
+    tickers = set(ticker_pattern.findall(user_text.upper()))
+    # Also match "TICKER stock" or "TICKER shares" patterns
+    word_pattern = re.compile(r'\b([A-Z]{1,5})\s+(?:stock|shares?|price|ticker|chart)\b', re.IGNORECASE)
+    for m in word_pattern.finditer(user_text):
+        t = m.group(1).upper()
+        if len(t) >= 2:
+            tickers.add(t)
+    if not tickers or len(tickers) > 10:
+        return ""
+    # Fetch data in parallel
+    results = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _fetch(t):
+        return t, _fetch_stock_data_dict(t)
+    with ThreadPoolExecutor(max_workers=min(len(tickers), 4)) as pool:
+        futs = {pool.submit(_fetch, t): t for t in tickers}
+        for fut in as_completed(futs):
+            ticker, data = fut.result()
+            if data and not data.get("error"):
+                results.append(data)
+    if not results:
+        return ""
+    # Build a concise summary for the AI
+    lines = ["Below is real-time stock data fetched from Yahoo Finance. Use these exact numbers in your analysis."]
+    for d in results:
+        line = f"• {d['ticker']} ({d.get('name','')}) — ${d['price']:.2f}"
+        if d.get('changePct') is not None:
+            sign = '+' if d['changePct'] >= 0 else ''
+            line += f" ({sign}{d['changePct']:.2f}%)"
+        if d.get('marketCap'):
+            mc = d['marketCap']
+            if mc >= 1e12: line += f" | MCap ${mc/1e12:.2f}T"
+            elif mc >= 1e9: line += f" | MCap ${mc/1e9:.2f}B"
+        if d.get('pe'): line += f" | P/E {d['pe']:.1f}"
+        if d.get('health', {}).get('score') is not None:
+            line += f" | Health {d['health']['score']}/100"
+        if d.get('verdict'): line += f" | Verdict: {d['verdict'].upper()}"
+        if d.get('recommendation'): line += f" | Analyst: {d['recommendation']}"
+        perf = d.get('perf', {})
+        perf_parts = []
+        for k, label in [('1w','1W'),('1m','1M'),('3m','3M'),('ytd','YTD'),('1y','1Y')]:
+            if perf.get(k) is not None:
+                perf_parts.append(f"{label}: {'+' if perf[k]>=0 else ''}{perf[k]:.1f}%")
+        if perf_parts: line += f" | Perf: {', '.join(perf_parts)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def prepare_chat_turn(chat, payload):
     user_text = (payload.get("message") or "").strip()
     attached = payload.get("files", [])
@@ -1858,7 +1935,12 @@ def prepare_chat_turn(chat, payload):
         api_msgs = list(messages[-20:])
 
     cur = dict(user_msg)
-    cur["text"] = f"[WORKSPACE CONTEXT]\n{ws}\n\n[USER MESSAGE]\n{user_text}"
+    # --- Pre-fetch stock data for tickers mentioned in user message ---
+    stock_context = _prefetch_stock_context(user_text)
+    cur["text"] = f"[WORKSPACE CONTEXT]\n{ws}\n\n"
+    if stock_context:
+        cur["text"] += f"[LIVE STOCK DATA]\n{stock_context}\n\n"
+    cur["text"] += f"[USER MESSAGE]\n{user_text}"
     if file_texts:
         cur["text"] += "\n\n" + "\n\n".join(file_texts)
     api_msgs.append(cur)
@@ -3260,19 +3342,17 @@ def chat_message(chat_id):
     return jsonify(result)
 
 
-@app.route("/api/stock/<ticker>")
-@require_auth_or_guest
-def stock_data(ticker):
-    """Fetch comprehensive stock data for a ticker using yfinance."""
+def _fetch_stock_data_dict(ticker):
+    """Fetch comprehensive stock data for a ticker. Returns dict or {'error': str}."""
     ticker = re.sub(r'[^A-Za-z0-9.\-^=]', '', ticker).upper()
     if not ticker or len(ticker) > 12:
-        return jsonify({"error": "Invalid ticker"}), 400
+        return {"error": "Invalid ticker"}
     try:
         import yfinance as yf
         tk = yf.Ticker(ticker)
         info = tk.info or {}
         if not info.get("regularMarketPrice") and not info.get("currentPrice"):
-            return jsonify({"error": f"No data found for {ticker}"}), 404
+            return {"error": f"No data found for {ticker}"}
         price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
         prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose") or price
         change = price - prev_close if price and prev_close else 0
@@ -3333,33 +3413,26 @@ def stock_data(ticker):
         health["bookValue"] = info.get("bookValue")
         health["priceToBook"] = info.get("priceToBook")
 
-        # Compute a simple health score (0–100)
+        # Compute a simple health score (0-100)
         score_parts = []
-        # Profitability
         pm = health.get("profitMargin")
         if pm is not None:
-            score_parts.append(min(max(pm * 200, 0), 100))  # 50%+ margin = 100
-        # Revenue growth
+            score_parts.append(min(max(pm * 200, 0), 100))
         rg = health.get("revenueGrowth")
         if rg is not None:
-            score_parts.append(min(max((rg + 0.1) * 200, 0), 100))  # >40% growth = 100
-        # Debt safety
+            score_parts.append(min(max((rg + 0.1) * 200, 0), 100))
         dte = health.get("debtToEquity")
         if dte is not None:
-            score_parts.append(max(100 - dte * 0.5, 0))  # Low debt = high score
-        # Current ratio (liquidity)
+            score_parts.append(max(100 - dte * 0.5, 0))
         cr = health.get("currentRatio")
         if cr is not None:
-            score_parts.append(min(cr * 40, 100))  # 2.5+ = 100
-        # ROE
+            score_parts.append(min(cr * 40, 100))
         roe = health.get("returnOnEquity")
         if roe is not None:
-            score_parts.append(min(max(roe * 300, 0), 100))  # 33%+ = 100
-        # P/E reasonableness (lower is better, but negative is bad)
+            score_parts.append(min(max(roe * 300, 0), 100))
         pe_val = info.get("trailingPE")
         if pe_val and pe_val > 0:
-            score_parts.append(max(100 - pe_val * 2, 0))  # P/E < 15 = 70+
-        # Analyst sentiment
+            score_parts.append(max(100 - pe_val * 2, 0))
         rec = info.get("recommendationKey")
         rec_scores = {"strong_buy": 95, "buy": 80, "hold": 50, "sell": 20, "strong_sell": 5}
         if rec and rec in rec_scores:
@@ -3377,11 +3450,10 @@ def stock_data(ticker):
                 verdict = "hold"
             else:
                 verdict = "sell"
-            # Blend with analyst recommendation if available
             if rec in _rec_verdict:
                 av = _rec_verdict[rec]
                 if av != verdict:
-                    verdict = "hold"  # conflicting signals → hold
+                    verdict = "hold"
         elif rec in _rec_verdict:
             verdict = _rec_verdict[rec]
         else:
@@ -3421,7 +3493,7 @@ def stock_data(ticker):
         except Exception:
             pass
 
-        data = {
+        return {
             "ticker": ticker,
             "name": info.get("shortName") or info.get("longName") or ticker,
             "price": round(price, 2),
@@ -3456,9 +3528,18 @@ def stock_data(ticker):
             "earningsDate": earnings_date,
             "verdict": verdict,
         }
-        return jsonify(data)
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch stock data: {str(e)[:200]}"}), 500
+        return {"error": f"Failed to fetch stock data: {str(e)[:200]}"}
+
+
+@app.route("/api/stock/<ticker>")
+@require_auth_or_guest
+def stock_data(ticker):
+    """Fetch comprehensive stock data for a ticker using yfinance."""
+    data = _fetch_stock_data_dict(ticker)
+    if data.get("error"):
+        return jsonify(data), 404 if "No data" in data.get("error", "") else 400
+    return jsonify(data)
 
 
 @app.route("/api/detect-tools", methods=["POST"])
@@ -3549,15 +3630,17 @@ def chat_message_stream(chat_id):
             raw_text, image_searches = extract_image_searches(raw_text)
             # Extract image generation requests
             raw_text, image_generations = extract_image_generation(raw_text)
+            # Extract stock ticker tags — placeholders will be replaced on the client
+            raw_text, stock_tickers = extract_stock_tickers(raw_text)
             # Detect <<<CONTINUE>>> BEFORE clean_response strips it
             should_continue = '<<<CONTINUE>>>' in raw_text
             # BLOCK continue if there are pending generative operations (images, image gen)
             # The frontend will decide whether to continue AFTER all ops complete
-            has_pending_ops = bool(image_searches or image_generations)
+            has_pending_ops = bool(image_searches or image_generations or stock_tickers)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
             done_payload = {
                 "type": "done",
-                "reply": clean_wp if (image_searches or image_generations) else clean,
+                "reply": clean_wp if (image_searches or image_generations or stock_tickers) else clean,
                 "files": executed,
                 "memory_added": new_facts,
                 "title": chat.get("title", "New Chat"),
@@ -3591,6 +3674,8 @@ def chat_message_stream(chat_id):
             # Tell the client which image generations are pending
             if image_generations:
                 done_payload["pending_generations"] = [{"prompt": g["prompt"], "index": g["index"], "aspect_ratio": g["aspect_ratio"]} for g in image_generations]
+            if stock_tickers:
+                done_payload["pending_stocks"] = [{"ticker": s["ticker"], "index": s["index"]} for s in stock_tickers]
             yield event(done_payload)
 
             # Now fetch images AFTER the done event so the text renders immediately
@@ -3616,6 +3701,27 @@ def chat_message_stream(chat_id):
                 # Persist image results in the saved message so they survive reload
                 if image_results:
                     chat["messages"][-1]["image_results"] = image_results
+                    save_chat(chat)
+
+            # Fetch stock data AFTER done event so text renders immediately with loaders
+            if stock_tickers:
+                stock_results = []
+                from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed_stock
+                def _stock_fetch(entry):
+                    data = _fetch_stock_data_dict(entry['ticker'])
+                    return entry, data
+                with ThreadPoolExecutor(max_workers=min(len(stock_tickers), 4)) as pool:
+                    futs = {pool.submit(_stock_fetch, entry): entry for entry in stock_tickers}
+                    for fut in _as_completed_stock(futs):
+                        entry, data = fut.result()
+                        if data and not data.get("error"):
+                            result = {"ticker": entry['ticker'], "index": entry['index'], "data": data}
+                            stock_results.append(result)
+                            yield event({"type": "stock_data", "stock": result})
+                        else:
+                            yield event({"type": "stock_failed", "ticker": entry['ticker'], "index": entry['index'], "error": data.get("error", "Unknown error")})
+                if stock_results:
+                    chat["messages"][-1]["stock_results"] = stock_results
                     save_chat(chat)
 
             # Generate images AFTER the done event so text renders immediately
@@ -3646,12 +3752,20 @@ def chat_message_stream(chat_id):
                     chat["messages"][-1]["generated_images"] = gen_results
                     save_chat(chat)
                 # Signal that all generation operations are complete
-                total_ops = len(image_generations) + len(image_searches) if image_searches else len(image_generations)
-                total_success = len(gen_results) + (len(image_results) if image_searches else 0)
+                _stock_s = len(stock_results) if stock_tickers else 0
+                _stock_t = len(stock_tickers) if stock_tickers else 0
+                total_ops = len(image_generations) + (len(image_searches) if image_searches else 0) + _stock_t
+                total_success = len(gen_results) + (len(image_results) if image_searches else 0) + _stock_s
                 yield event({"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success})
-            # If only image searches (no image generations), send signal after searches
-            elif image_searches:
-                yield event({"type": "gen_ops_complete", "success": len(image_results) > 0, "total": len(image_searches), "succeeded": len(image_results), "failed": len(image_searches) - len(image_results)})
+            # If only image searches and/or stocks (no image generations), send signal after
+            elif image_searches or stock_tickers:
+                _img_ok = len(image_results) if image_searches else 0
+                _img_total = len(image_searches) if image_searches else 0
+                _stock_ok = len(stock_results) if stock_tickers else 0
+                _stock_total = len(stock_tickers) if stock_tickers else 0
+                total_ops = _img_total + _stock_total
+                total_success = _img_ok + _stock_ok
+                yield event({"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success})
         except Exception as e:
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
