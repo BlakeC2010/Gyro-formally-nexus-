@@ -1692,7 +1692,8 @@ def prepare_chat_turn(chat, payload):
         thinking = _detect_complex_query(user_text)
 
     # --- Enable web search if search or research tools are active ---
-    if not web_search and ("search" in active_tools or "research" in active_tools):
+    # Also enable by default for all queries so AI can access current info
+    if not web_search:
         web_search = True
 
     # --- YouTube URL detection ---
@@ -3134,14 +3135,8 @@ def chat_message(chat_id):
         for entry in image_generations:
             img_b64, result_or_err = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
             if img_b64:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_prompt = re.sub(r'[^\w\s-]', '', entry['prompt'][:30]).strip().replace(' ', '_')
-                ext = 'png' if 'png' in result_or_err else 'jpeg'
-                fname = f"generated_{safe_prompt}_{ts}.{ext}"
-                gen_dir = WORKSPACE / "static" / "generated"
-                gen_dir.mkdir(parents=True, exist_ok=True)
-                (gen_dir / fname).write_bytes(base64.b64decode(img_b64))
-                gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": f"/static/generated/{fname}", "mime": result_or_err})
+                data_uri = f"data:{result_or_err};base64,{img_b64}"
+                gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": result_or_err})
     clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, resp, original_raw=original_resp)
     if image_results:
         chat["messages"][-1]["image_results"] = image_results
@@ -3314,18 +3309,11 @@ def chat_message_stream(chat_id):
                     for fut in _as_completed(futs):
                         entry, img_b64, result = fut.result()
                         if img_b64:
-                            # Save to workspace file
-                            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                            safe_prompt = re.sub(r'[^\w\s-]', '', entry['prompt'][:30]).strip().replace(' ', '_')
-                            ext = 'png' if 'png' in result else 'jpeg'
-                            fname = f"generated_{safe_prompt}_{ts}.{ext}"
-                            gen_dir = WORKSPACE / "static" / "generated"
-                            gen_dir.mkdir(parents=True, exist_ok=True)
-                            (gen_dir / fname).write_bytes(base64.b64decode(img_b64))
+                            data_uri = f"data:{result};base64,{img_b64}"
                             gen_result = {
                                 "prompt": entry['prompt'],
                                 "index": entry['index'],
-                                "url": f"/static/generated/{fname}",
+                                "url": data_uri,
                                 "mime": result,
                             }
                             gen_results.append(gen_result)

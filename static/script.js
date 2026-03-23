@@ -1206,8 +1206,12 @@ function toggleSB(){
 /* Download generated image as PNG */
 async function downloadGenImage(url,prompt){
   try{
-    const resp=await fetch(url);
-    const blob=await resp.blob();
+    let blob;
+    if(url.startsWith('data:')){
+      const resp=await fetch(url);blob=await resp.blob();
+    }else{
+      const resp=await fetch(url);blob=await resp.blob();
+    }
     const name=(prompt||'generated_image').replace(/[^a-zA-Z0-9 ]/g,'').trim().replace(/\s+/g,'_').slice(0,60)||'generated_image';
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
@@ -1215,6 +1219,14 @@ async function downloadGenImage(url,prompt){
     document.body.appendChild(a);a.click();document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
   }catch(e){showToast('Download failed','error');}
+}
+/* Download generated image from closest container */
+function downloadGenFromEl(btn){
+  const wrap=btn.closest('.img-gen-result');
+  if(!wrap)return;
+  const img=wrap.querySelector('.img-gen-output');
+  const prompt=wrap.querySelector('.img-gen-prompt')?.textContent||'generated_image';
+  if(img&&img.src)downloadGenImage(img.src,prompt);
 }
 
 /* Sidebar — close on outside click (mobile) */
@@ -2330,13 +2342,15 @@ function sendQ(t){document.getElementById('msgInput').value=t;sendMessage()}
 
 function renderImageGrid(query, images){
   if(!images||!images.length)return'';
-  const cards=images.map(img=>{
+  const cards=images.map((img,i)=>{
     const safeUrl=esc(img.url||'');
     const safeThumb=esc(img.thumbnail||img.url||'');
     const safeTitle=esc(img.title||'');
-    return `<div class="img-grid-card" onclick="openImageLightbox('${safeUrl}','${safeTitle}')">`
+    const safeCtx=img.context_url||'';
+    const srcLink=safeCtx?`<a class="img-src-link" href="${esc(safeCtx)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="${safeTitle}">${safeTitle}</a>`:`<span>${safeTitle}</span>`;
+    return `<div class="img-grid-card" onclick="openImageLightbox('${safeUrl}','${safeTitle}')" data-img-url="${safeUrl}" data-img-title="${safeTitle}">`
       +`<img src="${safeThumb}" alt="${safeTitle}" loading="lazy" onerror="this.parentElement.style.display='none'">`
-      +`<div class="img-grid-label">${safeTitle}</div>`
+      +`<div class="img-grid-label">${srcLink}</div>`
       +`</div>`;
   }).join('');
   const countCls=images.length===1?'img-grid-single':'img-grid-pair';
@@ -2348,14 +2362,15 @@ function renderImageGrid(query, images){
 
 function renderImageCarousel(query, images){
   if(!images||!images.length)return'';
-  const cards=images.map(img=>{
+  const cards=images.map((img,i)=>{
     const safeUrl=esc(img.url||'');
     const safeThumb=esc(img.thumbnail||img.url||'');
     const safeTitle=esc(img.title||'');
-    const safeCtx=esc(img.context_url||'');
-    return `<div class="img-car-card" onclick="openImageLightbox('${safeUrl}','${safeTitle}')">`
+    const safeCtx=img.context_url||'';
+    const srcLink=safeCtx?`<a class="img-src-link" href="${esc(safeCtx)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="${safeTitle}">${safeTitle}</a>`:`<span>${safeTitle}</span>`;
+    return `<div class="img-car-card" onclick="openImageLightbox('${safeUrl}','${safeTitle}')" data-img-url="${safeUrl}" data-img-title="${safeTitle}">`
       +`<img src="${safeThumb}" alt="${safeTitle}" loading="lazy" onerror="this.parentElement.style.display='none'">`
-      +`<div class="img-car-label">${safeTitle}</div>`
+      +`<div class="img-car-label">${srcLink}</div>`
       +`</div>`;
   }).join('');
   return `<div class="img-car-wrap">`
@@ -2366,6 +2381,7 @@ function renderImageCarousel(query, images){
     +`<button class="img-car-arrow img-car-right" onclick="event.stopPropagation();this.previousElementSibling.scrollBy({left:260,behavior:'smooth'})">&rsaquo;</button>`
     +`</div>`
     +`</div>`;
+}
 }
 
 function renderImageBlock(ir){
@@ -3086,8 +3102,8 @@ async function sendMessage(opts){
             // Handle generated images on reload/history
             if(!devRawMode&&data.generated_images?.length){
               for(const gi of data.generated_images){
-                const giUrl=esc(gi.url);const giPrompt=esc(gi.prompt);
-                const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenImage('${giUrl}','${giPrompt}')" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${giUrl}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenImage('${giUrl}','${giPrompt}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
+                const giPrompt=esc(gi.prompt);
+                const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
                 const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
                 const before=finalHTML;
                 finalHTML=finalHTML.replace(re,genHTML);
@@ -3218,20 +3234,19 @@ async function sendMessage(opts){
             // AI-generated image arrived — replace loader with the actual image
             if(!devRawMode&&canRender()){
               const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
-              const safeUrl=esc(data.image.url);
               const safePrompt=esc(data.image.prompt);
               const html=`<div class="img-gen-result">`
                 +`<div class="img-gen-header">`
                 +`<span class="img-gen-icon">🎨</span>`
                 +`<span class="img-gen-title">Generated Image</span>`
-                +`<button class="img-gen-dl" onclick="downloadGenImage('${safeUrl}','${safePrompt}')" title="Download PNG">`
+                +`<button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG">`
                 +`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
                 +`</button>`
                 +`</div>`
-                +`<img src="${safeUrl}" alt="${safePrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.parentElement.innerHTML='<div class=\\'img-search-fail\\'>Image failed to load</div>'">`
+                +`<img src="${data.image.url}" alt="${safePrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')">`
                 +`<div class="img-gen-footer">`
                 +`<div class="img-gen-prompt">${safePrompt}</div>`
-                +`<button class="img-gen-dl-full" onclick="downloadGenImage('${safeUrl}','${safePrompt}')">`
+                +`<button class="img-gen-dl-full" onclick="downloadGenFromEl(this)">`
                 +`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
                 +` Download PNG</button>`
                 +`</div>`
@@ -3767,26 +3782,122 @@ function fmt(text){
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
+let _lbImages=[],_lbIndex=0;
+function _collectLightboxImages(){
+  _lbImages=[];
+  document.querySelectorAll('.img-grid-card[data-img-url], .img-car-card[data-img-url]').forEach(el=>{
+    const url=el.getAttribute('data-img-url');
+    const title=el.getAttribute('data-img-title')||'';
+    if(url)_lbImages.push({url,title});
+  });
+}
 function openImageLightbox(src,alt){
+  _collectLightboxImages();
+  _lbIndex=_lbImages.findIndex(im=>im.url===src);
+  if(_lbIndex<0){_lbImages=[{url:src,title:alt||''}];_lbIndex=0;}
   let lb=document.getElementById('imgLightbox');
   if(!lb){
     lb=document.createElement('div');
     lb.id='imgLightbox';
     lb.className='img-lightbox';
     lb.onclick=e=>{if(e.target===lb)closeImageLightbox()};
-    lb.innerHTML='<div class="img-lb-close" onclick="closeImageLightbox()">\u2715</div><img class="img-lb-img">';
+    lb.innerHTML=`<div class="img-lb-close" onclick="closeImageLightbox()">\u2715</div>`
+      +`<button class="img-lb-nav img-lb-prev" onclick="lbNav(-1)">\u2039</button>`
+      +`<img class="img-lb-img">`
+      +`<button class="img-lb-nav img-lb-next" onclick="lbNav(1)">\u203a</button>`
+      +`<div class="img-lb-actions">`
+      +`<button class="img-lb-btn" onclick="lbAskAI()" title="Ask AI about this image">\ud83d\udcac Ask AI</button>`
+      +`<span class="img-lb-counter" id="lbCounter"></span>`
+      +`</div>`;
     document.body.appendChild(lb);
   }
-  const img=lb.querySelector('img');
-  img.src=src;
-  img.alt=alt||'';
+  _updateLightbox(lb);
   lb.classList.add('open');
   document.body.style.overflow='hidden';
+}
+function _updateLightbox(lb){
+  if(!lb)lb=document.getElementById('imgLightbox');
+  if(!lb)return;
+  const cur=_lbImages[_lbIndex];
+  if(!cur)return;
+  lb.querySelector('.img-lb-img').src=cur.url;
+  lb.querySelector('.img-lb-img').alt=cur.title;
+  const counter=lb.querySelector('#lbCounter');
+  if(counter)counter.textContent=_lbImages.length>1?`${_lbIndex+1} / ${_lbImages.length}`:'';
+  const prev=lb.querySelector('.img-lb-prev');
+  const next=lb.querySelector('.img-lb-next');
+  if(prev)prev.style.display=_lbImages.length>1?'':'none';
+  if(next)next.style.display=_lbImages.length>1?'':'none';
+}
+function lbNav(dir){
+  _lbIndex=(_lbIndex+dir+_lbImages.length)%_lbImages.length;
+  _updateLightbox();
+}
+function lbAskAI(){
+  const cur=_lbImages[_lbIndex];
+  if(!cur)return;
+  closeImageLightbox();
+  const inp=document.getElementById('msgInput');
+  if(inp){
+    inp.value=`[Referring to this image: ${cur.title}]\n${cur.url}\n\nTell me more about this image and what it shows.`;
+    inp.focus();
+    autoResize(inp);
+  }
 }
 function closeImageLightbox(){
   const lb=document.getElementById('imgLightbox');
   if(lb)lb.classList.remove('open');
   document.body.style.overflow='';
+}
+
+/* Text selection reply tooltip */
+(function(){
+  let _selTooltip=null;
+  function getOrCreateTooltip(){
+    if(!_selTooltip){
+      _selTooltip=document.createElement('div');
+      _selTooltip.className='sel-tooltip';
+      _selTooltip.innerHTML=`<button class="sel-tooltip-btn" onmousedown="replyToSelection(event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg> Reply</button>`;
+      document.body.appendChild(_selTooltip);
+    }
+    return _selTooltip;
+  }
+  document.addEventListener('mouseup',function(e){
+    setTimeout(()=>{
+      const sel=window.getSelection();
+      const text=(sel&&sel.toString()||'').trim();
+      const tip=getOrCreateTooltip();
+      if(!text||text.length<3){tip.classList.remove('visible');return;}
+      // Only show if selection is within a message
+      const anchor=sel.anchorNode?.parentElement?.closest?.('.msg');
+      if(!anchor){tip.classList.remove('visible');return;}
+      const range=sel.getRangeAt(0);
+      const rect=range.getBoundingClientRect();
+      tip.style.top=(rect.top+window.scrollY-40)+'px';
+      tip.style.left=(rect.left+rect.width/2)+'px';
+      tip.classList.add('visible');
+    },10);
+  });
+  document.addEventListener('mousedown',function(e){
+    if(_selTooltip&&!_selTooltip.contains(e.target)){
+      _selTooltip.classList.remove('visible');
+    }
+  });
+})();
+function replyToSelection(e){
+  e.preventDefault();
+  const sel=window.getSelection();
+  const text=(sel&&sel.toString()||'').trim();
+  if(!text)return;
+  const tip=document.querySelector('.sel-tooltip');
+  if(tip)tip.classList.remove('visible');
+  const inp=document.getElementById('msgInput');
+  if(inp){
+    inp.value=`> ${text.replace(/\n/g,'\\n> ')}\n\n`;
+    inp.focus();
+    autoResize(inp);
+  }
+  sel.removeAllRanges();
 }
 
 function inferMindMapTitle(source,fallbackIndex=1){
