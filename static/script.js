@@ -2454,6 +2454,50 @@ function renderFlightsLink(query){
   return `<div class="flights-link-wrap"><a href="https://www.google.com/travel/flights?q=${q}" target="_blank" rel="noopener" class="flights-link-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5 5.2 3 -2 2-1.8-.6c-.4-.1-.8 0-1 .3l-.3.3 2.5 1.5 1.5 2.5.3-.3c.3-.3.4-.7.3-1l-.6-1.8 2-2 3 5.2.5-.3c.4-.2.6-.6.5-1.1z"/></svg> Search flights: ${esc(query)}</a></div>`;
 }
 
+// ─── Stock Cards ──────────────────────────────────
+function renderStockCard(ticker){
+  ticker=ticker.trim().toUpperCase();
+  const cardId='stock_'+ticker+'_'+Date.now().toString(36);
+  // Start with a loading skeleton and fetch real data
+  setTimeout(()=>_fetchStockData(ticker,cardId),50);
+  return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer">⚠️ Not financial advice. For informational purposes only. Always do your own research and consult a licensed financial advisor before making investment decisions.</div></div>`;
+}
+async function _fetchStockData(ticker,cardId){
+  const el=document.getElementById(cardId);
+  if(!el)return;
+  try{
+    const r=await fetch('/api/stock/'+encodeURIComponent(ticker));
+    const d=await r.json();
+    if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ ${esc(d.error)}</div>`;return;}
+    const up=d.change>=0;
+    const arrow=up?'▲':'▼';
+    const cls=up?'stock-up':'stock-down';
+    const fmtNum=(n)=>{if(n==null)return'—';if(n>=1e12)return(n/1e12).toFixed(2)+'T';if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString();};
+    const fmtPct=(n)=>n!=null?(n*100).toFixed(2)+'%':'—';
+    const metrics=[
+      {label:'Open',value:d.open!=null?'$'+d.open.toFixed(2):'—'},
+      {label:'Day Range',value:(d.dayLow!=null&&d.dayHigh!=null)?'$'+d.dayLow.toFixed(2)+' – $'+d.dayHigh.toFixed(2):'—'},
+      {label:'52W Range',value:(d.low52!=null&&d.high52!=null)?'$'+d.low52.toFixed(2)+' – $'+d.high52.toFixed(2):'—'},
+      {label:'Volume',value:fmtNum(d.volume)},
+      {label:'Mkt Cap',value:d.marketCap?'$'+fmtNum(d.marketCap):'—'},
+      {label:'P/E',value:d.pe!=null?d.pe.toFixed(2):'—'},
+      {label:'EPS',value:d.eps!=null?'$'+d.eps.toFixed(2):'—'},
+      {label:'Dividend',value:d.dividend?fmtPct(d.dividend):'—'},
+      {label:'Beta',value:d.beta!=null?d.beta.toFixed(2):'—'},
+      {label:'Analyst Target',value:d.targetPrice?'$'+d.targetPrice.toFixed(2):'—'},
+    ];
+    let recBadge='';
+    if(d.recommendation){
+      const recMap={strong_buy:'Strong Buy',buy:'Buy',hold:'Hold',sell:'Sell',strong_sell:'Strong Sell'};
+      const recCls={strong_buy:'stock-rec-buy',buy:'stock-rec-buy',hold:'stock-rec-hold',sell:'stock-rec-sell',strong_sell:'stock-rec-sell'};
+      recBadge=`<span class="stock-rec-badge ${recCls[d.recommendation]||'stock-rec-hold'}">${recMap[d.recommendation]||d.recommendation}</span>`;
+    }
+    el.querySelector('.stock-card').innerHTML=`<div class="stock-card-header"><div class="stock-card-title"><span class="stock-ticker">${esc(d.ticker)}</span><span class="stock-name">${esc(d.name)}</span>${recBadge}</div><div class="stock-card-price"><span class="stock-price">$${d.price.toFixed(2)}</span><span class="stock-change ${cls}">${arrow} ${Math.abs(d.change).toFixed(2)} (${Math.abs(d.changePct).toFixed(2)}%)</span></div></div><div class="stock-card-metrics">${metrics.map(m=>`<div class="stock-metric"><span class="stock-metric-label">${m.label}</span><span class="stock-metric-value">${m.value}</span></div>`).join('')}</div><div class="stock-card-footer"><a href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener" class="stock-yahoo-link">View on Yahoo Finance ↗</a>${d.sector?`<span class="stock-sector">${esc(d.sector)}${d.industry?' · '+esc(d.industry):''}</span>`:''}</div>`;
+  }catch(e){
+    if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ Failed to load stock data for ${esc(ticker)}</div>`;
+  }
+}
+
 function renderImageGrid(query, images){
   if(!images||!images.length)return'';
   const cards=images.map((img,i)=>{
@@ -2721,6 +2765,7 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;IMAGE_GENERATE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🎨</span> Generating image...</div>');
   html=html.replace(/&lt;&lt;&lt;MAP:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📍</span> Loading map...</div>');
   html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈️</span> Finding flights...</div>');
+  html=html.replace(/&lt;&lt;&lt;STOCK:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   // Completed CODE_EXECUTE blocks — hide raw tags, show placeholder
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Executing code...</div>');
@@ -3970,6 +4015,12 @@ function fmt(text){
   t=t.replace(/&lt;&lt;&lt;FLIGHTS:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
     const query=raw.replace(/&amp;/g,'&').trim();
     blocks.push(renderFlightsLink(query));
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
+  // Stock cards: <<<STOCK: TICKER>>>
+  t=t.replace(/&lt;&lt;&lt;STOCK:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
+    const ticker=raw.replace(/&amp;/g,'&').trim();
+    blocks.push(renderStockCard(ticker));
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');

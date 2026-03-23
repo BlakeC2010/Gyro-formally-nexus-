@@ -1088,6 +1088,32 @@ The map will be embedded inline with a link to open it in Google Maps. Use this 
 
 This will render a styled link to Google Flights with the search pre-filled. Use this when the user asks about flights, vacations, or travel planning.
 
+15. STOCK & INVESTMENT RESEARCH — you can embed live stock data cards in your response:
+<<<STOCK: TICKER>>>
+
+Examples:
+<<<STOCK: AAPL>>>
+<<<STOCK: TSLA>>>
+<<<STOCK: MSFT>>>
+
+The card will automatically display real-time price, change, key metrics (P/E, EPS, market cap, 52-week range, volume, dividend yield, beta), analyst target price, and a link to Yahoo Finance. Use this whenever the user asks about a stock, company valuation, or investment research.
+
+INVESTMENT ANALYSIS FRAMEWORK:
+When the user asks for a buy/hold/sell recommendation or investment analysis:
+1. ALWAYS embed the stock card first: <<<STOCK: TICKER>>>
+2. Use web search (Google Grounding) to find RECENT news, earnings reports, and analyst updates
+3. Provide analysis covering:
+   - Fundamental Analysis: P/E ratio, EPS growth, revenue trends, debt levels, profit margins
+   - Technical Signals: 52-week range positioning, volume trends, price momentum
+   - Market Sentiment: Recent news, analyst ratings, institutional activity
+   - Risk Factors: Industry headwinds, competition, regulatory concerns, macro trends
+4. Give a clear BUY, HOLD, or SELL assessment with reasoning
+5. MANDATORY DISCLAIMER — you MUST include this disclaimer with EVERY investment opinion or recommendation:
+
+> ⚠️ **Disclaimer:** This analysis is for informational and educational purposes only and does NOT constitute financial advice, investment advice, or a recommendation to buy or sell any security. I am an AI assistant, not a licensed financial advisor, broker, or fiduciary. Stock markets are volatile and past performance does not guarantee future results. You could lose some or all of your investment. Always conduct your own due diligence and consult with a qualified, licensed financial professional before making any investment decisions. Never invest money you cannot afford to lose.
+
+This disclaimer is NON-NEGOTIABLE. Include it every single time you discuss specific stocks, give price targets, or make buy/hold/sell assessments. No exceptions.
+
 LOCATION-AWARE RESPONSES:
 When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
 - Recommend nearby restaurants, cafes, attractions with <<<MAP>>> embeds
@@ -3222,6 +3248,54 @@ def chat_message(chat_id):
     if gen_results:
         result["generated_images"] = gen_results
     return jsonify(result)
+
+
+@app.route("/api/stock/<ticker>")
+@require_auth_or_guest
+def stock_data(ticker):
+    """Fetch real-time stock data for a ticker using yfinance."""
+    ticker = re.sub(r'[^A-Za-z0-9.\-^=]', '', ticker).upper()
+    if not ticker or len(ticker) > 12:
+        return jsonify({"error": "Invalid ticker"}), 400
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+        info = tk.info or {}
+        if not info.get("regularMarketPrice") and not info.get("currentPrice"):
+            return jsonify({"error": f"No data found for {ticker}"}), 404
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
+        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose") or price
+        change = price - prev_close if price and prev_close else 0
+        change_pct = (change / prev_close * 100) if prev_close else 0
+        data = {
+            "ticker": ticker,
+            "name": info.get("shortName") or info.get("longName") or ticker,
+            "price": round(price, 2),
+            "change": round(change, 2),
+            "changePct": round(change_pct, 2),
+            "currency": info.get("currency", "USD"),
+            "marketCap": info.get("marketCap"),
+            "volume": info.get("volume") or info.get("regularMarketVolume"),
+            "avgVolume": info.get("averageVolume"),
+            "pe": info.get("trailingPE"),
+            "forwardPe": info.get("forwardPE"),
+            "eps": info.get("trailingEps"),
+            "dividend": info.get("dividendYield"),
+            "high52": info.get("fiftyTwoWeekHigh"),
+            "low52": info.get("fiftyTwoWeekLow"),
+            "dayHigh": info.get("dayHigh"),
+            "dayLow": info.get("dayLow"),
+            "open": info.get("open") or info.get("regularMarketOpen"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "exchange": info.get("exchange"),
+            "beta": info.get("beta"),
+            "targetPrice": info.get("targetMeanPrice"),
+            "recommendation": info.get("recommendationKey"),
+        }
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch stock data: {str(e)[:200]}"}), 500
 
 
 @app.route("/api/detect-tools", methods=["POST"])
