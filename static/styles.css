@@ -2229,6 +2229,11 @@ button:focus:not(:focus-visible){outline:none}
 .stock-disclaimer{padding:10px 18px;font-size:10px;color:var(--text-secondary);background:var(--bg-deep);border:1px solid var(--border);border-top:0;border-radius:0 0 var(--r-md) var(--r-md);line-height:1.5}
 /* Thinking level hint in plus menu */
 .pi-hint{display:block;font-size:9px;color:var(--text-muted);margin-top:2px;opacity:.7}
+/* Thinking level picker */
+.think-levels{display:flex;gap:4px;width:100%;margin-top:6px;padding-left:30px}
+.think-lvl{flex:1;padding:4px 0;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-deep);color:var(--text-secondary);font-size:10px;font-weight:600;cursor:pointer;transition:all .15s}
+.think-lvl:hover{border-color:var(--accent-border);color:var(--text-primary);background:var(--bg-hover)}
+.think-lvl.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 
 /* ══════════════════════════════════════════════════
    AI IMAGE GENERATION

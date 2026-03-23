@@ -1815,14 +1815,14 @@ function refreshModeMenuUI(){
   const isOn=thinkingLevel&&thinkingLevel!=='off';
   if(thinkItem)thinkItem.classList.toggle('active',isOn);
   if(thinkBadge)thinkBadge.textContent=isOn?thinkingLevel.toUpperCase():'OFF';
+  document.querySelectorAll('.think-lvl').forEach(b=>b.classList.toggle('active',b.dataset.lvl===thinkingLevel));
 }
 
-function toggleThinking(force){
-  const levels=['off','minimal','low','medium','high'];
-  if(typeof force==='string'){thinkingLevel=force;}
-  else{const i=levels.indexOf(thinkingLevel);thinkingLevel=levels[(i+1)%levels.length];}
+function setThinkingLevel(lvl){
+  thinkingLevel=lvl;
   refreshModeMenuUI();
-  showToast(`Thinking: ${thinkingLevel==='off'?'off':thinkingLevel}`,thinkingLevel==='off'?'info':'success');
+  showToast(`Thinking: ${lvl==='off'?'off':lvl}`,lvl==='off'?'info':'success');
+  closePlusMenu();
 }
 
 document.addEventListener('click',e=>{
