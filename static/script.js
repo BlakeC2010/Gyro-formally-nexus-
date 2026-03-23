@@ -2756,6 +2756,11 @@ function fmtLive(raw){
   // Links — absolute and relative /api/ URLs
   html=html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   html=html.replace(/\[([^\]]+)\]\((\/api\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
+  // Workspace file links: [text](filename.ext) — convert to download URLs
+  html=html.replace(/\[([^\]]+)\]\((?!https?:\/\/)(?!\/api\/)(?!#)(?!mailto:)([^)]+\.\w+)\)/g,(_,label,path)=>{
+    const dlUrl='/api/files/download?path='+encodeURIComponent(path.replace(/&amp;/g,'&'));
+    return `<a href="${dlUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${label}</a>`;
+  });
   // Bare URLs — auto-link any https?:// not already inside an <a> tag
   html=html.replace(/(?<!href=")(?<!src=")(?<!">)(https?:\/\/[^\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Headings (### at start of line)
@@ -3332,7 +3337,7 @@ async function sendMessage(opts){
               const summary=data.code_execution_summary||'Code execution completed.';
               let repromptMsg;
               if(data.code_all_success){
-                repromptMsg=`[SYSTEM] Code execution completed. Results:\n${summary}\n\nPresent the created files to the user. Provide download links using the file paths above. Do NOT regenerate the code — just describe what was created and link to the files.`;
+                repromptMsg=`[SYSTEM] Code execution completed. Results:\n${summary}\n\nPresent the created files to the user. Link to files using [text](/api/files/download?path=FILENAME) format. Do NOT regenerate the code — just describe what was created and provide the download link(s).`;
               }else{
                 repromptMsg=`[SYSTEM] Code execution FAILED. Results:\n${summary}\n\nThe code you wrote failed to execute. Do NOT claim it was successful. Analyze the error, explain what went wrong to the user, and provide a corrected version of the code using <<<CODE_EXECUTE: python>>>...<<<END_CODE>>> tags.`;
               }
@@ -3944,6 +3949,11 @@ function fmt(text){
   // Markdown links: [text](url) — supports both absolute and relative URLs
   t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   t=t.replace(/\[([^\]]+)\]\((\/api\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
+  // Workspace file links: [text](filename.ext) or [text](path/file.ext) — convert to download URLs
+  t=t.replace(/\[([^\]]+)\]\((?!https?:\/\/)(?!\/api\/)(?!#)(?!mailto:)([^)]+\.\w+)\)/g,(_,label,path)=>{
+    const dlUrl='/api/files/download?path='+encodeURIComponent(path.replace(/&amp;/g,'&'));
+    return `<a href="${dlUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${label}</a>`;
+  });
   // Bare URLs — auto-link any https?:// not already inside an <a> tag
   t=t.replace(/(?<!href=")(?<!src=")(?<!">)(https?:\/\/[^\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Map embeds: <<<MAP: query>>> or <<<MAP: query | label>>>

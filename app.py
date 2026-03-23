@@ -882,10 +882,11 @@ CRITICAL CODE EXECUTION RULES:
 - ALWAYS use print() to log EVERY meaningful result — even when generating files. If you create an image, print what you created: print(f"Created {{filename}} ({{width}}x{{height}})")
 - ALWAYS print a summary of what the code produced — users see the print output as the execution result
 - When saving files, use descriptive filenames (e.g. 'random_corners.png', 'sales_report.pdf') — not generic names like 'output.png'
-- After each <<<END_CODE>>> block, write a brief sentence describing the result. The system auto-detects generated files and displays them with download links and inline previews for images — but YOU should still describe what was created in your text.
+- DO NOT write any text about the code succeeding or failing AFTER the <<<END_CODE>>> block. The system will automatically execute the code and then re-prompt you with the actual result (success or failure). You will then respond based on the real outcome. So just write the CODE_EXECUTE block and stop — don't pre-emptively claim success.
 - Your code runs in the workspace directory. Files you save there are immediately available for download and preview.
-- If your code errors, the error output is shown to the user. Fix and re-execute if needed using another CODE_EXECUTE block.
+- When the system re-prompts you with code execution results, use /api/files/download?path=FILENAME links for downloadable files (e.g. [Download Resume PDF](/api/files/download?path=my_resume.pdf)). For images, use /api/files/view?path=FILENAME.
 - COMMON SENSE: if someone asks you to create an image, PDF, chart, etc. — just DO it with code execution. Don't explain how you would do it, just execute the code and produce the file.
+- DON'T use FILE_CREATE for content that should just go in the chat response. Only create workspace files when the user explicitly asks for a file, or when the content is a document/PDF/image/code project. Short text, lists, research summaries, etc. should be in the chat — not saved as files.
 10. IMAGE SEARCH — you have a real image search engine that finds and displays images inline in your response. To use it, include this tag WHERE you want the images to appear:
 <<<IMAGE_SEARCH: descriptive search query>>>
 
@@ -1270,14 +1271,16 @@ def extract_memory_ops(text):
 
 # ─── Code Execution ──────────────────────────────────────────────────────────
 
-def execute_code_blocks(text):
+def execute_code_blocks(text, exclude_paths=None):
     """Extract <<<CODE_EXECUTE: lang>>>...<<<END_CODE>>> blocks, execute them, and return results.
-    Also detects files created/modified by the code and includes them in results."""
+    Also detects files created/modified by the code and includes them in results.
+    exclude_paths: set of relative paths to ignore (e.g. files created by FILE_CREATE/FILE_UPDATE)."""
     import subprocess, tempfile, os
     pattern = r'<<<CODE_EXECUTE:\s*(\w+)>>>\r?\n(.*?)<<<END_CODE>>>'
     results = []
+    _exclude = set(exclude_paths or [])
     # Protected dirs/files that code shouldn't claim credit for
-    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data'}
+    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes'}
     _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore'}
     for m in re.finditer(pattern, text, re.DOTALL):
         lang = m.group(1).strip().lower()
@@ -1319,9 +1322,11 @@ def execute_code_blocks(text):
             generated_files = []
             for p in WORKSPACE.rglob('*'):
                 if p.is_file() and not any(part in _ignore_dirs for part in p.relative_to(WORKSPACE).parts):
-                    if p.name not in _ignore_files:
+                    if p.name not in _ignore_files and not p.name.startswith('.'):
                         try:
                             rel = str(p.relative_to(WORKSPACE)).replace('\\', '/')
+                            if rel in _exclude:
+                                continue
                             mtime = p.stat().st_mtime
                             if rel not in pre_snapshot or mtime > pre_snapshot[rel]:
                                 # Determine if it's viewable (image) or just downloadable
@@ -1844,7 +1849,9 @@ def prepare_chat_turn(chat, payload):
 
 def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
     executed = execute_file_operations(raw_response)
-    code_results = execute_code_blocks(raw_response)
+    # Pass file_operations paths to code execution so it excludes them from "generated files"
+    _file_op_paths = {f["path"] for f in executed} if executed else set()
+    code_results = execute_code_blocks(raw_response, exclude_paths=_file_op_paths)
     new_facts = extract_memory_ops(raw_response)
     if new_facts:
         for fact in new_facts:
