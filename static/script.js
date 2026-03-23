@@ -618,7 +618,10 @@ function renderHomeWidget(w){
     const body=items.map(i=>{
       const doneClass=i.done?'wl-todo-done':'';
       const check=i.done?'✓':'○';
-      return `<div class="wl-todo-item ${doneClass}" data-todo-id="${esc(i.id||'')}">`
+      // Extract chat ID from todo item ID (format: tl_CHATID_listIdx_itemIdx)
+      const chatId=(i.id||'').split('_')[1]||'';
+      const clickChat=chatId?`onclick="openChat('${esc(chatId)}')"`:''
+      return `<div class="wl-todo-item ${doneClass}" data-todo-id="${esc(i.id||'')}" ${clickChat} style="${chatId?'cursor:pointer':''}">`
         +`<button class="wl-todo-check" onclick="event.stopPropagation();toggleHomeTodo('${esc(i.id||'')}')">${check}</button>`
         +`<span class="wl-todo-text">${esc(i.text||'')}</span>`
         +`<button class="wl-todo-del" onclick="event.stopPropagation();deleteHomeTodo('${esc(i.id||'')}')" title="Delete">✕</button>`
