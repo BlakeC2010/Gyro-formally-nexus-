@@ -1099,36 +1099,28 @@ Examples:
 The card automatically displays: real-time price, change, a prominent BUY/HOLD/SELL verdict banner (color-coded green/grey/red), health score, 52-week range, technicals, performance, financials, analyst targets, and links to Yahoo/Google Finance. All details are in a collapsible section — the card does the heavy lifting.
 
 STOCK ANALYSIS RULES:
-1. When the user asks about a stock, FIRST use the CHOICES tag to ask a quick question about their intent:
-<<<QUESTION: What are you looking for?>>>
-<<<CHOICES>>>
-Quick overview
-Buy/sell recommendation
-Compare with another stock
-Deep financial analysis
-<<<END_CHOICES>>>
-
-2. After the user answers, embed the stock card(s) and write a BRIEF intro sentence. Wait for the system to load the data — it will be sent back to you automatically. Then you will provide your analysis using the REAL loaded data.
-   Good: "Let me pull up the data for AAPL. <<<STOCK: AAPL>>>"
+1. When the user asks about a stock, embed the stock card(s) with a BRIEF intro. Do NOT ask clarifying questions — just pull up the data immediately.
+   Good: "Let me pull up the latest data for AAPL. <<<STOCK: AAPL>>>"
+   Good: "Here's a side-by-side look at both. <<<STOCK: AAPL>>> <<<STOCK: MSFT>>>"
    Bad: [walls of text guessing at numbers before data loads]
+   Bad: [asking what kind of analysis they want]
 
-3. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
+2. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
    - Show loading cards to the user immediately
    - Fetch real-time data from Yahoo Finance server-side
-   - Send the loaded data BACK to you automatically
-   - You will then analyze the REAL numbers in a follow-up message
-   So keep your initial message SHORT — just embed the tags and a brief intro. Your actual analysis comes AFTER the data loads.
+   - Automatically launch the Stock Analysis Agent which runs a 4-step deep analysis
+   - The agent handles: Market Overview → Technical Analysis → Fundamental Analysis → Final Verdict
+   So keep your initial message VERY SHORT — just embed the tags and one sentence. The agent does ALL the analysis work.
 
-4. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. Wait for the real data.
+3. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. The agent will use the real data.
 
-5. For COMPARISON requests, embed both cards side by side. Your detailed comparison will come after the data loads.
+4. For COMPARISON requests, embed both cards. The agent will do a full side-by-side comparison automatically.
 
-6. MANDATORY DISCLAIMER — include this SHORT disclaimer with EVERY stock response:
-*Not financial advice. AI analysis may be inaccurate. Always do your own research and consult a licensed financial advisor. You could lose money.*
+5. Do NOT include disclaimers — the agent adds them automatically.
 
-7. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly.
+6. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly using any [LIVE STOCK DATA] in context.
 
-8. If you already received [LIVE STOCK DATA] in the context, you can reference those numbers directly without re-embedding cards.
+7. If you already received [LIVE STOCK DATA] in the context, you can reference those numbers directly without re-embedding cards.
 
 LOCATION-AWARE RESPONSES:
 When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
@@ -1157,7 +1149,7 @@ Do NOT create files for:
 - Short lists, explanations, or informational content — keep it in the conversation
 - Todo lists — the interactive todolist widget already persists in the chat
 When in doubt, keep content in the chat. The user will ask you to save it if they want a file.
-Use <<<MEMORY_ADD>>> for quick facts the user shares (preferences, personal info, skills) that should persist across conversations without creating a file.
+Use <<<MEMORY_ADD>>> for quick facts the user shares (preferences, personal info, skills) that should persist across conversations without creating a file. NEVER use MEMORY_ADD for time-based reminders — use <<<REMINDER: YYYY-MM-DD HH:MM | text>>> instead.
 
 Message Continuation (CRITICAL — MULTI-STEP SYSTEM):
 You have a powerful multi-turn continuation system. Use it aggressively for any task that involves more than one action.
@@ -1307,6 +1299,21 @@ def execute_file_operations(text):
 
 def extract_memory_ops(text):
     return [m.group(1).strip() for m in re.finditer(r'<<<MEMORY_ADD:\s*(.+?)>>>', text)]
+
+
+def extract_reminders(text):
+    """Extract <<<REMINDER: datetime | message>>> tags from AI response.
+    Returns (cleaned_text, [{'due': str, 'text': str}])."""
+    pattern = re.compile(r'<<<REMINDER:\s*(.+?)\s*\|\s*(.+?)>>>')
+    reminders = []
+    def _replace(m):
+        due = m.group(1).strip()
+        msg = m.group(2).strip()
+        if due and msg:
+            reminders.append({"due": due, "text": msg})
+        return ""
+    cleaned = pattern.sub(_replace, text)
+    return cleaned, reminders
 
 # ─── Code Execution ──────────────────────────────────────────────────────────
 
@@ -1785,6 +1792,679 @@ def _build_stock_reprompt_summary(stock_results):
     return "\n".join(lines) if lines else ""
 
 
+def _build_full_stock_dump(stock_data_list):
+    """Build a comprehensive data dump of ALL stock fields for the agent to analyze."""
+    def _fmt_big(v):
+        if v is None: return "N/A"
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return "N/A"
+        if abs(v) >= 1e12: return f"${v/1e12:.2f}T"
+        if abs(v) >= 1e9: return f"${v/1e9:.2f}B"
+        if abs(v) >= 1e6: return f"${v/1e6:.2f}M"
+        return f"${v:,.0f}"
+
+    def _fmt_pct(v):
+        if v is None: return "N/A"
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return "N/A"
+        return f"{v*100:.2f}%"
+
+    sections = []
+    for d in stock_data_list:
+        if not d or d.get("error"):
+            continue
+        try:
+            lines = [f"{'═'*60}", f"  {d.get('ticker','?')} — {d.get('name','Unknown')}", f"{'═'*60}"]
+
+            # ── Price & Trading ──
+            lines.append("\n📈 PRICE & TRADING")
+            lines.append(f"  Price: ${d.get('price',0):.2f} | Change: ${d.get('change',0):.2f} ({d.get('changePct',0):+.2f}%)")
+            lines.append(f"  Open: ${d['open']:.2f}" if d.get('open') else "  Open: N/A")
+            lines.append(f"  Day Range: ${d['dayLow']:.2f} – ${d['dayHigh']:.2f}" if d.get('dayLow') and d.get('dayHigh') else "  Day Range: N/A")
+            lines.append(f"  52-Week: ${d['low52']:.2f} – ${d['high52']:.2f} (Position: {d['pos52']:.1f}%)" if d.get('low52') and d.get('high52') and d.get('pos52') is not None else "  52-Week: N/A")
+            vol = d.get('volume'); avg_vol = d.get('avgVolume')
+            lines.append(f"  Volume: {vol:,}" if vol else "  Volume: N/A")
+            lines.append(f"  Avg Volume (10D): {avg_vol:,}" if avg_vol else "  Avg Volume: N/A")
+            if vol and avg_vol and avg_vol > 0:
+                vol_vs_avg = vol / avg_vol
+                lines.append(f"  Volume vs Average: {vol_vs_avg:.2f}x ({'⚡ UNUSUAL' if vol_vs_avg > 1.5 else '🔇 BELOW NORMAL' if vol_vs_avg < 0.5 else '📊 Normal'})")
+            lines.append(f"  Currency: {d.get('currency','USD')} | Exchange: {d.get('exchange','N/A')}")
+            lines.append(f"  Sector: {d.get('sector','N/A')} | Industry: {d.get('industry','N/A')}")
+            mc = d.get('marketCap')
+            if mc:
+                cap_category = "Mega Cap" if mc >= 200e9 else "Large Cap" if mc >= 10e9 else "Mid Cap" if mc >= 2e9 else "Small Cap" if mc >= 300e6 else "Micro Cap"
+                lines.append(f"  Market Cap: {_fmt_big(mc)} ({cap_category})")
+
+            # ── Valuation ──
+            lines.append("\n💰 VALUATION")
+            lines.append(f"  P/E (TTM): {d['pe']:.2f}" if d.get('pe') else "  P/E (TTM): N/A")
+            lines.append(f"  Forward P/E: {d['forwardPe']:.2f}" if d.get('forwardPe') else "  Forward P/E: N/A")
+            lines.append(f"  PEG Ratio: {d['health']['pegRatio']:.2f}" if d.get('health',{}).get('pegRatio') else "  PEG Ratio: N/A")
+            lines.append(f"  EPS (TTM): ${d['eps']:.2f}" if d.get('eps') else "  EPS (TTM): N/A")
+            lines.append(f"  Forward EPS: ${d['forwardEps']:.2f}" if d.get('forwardEps') else "  Forward EPS: N/A")
+            lines.append(f"  Price/Book: {d['health']['priceToBook']:.2f}" if d.get('health',{}).get('priceToBook') else "  P/B: N/A")
+            lines.append(f"  Book Value/Share: ${d['health']['bookValue']:.2f}" if d.get('health',{}).get('bookValue') else "  Book Value: N/A")
+            ev = d.get('health',{}).get('enterpriseValue')
+            lines.append(f"  Enterprise Value: {_fmt_big(ev)}" if ev else "  EV: N/A")
+            lines.append(f"  EV/Revenue: {d['health']['evToRevenue']:.2f}" if d.get('health',{}).get('evToRevenue') else "  EV/Revenue: N/A")
+            lines.append(f"  EV/EBITDA: {d['health']['evToEbitda']:.2f}" if d.get('health',{}).get('evToEbitda') else "  EV/EBITDA: N/A")
+
+            # ── Dividends ──
+            if d.get('dividend') or d.get('dividendRate'):
+                lines.append("\n💵 DIVIDENDS")
+                lines.append(f"  Yield: {d['dividend']*100:.2f}%" if d.get('dividend') else "  Yield: N/A")
+                lines.append(f"  Annual Rate: ${d['dividendRate']:.2f}" if d.get('dividendRate') else "")
+                lines.append(f"  Payout Ratio: {_fmt_pct(d.get('health',{}).get('payoutRatio'))}")
+                lines.append(f"  Ex-Dividend Date: {d.get('exDividendDate','N/A')}")
+
+            # ── Technical Indicators ──
+            lines.append("\n📊 TECHNICAL INDICATORS")
+            perf = d.get('perf', {})
+            tech = d.get('technicals', {})
+            # Moving averages
+            sma50 = perf.get('sma50'); sma200 = perf.get('sma200')
+            p = d.get('price', 0)
+            if sma50:
+                above50 = "ABOVE ✅" if p > sma50 else "BELOW ❌"
+                lines.append(f"  SMA 50: ${sma50:.2f} (Price {above50}, {((p-sma50)/sma50*100):+.1f}%)")
+            if sma200:
+                above200 = "ABOVE ✅" if p > sma200 else "BELOW ❌"
+                lines.append(f"  SMA 200: ${sma200:.2f} (Price {above200}, {((p-sma200)/sma200*100):+.1f}%)")
+            if sma50 and sma200:
+                cross = "🟢 GOLDEN CROSS (Bullish)" if sma50 > sma200 else "🔴 DEATH CROSS (Bearish)"
+                lines.append(f"  MA Cross: {cross}")
+            if tech.get('ema12'):
+                lines.append(f"  EMA 12: ${tech['ema12']:.2f} | EMA 26: ${tech.get('ema26',0):.2f}")
+            # MACD
+            if tech.get('macd') is not None:
+                macd_signal = "Bullish 🟢" if tech['macd'] > tech.get('macd_signal', 0) else "Bearish 🔴"
+                lines.append(f"  MACD Line: {tech['macd']:.4f} | Signal: {tech.get('macd_signal',0):.4f} | Histogram: {tech.get('macd_histogram',0):.4f}")
+                lines.append(f"  MACD Signal: {macd_signal}")
+            # RSI
+            if perf.get('rsi') is not None:
+                rsi = perf['rsi']
+                rsi_label = "🔴 OVERBOUGHT (>70)" if rsi > 70 else "🟢 OVERSOLD (<30)" if rsi < 30 else "🟡 Neutral"
+                lines.append(f"  RSI(14): {rsi:.1f} — {rsi_label}")
+            if tech.get('stoch_rsi') is not None:
+                lines.append(f"  Stochastic RSI: {tech['stoch_rsi']:.1f}")
+            # Bollinger Bands
+            if tech.get('bb_upper'):
+                lines.append(f"  Bollinger Bands: ${tech['bb_lower']:.2f} / ${tech['bb_middle']:.2f} / ${tech['bb_upper']:.2f}")
+                if tech.get('bb_pctb') is not None:
+                    pctb = tech['bb_pctb']
+                    bb_pos = "Near Upper (Overbought)" if pctb > 0.8 else "Near Lower (Oversold)" if pctb < 0.2 else "Mid-Band"
+                    lines.append(f"  %B: {pctb:.3f} — {bb_pos}")
+            # ATR
+            if tech.get('atr14'):
+                lines.append(f"  ATR(14): ${tech['atr14']:.2f} ({tech.get('atr_pct',0):.2f}% daily volatility)")
+            # Volume trend
+            if tech.get('vol_ratio_5d_20d'):
+                vr = tech['vol_ratio_5d_20d']
+                vol_trend = "📈 Rising volume" if vr > 1.2 else "📉 Declining volume" if vr < 0.8 else "Stable"
+                lines.append(f"  Volume Trend (5D/20D): {vr:.2f}x — {vol_trend}")
+            # Support/Resistance
+            if tech.get('support_20d'):
+                lines.append(f"  Support: ${tech['support_20d']:.2f} (20D) / ${tech.get('support_50d',0):.2f} (50D)" if tech.get('support_50d') else f"  Support: ${tech['support_20d']:.2f} (20D)")
+            if tech.get('resistance_20d'):
+                lines.append(f"  Resistance: ${tech['resistance_20d']:.2f} (20D) / ${tech.get('resistance_50d',0):.2f} (50D)" if tech.get('resistance_50d') else f"  Resistance: ${tech['resistance_20d']:.2f} (20D)")
+
+            # ── Performance ──
+            if perf:
+                lines.append("\n📈 PERFORMANCE")
+                perf_items = [('1w','1W'),('1m','1M'),('3m','3M'),('6m','6M'),('ytd','YTD'),('1y','1Y')]
+                perf_parts = []
+                for k, label in perf_items:
+                    if perf.get(k) is not None:
+                        emoji = "🟢" if perf[k] > 0 else "🔴"
+                        perf_parts.append(f"  {label}: {perf[k]:+.2f}% {emoji}")
+                if perf_parts:
+                    lines.extend(perf_parts)
+
+            # ── Recent 5-Day Prices ──
+            rp = d.get('recentPrices', [])
+            if rp:
+                lines.append("\n📅 LAST 5 TRADING DAYS")
+                lines.append("  Date       | Open    | High    | Low     | Close   | Volume")
+                lines.append("  " + "-"*65)
+                for dp in rp:
+                    lines.append(f"  {dp['date']} | ${dp['open']:>7.2f} | ${dp['high']:>7.2f} | ${dp['low']:>7.2f} | ${dp['close']:>7.2f} | {dp['volume']:>10,}")
+
+            # ── Financial Health ──
+            h = d.get('health', {})
+            if h:
+                lines.append("\n🏦 FINANCIAL HEALTH")
+                lines.append(f"  Health Score: {h['score']}/100" if h.get('score') is not None else "  Health Score: N/A")
+                lines.append(f"  Gross Margin: {_fmt_pct(h.get('grossMargin'))}")
+                lines.append(f"  Operating Margin: {_fmt_pct(h.get('operatingMargin'))}")
+                lines.append(f"  Profit Margin: {_fmt_pct(h.get('profitMargin'))}")
+                lines.append(f"  EBITDA Margin: {_fmt_pct(h.get('ebitdaMargins'))}")
+                lines.append(f"  Revenue Growth: {_fmt_pct(h.get('revenueGrowth'))}")
+                lines.append(f"  Earnings Growth: {_fmt_pct(h.get('earningsGrowth'))}")
+                lines.append(f"  ROE: {_fmt_pct(h.get('returnOnEquity'))}")
+                lines.append(f"  ROA: {_fmt_pct(h.get('returnOnAssets'))}")
+                lines.append(f"  Debt/Equity: {h['debtToEquity']:.1f}" if h.get('debtToEquity') is not None else "  Debt/Equity: N/A")
+                lines.append(f"  Current Ratio: {h['currentRatio']:.2f}" if h.get('currentRatio') is not None else "  Current Ratio: N/A")
+                lines.append(f"  Quick Ratio: {h['quickRatio']:.2f}" if h.get('quickRatio') is not None else "  Quick Ratio: N/A")
+                lines.append(f"  Total Revenue: {_fmt_big(h.get('totalRevenue'))}")
+                lines.append(f"  EBITDA: {_fmt_big(h.get('ebitda'))}")
+                lines.append(f"  Free Cash Flow: {_fmt_big(h.get('freeCashflow'))}")
+                lines.append(f"  Operating Cash Flow: {_fmt_big(h.get('operatingCashflow'))}")
+                lines.append(f"  Total Cash: {_fmt_big(h.get('totalCash'))}")
+                lines.append(f"  Total Debt: {_fmt_big(h.get('totalDebt'))}")
+                lines.append(f"  Revenue/Share: ${h['revenuePerShare']:.2f}" if h.get('revenuePerShare') is not None else "")
+
+            # ── Shares & Ownership ──
+            sh = d.get('shares', {})
+            if sh and any(v for v in sh.values() if v is not None):
+                lines.append("\n🏛️ SHARES & OWNERSHIP")
+                if sh.get('outstanding'): lines.append(f"  Shares Outstanding: {sh['outstanding']:,}")
+                if sh.get('float'): lines.append(f"  Float: {sh['float']:,}")
+                if sh.get('institutionPct') is not None: lines.append(f"  Institutional Ownership: {sh['institutionPct']*100:.1f}%")
+                if sh.get('insiderPct') is not None: lines.append(f"  Insider Ownership: {sh['insiderPct']*100:.1f}%")
+                if sh.get('shortShares'): lines.append(f"  Short Interest: {sh['shortShares']:,} shares")
+                if sh.get('shortPctFloat') is not None: lines.append(f"  Short % of Float: {sh['shortPctFloat']*100:.2f}%")
+                if sh.get('shortRatio') is not None: lines.append(f"  Short Ratio (Days to Cover): {sh['shortRatio']:.1f}")
+
+            # ── Analyst Consensus ──
+            lines.append("\n🎯 ANALYST CONSENSUS")
+            lines.append(f"  Recommendation: {d.get('recommendation','N/A').upper()}")
+            lines.append(f"  Number of Analysts: {d.get('numAnalysts','N/A')}")
+            lines.append(f"  Target Mean: ${d['targetPrice']:.2f}" if d.get('targetPrice') else "  Target Mean: N/A")
+            lines.append(f"  Target Median: ${d['targetMedian']:.2f}" if d.get('targetMedian') else "")
+            if d.get('targetLow') and d.get('targetHigh'):
+                lines.append(f"  Target Range: ${d['targetLow']:.2f} – ${d['targetHigh']:.2f}")
+            if d.get('targetPrice') and p:
+                upside = (d['targetPrice'] - p) / p * 100
+                lines.append(f"  Implied Upside/Downside: {upside:+.1f}%")
+            lines.append(f"  Earnings Date: {d.get('earningsDate','N/A')}")
+            lines.append(f"  System Verdict: {d.get('verdict','N/A').upper()}")
+            lines.append(f"  Risk Level: {d.get('risk','N/A')}")
+            lines.append(f"  Beta: {d['beta']:.2f}" if d.get('beta') else "  Beta: N/A")
+
+            # ── Earnings History ──
+            eh = d.get('earningsHistory', [])
+            if eh:
+                lines.append("\n📋 RECENT EARNINGS")
+                for e in eh:
+                    eps_est = e.get('epsEstimate') or e.get('Earnings Estimate')
+                    eps_act = e.get('epsActual') or e.get('Reported EPS')
+                    surprise = e.get('surprisePercent') or e.get('Surprise(%)')
+                    qtr = e.get('quarter') or e.get('Quarter') or '?'
+                    if eps_act is not None:
+                        try:
+                            surprise_f = float(surprise) if surprise is not None else None
+                        except (TypeError, ValueError):
+                            surprise_f = None
+                        beat = "✅ BEAT" if (surprise_f and surprise_f > 0) else "❌ MISS" if (surprise_f and surprise_f < 0) else ""
+                        lines.append(f"  {qtr}: Est ${eps_est} → Actual ${eps_act} ({surprise_f:+.1f}% {beat})" if surprise_f is not None else f"  {qtr}: ${eps_act}")
+
+            # ── Insider Trades ──
+            ins = d.get('insiderTrades', [])
+            if ins:
+                lines.append("\n👤 RECENT INSIDER TRADES")
+                for t in ins[:5]:
+                    insider = t.get('Insider Trading') or t.get('insider') or t.get('Text') or '?'
+                    action = t.get('Transaction') or t.get('transaction') or '?'
+                    shares_t = t.get('Shares') or t.get('shares') or ''
+                    val = t.get('Value') or t.get('value') or ''
+                    lines.append(f"  {insider}: {action}" + (f" ({shares_t:,} shares, {_fmt_big(val)})" if isinstance(shares_t, (int, float)) and shares_t else f" {shares_t} {val}"))
+
+            sections.append("\n".join([l for l in lines if l]))  # filter empty lines
+        except Exception:
+            sections.append(f"  {d.get('ticker','?')} — Error formatting data")
+    return "\n\n".join(sections)
+
+
+def _stock_agent_steps(stock_data_list, user_query):
+    """Return the multi-step prompts for the stock analysis agent. 8 steps with web search for deep research."""
+    tickers = [d.get('ticker', '?') for d in stock_data_list if not d.get('error')]
+    ticker_str = ", ".join(tickers)
+    is_comparison = len(tickers) > 1
+    uq = user_query.strip() if user_query else ""
+    uq_note = f'\n\n⚡ USER\'S QUESTION: "{uq}"\nTailor your analysis to directly answer this. Reference it explicitly.' if uq and len(uq) > 3 else ''
+
+    base_system = (
+        "You are an elite institutional equity research analyst at a top Wall Street firm. "
+        "You write like a Goldman Sachs/Morgan Stanley research note — authoritative, data-dense, no fluff. "
+        "You are given REAL market data pulled from Yahoo Finance seconds ago.\n\n"
+        "ABSOLUTE RULES:\n"
+        "1. Use ONLY the data provided for financial numbers. NEVER fabricate, estimate, or hallucinate any number.\n"
+        "2. Cite EXACT values from the data: '$142.50', 'P/E of 28.3x', 'RSI at 67.2'\n"
+        "3. INTERPRET every number — don't just restate it. What does it MEAN?\n"
+        "4. Use markdown: **bold** key figures, use tables for comparisons, emoji for quick signals\n"
+        "5. NO disclaimers, NO 'I'm an AI', NO 'this is not financial advice'\n"
+        "6. NO restating the raw data dump — synthesize and add insight\n"
+        "7. Be DECISIVE — give clear signals, not wishy-washy hedge-everything language\n"
+        "8. If a data point is N/A, skip it — don't say 'data not available'"
+    )
+
+    news_system = (
+        "You are a senior financial journalist and market intelligence analyst. "
+        "You have access to web search to find the LATEST news, developments, and market sentiment. "
+        "Search the web thoroughly to find recent and relevant information.\n\n"
+        "RULES:\n"
+        "1. Search for and report ONLY real, verifiable news from credible sources\n"
+        "2. Always mention the source and approximate date of each news item\n"
+        "3. Focus on RECENT news (last 1-4 weeks) that could impact the stock\n"
+        "4. Distinguish between confirmed facts and analyst speculation\n"
+        "5. Use markdown formatting with **bold** for key points\n"
+        "6. NO disclaimers, NO 'I'm an AI'"
+    )
+
+    research_system = (
+        "You are a deep research analyst who combines web intelligence with hard data. "
+        "You have access to web search. Use it to research the companies thoroughly. "
+        "Cross-reference what you find online with the financial data provided.\n\n"
+        "RULES:\n"
+        "1. Search the web for competitive analysis, industry trends, and company developments\n"
+        "2. Verify claims against the hard financial data provided\n"
+        "3. Look for information that ISN'T in the financial data — partnerships, products, lawsuits, management changes\n"
+        "4. Be specific with sources and dates\n"
+        "5. Use markdown formatting\n"
+        "6. NO disclaimers, NO 'I'm an AI'"
+    )
+
+    if is_comparison:
+        return [
+            {
+                "title": "Market Snapshot",
+                "system": base_system,
+                "web_search": False,
+                "prompt": (
+                    f"Compare the current market position of {ticker_str}.{uq_note}\n\n"
+                    "Create a **Snapshot Table**:\n"
+                    "| Metric | " + " | ".join(tickers) + " |\n"
+                    "|--------|" + "|".join(["--------|"] * len(tickers)) + "\n"
+                    "| Price | | |\n"
+                    "| Daily Change | | |\n"
+                    "| Market Cap | | |\n"
+                    "| Volume vs Avg | | |\n"
+                    "| 52W Position | | |\n"
+                    "| Sector | | |\n\n"
+                    "Then interpret:\n"
+                    "- Who's having a better day and why?\n"
+                    "- Any unusual volume? What could it signal?\n"
+                    "- Who has more room to run based on 52-week positioning?\n\n"
+                    "**Opening Take:** 1-2 sentences on who looks stronger at first glance."
+                ),
+            },
+            {
+                "title": "News & Headlines",
+                "system": news_system,
+                "web_search": True,
+                "prompt": (
+                    f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
+                    "For EACH stock, search for and report:\n\n"
+                    "**📰 Recent Headlines** (last 1-4 weeks):\n"
+                    "- List 3-5 most important recent news stories for each company\n"
+                    "- Include source name and approximate date\n"
+                    "- Focus on: earnings reports, product launches, partnerships, management changes, regulatory news, analyst upgrades/downgrades\n\n"
+                    "**📊 Market Sentiment:**\n"
+                    "- What's the overall media/analyst sentiment? Bullish, bearish, or mixed?\n"
+                    "- Any viral social media buzz or Reddit/WallStreetBets attention?\n"
+                    "- Recent analyst rating changes or price target updates?\n\n"
+                    "**⚡ Catalysts & Events:**\n"
+                    "- Upcoming earnings dates, FDA decisions, product launches, conferences\n"
+                    "- Any pending lawsuits, investigations, or regulatory decisions?\n"
+                    "- Sector-wide trends affecting these stocks\n\n"
+                    "**🔥 News Impact Assessment:**\n"
+                    "For each stock: is the news flow Positive / Neutral / Negative?\n"
+                    "Which company has the better news momentum right now?"
+                ),
+            },
+            {
+                "title": "Technical Analysis",
+                "system": base_system + "\nYou are a technical analysis specialist. Think in terms of trends, momentum, and chart patterns.",
+                "web_search": False,
+                "prompt": (
+                    f"Deep technical comparison of {ticker_str}.{uq_note}\n\n"
+                    "**Indicator Table:**\n"
+                    "| Technical | " + " | ".join(tickers) + " | Edge |\n"
+                    "|-----------|" + "|".join(["--------|"] * len(tickers)) + "------|\n"
+                    "Fill in: SMA 50/200 position, MA Cross signal, RSI reading, MACD direction, "
+                    "Bollinger Band position, ATR volatility, Volume trend.\n\n"
+                    "**Momentum Comparison** (use emoji 🟢🔴🟡):\n"
+                    "- 1W / 1M / 3M / YTD / 1Y performance side-by-side\n"
+                    "- Who's accelerating? Who's decelerating?\n\n"
+                    "**Support & Resistance**:\n"
+                    "- Key levels for each stock\n"
+                    "- Which is closer to support (safer entry)? Which is near resistance (risky)?\n\n"
+                    "**Technical Edge:** 🏆 [TICKER] — one paragraph explaining the technical advantage."
+                ),
+            },
+            {
+                "title": "Fundamental Deep Dive",
+                "system": base_system + "\nYou are a fundamental analysis expert. Focus on what makes a business strong or weak.",
+                "web_search": False,
+                "prompt": (
+                    f"Head-to-head fundamental battle: {ticker_str}.{uq_note}\n\n"
+                    "**Valuation Table:**\n"
+                    "| Metric | " + " | ".join(tickers) + " | Winner |\n"
+                    "P/E, Forward P/E, PEG, P/B, EV/Revenue, EV/EBITDA\n\n"
+                    "**Profitability Table:**\n"
+                    "Gross Margin, Operating Margin, Profit Margin, EBITDA Margin, ROE, ROA\n\n"
+                    "**Growth Table:**\n"
+                    "Revenue Growth, Earnings Growth, Forward EPS vs Current EPS\n\n"
+                    "**Balance Sheet Table:**\n"
+                    "Debt/Equity, Current Ratio, Quick Ratio, Total Cash vs Total Debt, FCF\n\n"
+                    "**Health Score:** Compare the scores and explain what they mean.\n\n"
+                    "Declare category winners, then:\n"
+                    "**Fundamental Edge:** 🏆 [TICKER] — one paragraph on why they're the better business."
+                ),
+            },
+            {
+                "title": "Deep Research",
+                "system": research_system,
+                "web_search": True,
+                "prompt": (
+                    f"Do deep research on {ticker_str} to find information NOT in the financial data.{uq_note}\n\n"
+                    "Search the web and investigate:\n\n"
+                    "**🏢 Company Deep Dive** (for each):\n"
+                    "- What does the company actually DO? Core products/services and competitive moat\n"
+                    "- Recent product launches, partnerships, or strategic moves\n"
+                    "- Management quality — any recent executive changes?\n"
+                    "- Competitive landscape — who are the main rivals and how do they compare?\n\n"
+                    "**📈 Industry & Macro Context:**\n"
+                    "- What sector trends are helping or hurting these companies?\n"
+                    "- Any regulatory changes or government policies affecting them?\n"
+                    "- How does the current macro environment (interest rates, inflation, economy) impact them?\n\n"
+                    "**🔍 Hidden Risks & Opportunities:**\n"
+                    "- Anything the financial data doesn't show — pending lawsuits, patent issues, supply chain problems?\n"
+                    "- Growth catalysts not yet priced in?\n"
+                    "- Insider sentiment beyond just the trade data\n\n"
+                    "**Cross-Reference with Data:**\n"
+                    "Connect your web research findings with the actual financial data provided. "
+                    "Does the news confirm or contradict what the numbers show?"
+                ),
+            },
+            {
+                "title": "Risk & Ownership",
+                "system": base_system + "\nYou are a risk management specialist. Focus on what could go wrong and who's betting on these stocks.",
+                "web_search": False,
+                "prompt": (
+                    f"Risk and ownership deep dive for {ticker_str}.{uq_note}\n\n"
+                    "**Risk Comparison:**\n"
+                    "| Risk Factor | " + " | ".join(tickers) + " |\n"
+                    "Beta, ATR (daily volatility %), Short interest, Debt levels, Earnings risk\n\n"
+                    "**Smart Money Signals:**\n"
+                    "- Institutional ownership: who has more backing?\n"
+                    "- Insider ownership: are insiders aligned with shareholders?\n"
+                    "- Short interest: anyone betting against these?\n"
+                    "- Recent insider trades: buying or selling?\n\n"
+                    "**Catalysts & Risks:**\n"
+                    "For each stock:\n"
+                    "- 🔼 Next catalyst (earnings date, etc.)\n"
+                    "- ⚠️ Biggest risk factor\n\n"
+                    "**Risk-Adjusted Winner:** Which offers better risk/reward?"
+                ),
+            },
+            {
+                "title": "Valuation & Price Targets",
+                "system": base_system + "\nYou are a valuation specialist. Think about fair value and margin of safety.",
+                "web_search": False,
+                "prompt": (
+                    f"Valuation analysis of {ticker_str}.{uq_note}\n\n"
+                    "For each stock:\n"
+                    "**Current vs Fair Value:**\n"
+                    "- Analyst consensus target and implied upside/downside\n"
+                    "- Target range (low to high) — what does the spread tell us?\n"
+                    "- P/E vs forward P/E — is earnings growth being priced in?\n"
+                    "- PEG ratio interpretation — paying too much for growth?\n\n"
+                    "**Value Comparison Table:**\n"
+                    "| Metric | " + " | ".join(tickers) + " | Better Value |\n"
+                    "Price vs Target, Upside %, P/E, Forward P/E, PEG, P/B, EV/EBITDA\n\n"
+                    "**Who's Cheaper?** Clear determination of which stock offers more value for the price."
+                ),
+            },
+            {
+                "title": "Final Verdict",
+                "system": base_system + "\nThis is your FINAL CALL. Incorporate ALL previous analysis including news and research. Be bold, be decisive. Your reputation depends on this call.",
+                "web_search": False,
+                "prompt": (
+                    f"FINAL VERDICT: {ticker_str}.{uq_note}\n\n"
+                    "You have completed: Market Snapshot, News & Headlines, Technical Analysis, Fundamental Deep Dive, "
+                    "Deep Research, Risk & Ownership, and Valuation & Price Targets.\n\n"
+                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals — into your final call.\n\n"
+                    "Structure EXACTLY like this:\n\n"
+                    "---\n\n"
+                    "## 🏆 Winner: [TICKER]\n\n"
+                    "**Why [TICKER] wins** (1 punchy paragraph — weave together your best data points AND recent news/research findings)\n\n"
+                    "### Scoreboard\n"
+                    "| Category | " + " | ".join(tickers) + " |\n"
+                    "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment — rate each A/B/C/D/F\n\n"
+                    "### For each stock:\n"
+                    "**[TICKER]: 🟢 BUY / 🟡 HOLD / 🔴 SELL**\n"
+                    "- Target entry price range\n"
+                    "- 3 bullet **Bull Case** (mix data + news + research)\n"
+                    "- 3 bullet **Bear Case** (mix data + news + research)\n"
+                    "- Risk level with beta reference\n"
+                    "- Ideal investor type (growth, value, income, swing trader)\n\n"
+                    "### Bottom Line\n"
+                    "2-3 sentences. Clear winner, clear action, specific price levels. "
+                    "Reference the most compelling news/catalyst that tips the scale."
+                ),
+            },
+        ]
+    else:
+        d0 = stock_data_list[0] if stock_data_list else {}
+        h0 = d0.get('health', {})
+        t0 = d0.get('technicals', {})
+        p0 = d0.get('perf', {})
+        return [
+            {
+                "title": "Market Snapshot",
+                "system": base_system,
+                "web_search": False,
+                "prompt": (
+                    f"Market snapshot for {ticker_str}.{uq_note}\n\n"
+                    "**Quick Stats Box:**\n"
+                    f"Create a clean summary table:\n"
+                    "| Metric | Value | Signal |\n"
+                    "Price & daily change, Day range, Volume vs average, 52-week position, "
+                    "Market cap category, Sector/Industry\n\n"
+                    "**Interpretation** (3-5 sentences):\n"
+                    "- What's the STORY today? Is this a breakout, pullback, consolidation, or trend day?\n"
+                    "- Is volume confirming or contradicting the price move?\n"
+                    "- Where in the 52-week range is it and what does that suggest?\n"
+                    "- Any recent catalysts (look at the 5-day price action for clues)?"
+                ),
+            },
+            {
+                "title": "News & Headlines",
+                "system": news_system,
+                "web_search": True,
+                "prompt": (
+                    f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
+                    "**📰 Recent Headlines** (last 1-4 weeks):\n"
+                    "- List 5-7 most important recent news stories\n"
+                    "- Include source name (e.g., Reuters, Bloomberg, CNBC, WSJ) and approximate date\n"
+                    "- Focus on: earnings reports, product launches, partnerships, management changes, "
+                    "regulatory news, analyst upgrades/downgrades, SEC filings\n\n"
+                    "**📊 Market Sentiment:**\n"
+                    "- What's the overall media/analyst sentiment? Bullish, bearish, or mixed?\n"
+                    "- Any social media buzz or retail investor attention?\n"
+                    "- Recent analyst rating changes or price target updates?\n\n"
+                    "**⚡ Upcoming Catalysts:**\n"
+                    "- Upcoming earnings dates, product launches, conferences\n"
+                    "- Any pending lawsuits, investigations, or regulatory decisions?\n"
+                    "- Sector-wide trends or macro events that could move the stock\n\n"
+                    "**🔥 News Verdict:** Is the recent news flow Positive / Neutral / Negative for this stock?"
+                ),
+            },
+            {
+                "title": "Technical Analysis",
+                "system": base_system + "\nYou are a CMT-certified technical analyst. Think in terms of trend, momentum, volatility, and key levels.",
+                "web_search": False,
+                "prompt": (
+                    f"Full technical breakdown of {ticker_str}.{uq_note}\n\n"
+                    "**Trend Analysis:**\n"
+                    "- Moving averages: Price vs SMA 50, SMA 200, EMA 12, EMA 26\n"
+                    "- Golden cross or death cross? What does the MA alignment tell us?\n\n"
+                    "**Momentum Indicators:**\n"
+                    "| Indicator | Value | Reading |\n"
+                    "RSI(14), Stochastic RSI, MACD (line vs signal + histogram direction)\n\n"
+                    "**Volatility:**\n"
+                    "- Bollinger Bands position (%B) — squeezing, expanding, or normal?\n"
+                    "- ATR(14) and daily volatility % — is this a choppy or smooth mover?\n\n"
+                    "**Key Levels:**\n"
+                    "- Support: 20D and 50D support levels\n"
+                    "- Resistance: 20D and 50D resistance levels\n"
+                    "- How far from each? Which is the stock gravitating toward?\n\n"
+                    "**Performance Momentum** (use table with emoji):\n"
+                    "1W → 1M → 3M → YTD → 1Y — is the trend accelerating or fading?\n\n"
+                    "**Technical Verdict:** 🟢 Bullish / 🟡 Neutral / 🔴 Bearish\n"
+                    "One paragraph connecting all the dots."
+                ),
+            },
+            {
+                "title": "Fundamental Analysis",
+                "system": base_system + "\nYou are a CFA-certified fundamental analyst. Think about business quality, competitive advantages, and intrinsic value.",
+                "web_search": False,
+                "prompt": (
+                    f"Fundamental deep dive on {ticker_str}.{uq_note}\n\n"
+                    "**Valuation Assessment:**\n"
+                    "| Metric | Value | Grade |\n"
+                    "P/E (TTM), Forward P/E, PEG Ratio, P/B, EV/Revenue, EV/EBITDA\n"
+                    "Grade: 🟢 Cheap / 🟡 Fair / 🔴 Expensive (vs typical ranges for this sector)\n\n"
+                    "**Profitability Scorecard:**\n"
+                    "| Metric | Value | Rating |\n"
+                    "Gross Margin, Operating Margin, Net Margin, EBITDA Margin, ROE, ROA\n"
+                    "Rating: **Strong** / **Average** / **Weak**\n\n"
+                    "**Growth Profile:**\n"
+                    "- Revenue growth + earnings growth — accelerating or decelerating?\n"
+                    "- Forward EPS vs trailing EPS — what's the market expecting?\n"
+                    "- Earnings history: has it beaten estimates recently?\n\n"
+                    "**Balance Sheet Health:**\n"
+                    "- Debt/Equity, Current Ratio, Quick Ratio\n"
+                    "- Cash vs Debt — net cash or net debt position?\n"
+                    "- Free cash flow — is the business generating real money?\n\n"
+                    f"**Health Score: {h0.get('score', 'N/A')}/100** — explain what this means and how it was derived.\n\n"
+                    "**Fundamental Grade:** A through F, with justification."
+                ),
+            },
+            {
+                "title": "Deep Research",
+                "system": research_system,
+                "web_search": True,
+                "prompt": (
+                    f"Do deep research on {ticker_str} to find information NOT in the financial data.{uq_note}\n\n"
+                    "Search the web and investigate:\n\n"
+                    "**🏢 Company Deep Dive:**\n"
+                    "- What does the company actually DO? Core products/services and competitive moat\n"
+                    "- Recent product launches, partnerships, or strategic moves\n"
+                    "- Management quality — any recent executive changes? CEO track record?\n"
+                    "- Competitive landscape — who are the main rivals and how do they stack up?\n\n"
+                    "**📈 Industry & Macro Context:**\n"
+                    "- What sector trends are helping or hurting this company?\n"
+                    "- Total addressable market (TAM) — how big is the opportunity?\n"
+                    "- Any regulatory changes or government policies affecting them?\n"
+                    "- How does the current macro environment (interest rates, inflation, economy) impact them?\n\n"
+                    "**🔍 Hidden Risks & Opportunities:**\n"
+                    "- Anything the financial data doesn't show — pending lawsuits, patent issues, supply chain problems?\n"
+                    "- Growth catalysts not yet priced in?\n"
+                    "- What are bears saying about this stock? What are bulls saying?\n\n"
+                    "**Cross-Reference with Data:**\n"
+                    "Connect your web research findings with the actual financial data provided. "
+                    "Does the research confirm or contradict what the numbers show?"
+                ),
+            },
+            {
+                "title": "Risk & Ownership",
+                "system": base_system + "\nYou are a risk analyst. Think about what could go wrong, who's invested, and hidden dangers.",
+                "web_search": False,
+                "prompt": (
+                    f"Risk and ownership analysis for {ticker_str}.{uq_note}\n\n"
+                    "**Risk Profile:**\n"
+                    "| Factor | Value | Assessment |\n"
+                    "Beta, ATR daily volatility %, Short interest/float %, Debt/Equity\n\n"
+                    "**Smart Money:**\n"
+                    "- Institutional ownership % — do the big boys believe?\n"
+                    "- Insider ownership % — is management eating their own cooking?\n"
+                    "- Short interest and days to cover — any squeeze potential or danger signal?\n"
+                    "- Recent insider trades — net buying or selling?\n\n"
+                    "**Upcoming Events:**\n"
+                    "- Next earnings date and what to watch for\n"
+                    "- Dividend schedule if applicable\n\n"
+                    "**Key Risks** (3 bullet points — specific, not generic):\n"
+                    "- What specific data points concern you?\n\n"
+                    "**Risk Rating:** Low / Moderate / High / Very High — with reasoning."
+                ),
+            },
+            {
+                "title": "Valuation & Price Targets",
+                "system": base_system + "\nYou are a valuation expert. Focus on where the stock SHOULD be trading.",
+                "web_search": False,
+                "prompt": (
+                    f"Valuation and price target analysis for {ticker_str}.{uq_note}\n\n"
+                    "**Analyst Consensus:**\n"
+                    "- Number of analysts covering\n"
+                    "- Mean target price and implied move %\n"
+                    "- Target range (low to high) — what does the spread tell us about uncertainty?\n"
+                    "- Current recommendation\n\n"
+                    "**Valuation Math:**\n"
+                    "- Current P/E vs Forward P/E → Are earnings expected to grow or shrink?\n"
+                    "- PEG ratio → Paying a fair price for growth?\n"
+                    "- Book value vs price → Any margin of safety?\n"
+                    "- EV/EBITDA → How does the enterprise value compare?\n\n"
+                    "**Fair Value Range:**\n"
+                    "Based on the data, give a specific price range you consider fair value.\n"
+                    "Explain your reasoning using the metrics above.\n\n"
+                    "**Entry / Exit Points:**\n"
+                    "- Ideal entry price (where you'd buy)\n"
+                    "- Target price (where you'd take profit)\n"
+                    "- Stop-loss level (where you'd cut losses)"
+                ),
+            },
+            {
+                "title": "Final Verdict",
+                "system": base_system + "\nThis is YOUR call. Incorporate ALL previous analysis including news and research. Your reputation is on the line. Be bold and decisive. No hedging.",
+                "web_search": False,
+                "prompt": (
+                    f"FINAL VERDICT on {ticker_str}.{uq_note}\n\n"
+                    "You have completed: Market Snapshot, News & Headlines, Technical Analysis, Fundamental Analysis, "
+                    "Deep Research, Risk & Ownership, and Valuation & Price Targets.\n\n"
+                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals — into your final call.\n\n"
+                    "Structure EXACTLY like this:\n\n"
+                    "---\n\n"
+                    "## Verdict: 🟢 BUY / 🟡 HOLD / 🔴 SELL\n\n"
+                    "**The Case** (one powerful paragraph — weave together your best data points AND recent news/research findings)\n\n"
+                    "### Scorecard\n"
+                    "| Category | Grade | Key Reason |\n"
+                    "|----------|-------|------------|\n"
+                    "| Technical | A-F | ... |\n"
+                    "| Fundamental | A-F | ... |\n"
+                    "| Valuation | A-F | ... |\n"
+                    "| Risk/Reward | A-F | ... |\n"
+                    "| Momentum | A-F | ... |\n"
+                    "| News & Sentiment | A-F | ... |\n"
+                    "| **Overall** | **A-F** | **...** |\n\n"
+                    "### Bull Case 🐂\n"
+                    "1. [strongest reason with specific number + news support]\n"
+                    "2. [second reason with specific number]\n"
+                    "3. [third reason — catalyst or research finding]\n\n"
+                    "### Bear Case 🐻\n"
+                    "1. [biggest risk with specific number + news context]\n"
+                    "2. [second risk with specific number]\n"
+                    "3. [third risk — research finding or macro concern]\n\n"
+                    "### Trade Setup\n"
+                    "- **Entry:** $X.XX – $X.XX\n"
+                    "- **Target:** $X.XX (X% upside)\n"
+                    "- **Stop-Loss:** $X.XX (X% downside)\n"
+                    "- **Risk/Reward Ratio:** X:1\n"
+                    "- **Time Horizon:** [short/medium/long term]\n"
+                    "- **Ideal For:** [growth investor / value investor / swing trader / income investor]\n\n"
+                    "### Bottom Line\n"
+                    "2-3 sentences. Crystal clear. No ambiguity. What should the investor DO? "
+                    "Reference the most compelling news/catalyst that tips the scale."
+                ),
+            },
+        ]
+
+
 def _prefetch_stock_context(user_text):
     """Detect stock tickers in user message and pre-fetch data so the AI can analyze real numbers."""
     if not user_text:
@@ -1926,6 +2606,32 @@ def prepare_chat_turn(chat, payload):
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
         sysprompt += tool_instructions
+
+    # --- Reminder system ---
+    # Always include reminder capability instructions
+    sysprompt += (
+        "\n\n[REMINDERS — CRITICAL]\n"
+        "You can set reminders for the user using: <<<REMINDER: YYYY-MM-DD HH:MM | reminder message>>>\n"
+        "Examples: <<<REMINDER: 2026-04-28 09:00 | Check investment account - thinking period ends today>>>\n"
+        "When the user asks you to remind them about something, you MUST use <<<REMINDER: ...>>> — NEVER use <<<MEMORY_ADD>>> for reminders.\n"
+        "<<<MEMORY_ADD>>> is only for factual information. Anything with a time, date, or 'remind me' MUST use <<<REMINDER>>>.\n"
+        "Parse relative dates naturally (e.g. 'next Tuesday' = actual date, 'in 2 weeks' = calculated date).\n"
+        f"Today's date and time is {datetime.datetime.now().strftime('%Y-%m-%d %A %H:%M')}.\n"
+    )
+    # Inject pending reminders so AI can reference them
+    user_reminders = payload.get("reminders", [])
+    if user_reminders:
+        pending = [r for r in user_reminders if not r.get("done")]
+        if pending:
+            reminder_lines = []
+            for r in pending[:10]:
+                reminder_lines.append(f"  - Due: {r.get('due','?')} | {r.get('text','')}")
+            sysprompt += (
+                "The user has these active reminders:\n"
+                + "\n".join(reminder_lines) + "\n"
+                "If any reminder is due today or overdue, mention it naturally in your response. "
+                "Don't list all reminders unless asked — just bring up relevant/overdue ones when appropriate.\n"
+            )
 
     # --- User location context ---
     user_location = payload.get("user_location")
@@ -2462,7 +3168,7 @@ def _detect_workflow_patterns(chats):
 def _widget_has_content(w):
     """Check if a widget has meaningful content to display."""
     wtype = (w.get("type") or "focus").lower()
-    if wtype in ("recent", "todos", "nudge", "workflow"):
+    if wtype in ("recent", "todos", "nudge", "workflow", "reminders"):
         items = w.get("items") or []
         return isinstance(items, list) and len(items) > 0
     if wtype in ("vision", "motivation", "focus"):
@@ -2470,10 +3176,30 @@ def _widget_has_content(w):
         return bool(text)
     return True
 
-def _fallback_home_widgets(user_name, profile, chats, todos, visions):
+def _fallback_home_widgets(user_name, profile, chats, todos, visions, reminders=None):
     first_name = (user_name or "").split()[0] or "there"
     heading = f"Welcome back, {first_name}."
     widgets = []
+
+    # Reminders — show pending/overdue ones prominently
+    active_reminders = [r for r in (reminders or []) if not r.get("done")]
+    if active_reminders:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        overdue = [r for r in active_reminders if (r.get("due") or "") <= now_str]
+        upcoming = [r for r in active_reminders if (r.get("due") or "") > now_str]
+        reminder_items = (overdue + upcoming)[:6]
+        cnt = len(active_reminders)
+        overdue_cnt = len(overdue)
+        sub = f"{cnt} active"
+        if overdue_cnt:
+            sub += f" · {overdue_cnt} overdue!"
+        widgets.append({
+            "type": "reminders",
+            "size": "medium",
+            "title": "⏰ Reminders",
+            "subtitle": sub,
+            "items": reminder_items,
+        })
 
     # Proactive friction detection — surface nudges early
     nudges = _detect_friction_points(chats, todos, profile)
@@ -3349,6 +4075,7 @@ def chat_message(chat_id):
     resp, image_searches = extract_image_searches(resp)
     resp, image_generations = extract_image_generation(resp)
     resp, stock_tickers_sync = extract_stock_tickers(resp)
+    resp, extracted_reminders = extract_reminders(resp)
     # Fetch stock data synchronously for non-streaming path
     stock_results_sync = []
     if stock_tickers_sync:
@@ -3396,6 +4123,8 @@ def chat_message(chat_id):
         result["generated_images"] = gen_results
     if stock_results_sync:
         result["stock_results"] = stock_results_sync
+    if extracted_reminders:
+        result["reminders_set"] = extracted_reminders
     return jsonify(result)
 
 
@@ -3415,8 +4144,10 @@ def _fetch_stock_data_dict(ticker):
         change = price - prev_close if price and prev_close else 0
         change_pct = (change / prev_close * 100) if prev_close else 0
 
-        # Historical performance (1W, 1M, 3M, 6M, 1Y, YTD)
+        # Historical performance + advanced technicals
         perf = {}
+        technicals = {}
+        recent_prices = []
         try:
             hist = tk.history(period="1y")
             if not hist.empty and len(hist) > 1:
@@ -3431,27 +4162,105 @@ def _fetch_stock_data_dict(ticker):
                 perf["3m"] = _perf(63)
                 perf["6m"] = _perf(126)
                 perf["1y"] = _perf(252) if len(hist) >= 252 else _perf(len(hist)-1)
-                # YTD
                 import datetime as _dt
                 ytd_start = _dt.date(datetime.datetime.now().year, 1, 1)
                 ytd_data = hist[hist.index.date >= ytd_start]
                 if len(ytd_data) > 1:
                     perf["ytd"] = round((cur - ytd_data["Close"].iloc[0]) / ytd_data["Close"].iloc[0] * 100, 2)
-                # SMA 50 & 200 (simple moving avg)
+                # SMA 50, 200
                 if len(hist) >= 50:
                     perf["sma50"] = round(hist["Close"].iloc[-50:].mean(), 2)
                 if len(hist) >= 200:
                     perf["sma200"] = round(hist["Close"].iloc[-200:].mean(), 2)
+                # EMA 12, 26 (for MACD)
+                closes = hist["Close"]
+                if len(hist) >= 26:
+                    ema12 = closes.ewm(span=12, adjust=False).mean()
+                    ema26 = closes.ewm(span=26, adjust=False).mean()
+                    macd_line = ema12 - ema26
+                    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                    technicals["ema12"] = round(float(ema12.iloc[-1]), 2)
+                    technicals["ema26"] = round(float(ema26.iloc[-1]), 2)
+                    technicals["macd"] = round(float(macd_line.iloc[-1]), 4)
+                    technicals["macd_signal"] = round(float(signal_line.iloc[-1]), 4)
+                    technicals["macd_histogram"] = round(float(macd_line.iloc[-1] - signal_line.iloc[-1]), 4)
+                # Bollinger Bands (20-day, 2 std)
+                if len(hist) >= 20:
+                    sma20 = closes.rolling(20).mean()
+                    std20 = closes.rolling(20).std()
+                    technicals["bb_upper"] = round(float(sma20.iloc[-1] + 2 * std20.iloc[-1]), 2)
+                    technicals["bb_middle"] = round(float(sma20.iloc[-1]), 2)
+                    technicals["bb_lower"] = round(float(sma20.iloc[-1] - 2 * std20.iloc[-1]), 2)
+                    # %B indicator: where price sits in the bands (0 = lower, 1 = upper)
+                    bb_range = technicals["bb_upper"] - technicals["bb_lower"]
+                    if bb_range > 0:
+                        technicals["bb_pctb"] = round((float(cur) - technicals["bb_lower"]) / bb_range, 3)
                 # RSI(14)
                 if len(hist) >= 15:
-                    delta = hist["Close"].diff()
+                    delta = closes.diff()
                     gain = delta.clip(lower=0).rolling(14).mean()
                     loss = (-delta.clip(upper=0)).rolling(14).mean()
                     rs = gain / loss
                     rsi_series = 100 - (100 / (1 + rs))
                     rsi_val = rsi_series.iloc[-1]
-                    if not (rsi_val != rsi_val):  # NaN check
+                    if not (rsi_val != rsi_val):
                         perf["rsi"] = round(float(rsi_val), 1)
+                # Stochastic RSI (14-period)
+                if len(hist) >= 16 and perf.get("rsi") is not None:
+                    try:
+                        rsi_full = 100 - (100 / (1 + gain / loss))
+                        rsi_min = rsi_full.rolling(14).min()
+                        rsi_max = rsi_full.rolling(14).max()
+                        rsi_range = rsi_max - rsi_min
+                        stoch_rsi = ((rsi_full - rsi_min) / rsi_range).iloc[-1]
+                        if not (stoch_rsi != stoch_rsi):
+                            technicals["stoch_rsi"] = round(float(stoch_rsi) * 100, 1)
+                    except Exception:
+                        pass
+                # ATR(14) — Average True Range (volatility)
+                if len(hist) >= 15:
+                    try:
+                        h_c = hist["High"]
+                        l_c = hist["Low"]
+                        cl = closes.shift(1)
+                        tr1 = h_c - l_c
+                        tr2 = (h_c - cl).abs()
+                        tr3 = (l_c - cl).abs()
+                        tr = tr1.copy()
+                        tr[tr2 > tr] = tr2[tr2 > tr]
+                        tr[tr3 > tr] = tr3[tr3 > tr]
+                        atr_val = tr.rolling(14).mean().iloc[-1]
+                        if not (atr_val != atr_val):
+                            technicals["atr14"] = round(float(atr_val), 2)
+                            technicals["atr_pct"] = round(float(atr_val) / float(cur) * 100, 2)
+                    except Exception:
+                        pass
+                # Volume trend: avg volume last 5 days vs 20-day avg
+                if len(hist) >= 20:
+                    vol5 = hist["Volume"].iloc[-5:].mean()
+                    vol20 = hist["Volume"].iloc[-20:].mean()
+                    if vol20 > 0:
+                        technicals["vol_ratio_5d_20d"] = round(vol5 / vol20, 2)
+                # Recent 5-day price history
+                tail = hist.tail(5)
+                for _, row in tail.iterrows():
+                    recent_prices.append({
+                        "date": str(row.name.date()),
+                        "open": round(float(row["Open"]), 2),
+                        "high": round(float(row["High"]), 2),
+                        "low": round(float(row["Low"]), 2),
+                        "close": round(float(row["Close"]), 2),
+                        "volume": int(row["Volume"]),
+                    })
+                # Support/resistance from recent highs/lows
+                if len(hist) >= 20:
+                    r20_high = round(float(hist["High"].iloc[-20:].max()), 2)
+                    r20_low = round(float(hist["Low"].iloc[-20:].min()), 2)
+                    technicals["resistance_20d"] = r20_high
+                    technicals["support_20d"] = r20_low
+                if len(hist) >= 50:
+                    technicals["resistance_50d"] = round(float(hist["High"].iloc[-50:].max()), 2)
+                    technicals["support_50d"] = round(float(hist["Low"].iloc[-50:].min()), 2)
         except Exception:
             pass
 
@@ -3459,18 +4268,41 @@ def _fetch_stock_data_dict(ticker):
         health = {}
         health["profitMargin"] = info.get("profitMargins")
         health["operatingMargin"] = info.get("operatingMargins")
+        health["grossMargin"] = info.get("grossMargins")
         health["revenueGrowth"] = info.get("revenueGrowth")
         health["earningsGrowth"] = info.get("earningsGrowth")
         health["debtToEquity"] = info.get("debtToEquity")
         health["currentRatio"] = info.get("currentRatio")
+        health["quickRatio"] = info.get("quickRatio")
         health["returnOnEquity"] = info.get("returnOnEquity")
         health["returnOnAssets"] = info.get("returnOnAssets")
         health["freeCashflow"] = info.get("freeCashflow")
+        health["operatingCashflow"] = info.get("operatingCashflow")
+        health["totalCash"] = info.get("totalCash")
+        health["totalDebt"] = info.get("totalDebt")
+        health["totalRevenue"] = info.get("totalRevenue")
+        health["ebitda"] = info.get("ebitda")
+        health["ebitdaMargins"] = info.get("ebitdaMargins")
         health["revenuePerShare"] = info.get("revenuePerShare")
         health["bookValue"] = info.get("bookValue")
         health["priceToBook"] = info.get("priceToBook")
+        health["pegRatio"] = info.get("pegRatio")
+        health["enterpriseValue"] = info.get("enterpriseValue")
+        health["evToRevenue"] = info.get("enterpriseToRevenue")
+        health["evToEbitda"] = info.get("enterpriseToEbitda")
+        health["payoutRatio"] = info.get("payoutRatio")
 
-        # Compute a simple health score (0-100)
+        # Shares & ownership info
+        shares = {}
+        shares["outstanding"] = info.get("sharesOutstanding")
+        shares["float"] = info.get("floatShares")
+        shares["shortRatio"] = info.get("shortRatio")
+        shares["shortPctFloat"] = info.get("shortPercentOfFloat")
+        shares["insiderPct"] = info.get("heldPercentInsiders")
+        shares["institutionPct"] = info.get("heldPercentInstitutions")
+        shares["shortShares"] = info.get("sharesShort")
+
+        # Compute a simple health score (0-100) — weighing more factors
         score_parts = []
         pm = health.get("profitMargin")
         if pm is not None:
@@ -3494,9 +4326,16 @@ def _fetch_stock_data_dict(ticker):
         rec_scores = {"strong_buy": 95, "buy": 80, "hold": 50, "sell": 20, "strong_sell": 5}
         if rec and rec in rec_scores:
             score_parts.append(rec_scores[rec])
+        # Extra factors
+        eg = health.get("earningsGrowth")
+        if eg is not None:
+            score_parts.append(min(max((eg + 0.1) * 200, 0), 100))
+        gm = health.get("grossMargin")
+        if gm is not None:
+            score_parts.append(min(max(gm * 130, 0), 100))
         health["score"] = round(sum(score_parts) / len(score_parts)) if score_parts else None
 
-        # Compute verdict (buy / hold / sell)
+        # Compute verdict
         _hs = health.get("score")
         rec = info.get("recommendationKey")
         _rec_verdict = {"strong_buy": "buy", "buy": "buy", "hold": "hold", "sell": "sell", "strong_sell": "sell"}
@@ -3550,6 +4389,44 @@ def _fetch_stock_data_dict(ticker):
         except Exception:
             pass
 
+        # Recent earnings surprises
+        earnings_history = []
+        try:
+            eh = tk.earnings_history
+            if eh is not None and hasattr(eh, 'iterrows'):
+                for _, row in eh.tail(4).iterrows():
+                    rec_e = {}
+                    for col in eh.columns:
+                        val = row[col]
+                        if hasattr(val, 'item'):
+                            val = val.item()
+                        if val != val:  # NaN
+                            val = None
+                        rec_e[col] = val
+                    earnings_history.append(rec_e)
+        except Exception:
+            pass
+
+        # Insider transactions (recent)
+        insider_trades = []
+        try:
+            ins = tk.insider_transactions
+            if ins is not None and hasattr(ins, 'iterrows') and not ins.empty:
+                for _, row in ins.head(5).iterrows():
+                    tr = {}
+                    for col in ins.columns:
+                        val = row[col]
+                        if hasattr(val, 'isoformat'):
+                            val = str(val)[:10]
+                        elif hasattr(val, 'item'):
+                            val = val.item()
+                        if val != val:
+                            val = None
+                        tr[col] = val
+                    insider_trades.append(tr)
+        except Exception:
+            pass
+
         return {
             "ticker": ticker,
             "name": info.get("shortName") or info.get("longName") or ticker,
@@ -3563,7 +4440,10 @@ def _fetch_stock_data_dict(ticker):
             "pe": info.get("trailingPE"),
             "forwardPe": info.get("forwardPE"),
             "eps": info.get("trailingEps"),
+            "forwardEps": info.get("forwardEps"),
             "dividend": info.get("dividendYield"),
+            "dividendRate": info.get("dividendRate"),
+            "exDividendDate": str(info["exDividendDate"])[:10] if info.get("exDividendDate") else None,
             "high52": info.get("fiftyTwoWeekHigh"),
             "low52": info.get("fiftyTwoWeekLow"),
             "dayHigh": info.get("dayHigh"),
@@ -3576,13 +4456,19 @@ def _fetch_stock_data_dict(ticker):
             "targetPrice": info.get("targetMeanPrice"),
             "targetLow": info.get("targetLowPrice"),
             "targetHigh": info.get("targetHighPrice"),
+            "targetMedian": info.get("targetMedianPrice"),
             "numAnalysts": info.get("numberOfAnalystOpinions"),
             "recommendation": info.get("recommendationKey"),
             "perf": perf,
+            "technicals": technicals,
             "health": health,
+            "shares": shares,
             "risk": risk,
             "pos52": pos52,
             "earningsDate": earnings_date,
+            "earningsHistory": earnings_history[:4] if earnings_history else [],
+            "insiderTrades": insider_trades[:5] if insider_trades else [],
+            "recentPrices": recent_prices,
             "verdict": verdict,
         }
     except Exception as e:
@@ -3597,6 +4483,136 @@ def stock_data(ticker):
     if data.get("error"):
         return jsonify(data), 404 if "No data" in data.get("error", "") else 400
     return jsonify(data)
+
+
+@app.route("/api/stock-agent", methods=["POST"])
+@require_auth_or_guest
+def stock_agent():
+    """Multi-step stock analysis agent. Runs multiple AI prompts sequentially to deeply analyze stock data."""
+    data = request.get_json() or {}
+    chat_id = data.get("chat_id")
+    stock_data_list = data.get("stock_data", [])
+    user_query = data.get("query", "Analyze this stock")
+
+    if not stock_data_list:
+        return jsonify({"error": "No stock data provided"}), 400
+
+    settings = load_settings()
+    selected = normalize_selected_model(settings)
+    resolved = resolve_chat_model({"model": selected}, settings)
+    if resolved.get("error"):
+        return jsonify({"error": resolved["error"]}), 403
+
+    provider = resolved.get("provider")
+    api_key = resolved.get("api_key")
+    model = resolved.get("actual_model")
+    base_url = resolved.get("base_url")
+
+    full_dump = _build_full_stock_dump(stock_data_list)
+    steps = _stock_agent_steps(stock_data_list, user_query)
+    tickers = [d.get("ticker", "?") for d in stock_data_list if not d.get("error")]
+
+    def evt(payload):
+        return json.dumps(payload) + "\n"
+
+    @stream_with_context
+    def generate():
+        import time as _time
+        all_analysis = []
+
+        yield evt({"type": "agent_start", "total_steps": len(steps), "tickers": tickers})
+
+        for i, step in enumerate(steps):
+            step_start = _time.time()
+            yield evt({"type": "agent_step", "step": i + 1, "title": step["title"], "status": "running"})
+
+            # Only include previous analysis for steps 2+ to save tokens on step 1
+            if all_analysis:
+                prev_text = "\n\n".join(all_analysis)
+                prev_section = f"[YOUR ANALYSIS SO FAR]\n{prev_text}\n\nBuild on this — don't repeat what you've already said.\n\n"
+            else:
+                prev_section = ""
+
+            messages = [{
+                "role": "user",
+                "text": (
+                    f"[REAL-TIME STOCK DATA FROM YAHOO FINANCE]\n{full_dump}\n\n"
+                    f"{prev_section}"
+                    f"[YOUR TASK]\n{step['prompt']}"
+                ),
+            }]
+
+            try:
+                step_pieces = []
+                use_web = step.get("web_search", False)
+                stream_fn = STREAM_PROVIDERS.get(provider)
+                if stream_fn:
+                    for chunk in stream_fn(
+                        api_key, model, step["system"], messages,
+                        base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
+                    ):
+                        if isinstance(chunk, dict) and chunk.get("__thinking__"):
+                            yield evt({"type": "agent_thinking", "step": i + 1, "text": chunk.get("text", "")})
+                            continue
+                        step_pieces.append(chunk)
+                        yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
+                else:
+                    full = PROVIDERS.get(provider, call_openai)(
+                        api_key, model, step["system"], messages,
+                        base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
+                    )
+                    step_pieces.append(full)
+                    yield evt({"type": "agent_delta", "step": i + 1, "text": full})
+
+                step_result = "".join(step_pieces)
+                all_analysis.append(f"## {step['title']}\n{step_result}")
+                elapsed = round(_time.time() - step_start, 1)
+                yield evt({"type": "agent_step", "step": i + 1, "title": step["title"], "status": "complete", "elapsed": elapsed})
+            except Exception as e:
+                elapsed = round(_time.time() - step_start, 1)
+                all_analysis.append(f"## {step['title']}\n*Analysis failed for this step: {str(e)[:100]}*")
+                yield evt({"type": "agent_step", "step": i + 1, "title": step["title"], "status": "failed", "error": str(e)[:200], "elapsed": elapsed})
+                # Continue to next step instead of stopping
+
+        full_analysis = "\n\n".join(all_analysis)
+        full_analysis += "\n\n---\n*Not financial advice. AI analysis may be inaccurate. Always do your own research and consult a licensed financial advisor. You could lose money.*"
+        yield evt({"type": "agent_done", "analysis": full_analysis, "tickers": tickers})
+
+        # Save to chat history
+        if chat_id:
+            try:
+                chat, _ = load_chat(chat_id)
+                if chat:
+                    # Build per-step breakdown for reliable reconstruction on reload
+                    step_breakdown = []
+                    for entry in all_analysis:
+                        # Each entry is "## Title\ncontent"
+                        nl = entry.find('\n')
+                        if nl > 0:
+                            step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
+                        else:
+                            step_breakdown.append({"title": entry[3:].strip(), "body": ""})
+                    # Strip heavy raw data from stock_data before saving (keep only display-relevant fields)
+                    slim_stock = []
+                    for sd in stock_data_list:
+                        slim_stock.append({k: sd.get(k) for k in (
+                            "ticker","currentPrice","revenueGrowth","earningsGrowth",
+                            "forwardEps","trailingEps","targetMeanPrice","error"
+                        ) if sd.get(k) is not None})
+                    chat["messages"].append({
+                        "role": "model",
+                        "text": full_analysis,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "stock_agent": True,
+                        "stock_agent_steps": step_breakdown,
+                        "stock_agent_tickers": tickers,
+                        "stock_agent_data": slim_stock,
+                    })
+                    save_chat(chat)
+            except Exception:
+                pass
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 @app.route("/api/detect-tools", methods=["POST"])
@@ -3858,6 +4874,7 @@ def chat_message_stream(chat_id):
             raw_text, image_searches = extract_image_searches(raw_text)
             raw_text, image_generations = extract_image_generation(raw_text)
             raw_text, stock_tickers = extract_stock_tickers(raw_text)
+            raw_text, stream_reminders = extract_reminders(raw_text)
             should_continue = '<<<CONTINUE>>>' in raw_text
             has_pending_ops = bool(image_searches or image_generations or stock_tickers)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
@@ -3895,6 +4912,8 @@ def chat_message_stream(chat_id):
                 done_payload["pending_generations"] = [{"prompt": g["prompt"], "index": g["index"], "aspect_ratio": g["aspect_ratio"]} for g in image_generations]
             if stock_tickers:
                 done_payload["pending_stocks"] = [{"ticker": s["ticker"], "index": s["index"]} for s in stock_tickers]
+            if stream_reminders:
+                done_payload["reminders_set"] = stream_reminders
             # Tell frontend which results were already delivered mid-stream
             if _fetched_images:
                 done_payload["preloaded_image_indices"] = [r["index"] for r in _fetched_images]
@@ -3921,6 +4940,8 @@ def chat_message_stream(chat_id):
                 _gen_complete = {"type": "gen_ops_complete", "success": total_success > 0, "total": total_ops, "succeeded": total_success, "failed": total_ops - total_success}
                 if stock_tickers and _fetched_stocks:
                     _gen_complete["stock_reprompt"] = _build_stock_reprompt_summary(_fetched_stocks)
+                    _gen_complete["fetched_stocks"] = _fetched_stocks
+                    _gen_complete["user_query"] = ctx.get("user_text", "")
                 yield event(_gen_complete)
 
         except Exception as e:
@@ -4300,10 +5321,10 @@ def get_greeting():
         h = None
     if h is None:
         h = datetime.datetime.now().hour
-    if h < 5: period = "late night"
+    if h < 6: period = "late night"
     elif h < 12: period = "morning"
     elif h < 17: period = "afternoon"
-    elif h < 21: period = "evening"
+    elif h < 22: period = "evening"
     else: period = "late night"
     name_part = f", {uname}" if uname else ""
     presets = {
@@ -4367,6 +5388,7 @@ def home_widgets_route():
     body = request.get_json() or {}
     todos = body.get("todos", []) if isinstance(body.get("todos", []), list) else []
     visions = body.get("visions", []) if isinstance(body.get("visions", []), list) else []
+    reminders = body.get("reminders", []) if isinstance(body.get("reminders", []), list) else []
 
     user = _cur_user() or {}
     profile = load_profile() if session.get("user_id") else {
@@ -4378,7 +5400,7 @@ def home_widgets_route():
     }
     chats = list_chats() if session.get("user_id") else []
 
-    plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions)
+    plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions, reminders=reminders)
     return jsonify(plan)
 
 # ─── Deep Research Engine ────────────────────────────────────────────────────

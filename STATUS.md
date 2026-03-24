@@ -1,12 +1,13 @@
-# Project Status: gyro
-
-**Current Focus:** Professional Identity & Resume Optimization
-**Momentum:** High 🚀
+# Mission Control
 
 ## Active Projects
-- [x] **Resume Update:** Version 2.0 created with a focus on AI Agency.
-- [ ] **Portfolio Site:** Consider building a web-based version of the resume.
-- [ ] **gyro Core:** Ongoing development.
 
-## Friction Points
-- None currently identified.
+### 📈 Project: The First Trade (SOFI)
+**Status:** Waiting on Fidelity bank link (1-5 business days from March 24)
+**Capital:** $79.00
+**Target Asset:** SoFi Technologies (SOFI)
+**Catalyst Date:** April 28, 2026 (Earnings Report)
+**Exit Strategy Date:** Morning of April 29, 2026
+
+**Next Action:** 
+Check Fidelity app around Thursday/Friday to see if the Chase account link has turned green. Once it clears, transfer the $79.

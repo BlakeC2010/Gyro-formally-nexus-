@@ -593,7 +593,7 @@ function buildMasterPromptCards(){
 
 function hasWidgetContent(w){
   const type=(w?.type||'focus').toLowerCase();
-  if(type==='recent'||type==='todos'||type==='nudge'||type==='workflow')return Array.isArray(w.items)&&w.items.length>0;
+  if(type==='recent'||type==='todos'||type==='nudge'||type==='workflow'||type==='reminders')return Array.isArray(w.items)&&w.items.length>0;
   if(type==='vision')return!!(w?.text||'').trim();
   if(type==='motivation')return!!(w?.text||'').trim();
   return true;
@@ -680,12 +680,53 @@ function renderHomeWidget(w){
     if(!text)return'';
     return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(text)}</div></div>`;
   }
+  if(type==='reminders'){
+    const items=Array.isArray(w.items)?w.items:[];
+    if(!items.length)return'';
+    const now=new Date();
+    const body=items.map(i=>{
+      let isOverdue=false;
+      let dueLabel='';
+      if(i.due){
+        try{
+          const d=new Date(i.due);
+          isOverdue=d<=now;
+          const diff=d-now;
+          if(isOverdue){
+            const mins=Math.floor(Math.abs(diff)/60000);
+            if(mins<60)dueLabel=`${mins}m overdue`;
+            else if(mins<1440)dueLabel=`${Math.floor(mins/60)}h overdue`;
+            else dueLabel=`${Math.floor(mins/1440)}d overdue`;
+          }else{
+            const mins=Math.floor(diff/60000);
+            if(mins<60)dueLabel=`in ${mins}m`;
+            else if(mins<1440)dueLabel=`in ${Math.floor(mins/60)}h`;
+            else dueLabel=`in ${Math.floor(mins/1440)}d`;
+          }
+        }catch{}
+      }
+      const overdueClass=isOverdue?'wl-reminder-overdue':'';
+      return `<div class="wl-reminder-item ${overdueClass}" data-reminder-id="${esc(i.id||'')}">`
+        +`<button class="wl-reminder-check" onclick="event.stopPropagation();completeReminder('${esc(i.id||'')}')">○</button>`
+        +`<div class="wl-reminder-body">`
+        +`<div class="wl-reminder-text">${esc(i.text||'')}</div>`
+        +(dueLabel?`<div class="wl-reminder-due ${overdueClass}">${isOverdue?'⚠ ':''}${esc(dueLabel)}</div>`:'')
+        +`</div>`
+        +`<div class="wl-reminder-actions">`
+        +`<button class="wl-reminder-snooze" onclick="event.stopPropagation();snoozeReminder('${esc(i.id||'')}')" title="Snooze 24h">⏸</button>`
+        +`<button class="wl-reminder-del" onclick="event.stopPropagation();deleteReminder('${esc(i.id||'')}')" title="Delete">✕</button>`
+        +`</div>`
+        +`</div>`;
+    }).join('');
+    return `<div class="${cls} wl-reminder-widget"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-reminder-list">${body}</div></div>`;
+  }
   return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Ready when you are.')}</div></div>`;
 }
 
 function buildInstantHomePlan(greeting){
   const state=loadProductivityState();
   const todos=(state.todos||[]).filter(t=>!t.done).slice(0,5);
+  const reminders=(state.reminders||[]).filter(r=>!r.done);
   const chats=(allChats||[]).slice(0,4);
   const pool=[];
 
@@ -698,6 +739,24 @@ function buildInstantHomePlan(greeting){
       title:'Needs your attention',
       subtitle:`${nudges.length} item${nudges.length!==1?'s':''}`,
       items:nudges,
+    });
+  }
+
+  // Reminders widget (high priority — right after nudges)
+  if(reminders.length){
+    const now=new Date();
+    const sorted=[...reminders].sort((a,b)=>{
+      if(!a.due&&!b.due)return 0;
+      if(!a.due)return 1;
+      if(!b.due)return -1;
+      return new Date(a.due)-new Date(b.due);
+    });
+    pool.push({
+      type:'reminders',
+      size:'medium',
+      title:'⏰ Reminders',
+      subtitle:`${reminders.length} pending`,
+      items:sorted.slice(0,6),
     });
   }
 
@@ -726,7 +785,7 @@ function buildInstantHomePlan(greeting){
 }
 
 function getWelcomeHTML(greeting,homePlan){
-  const displayGreeting=greeting!==undefined?greeting:getLocalTimeGreeting();
+  const displayGreeting=(greeting!==undefined?greeting:getLocalTimeGreeting()).replace(/[\u{1F300}-\u{1FAF8}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}]/gu,'').trim();
   const aiWidgets=Array.isArray(homePlan?.widgets)?homePlan.widgets:[];
   const validWidgets=aiWidgets.filter(hasWidgetContent);
   const dataCards=validWidgets.map(renderHomeWidget).filter(Boolean).join('');
@@ -1054,6 +1113,7 @@ async function fetchHomeWidgetsPlan(){
   const payload={
     todos:(state.todos||[]).slice(0,10),
     visions:(state.visions||[]).slice(0,6),
+    reminders:(state.reminders||[]).filter(r=>!r.done).slice(0,10),
   };
   try{
     const r=await fetch('/api/home-widgets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -2266,7 +2326,289 @@ function regenerateResearch(query){
   sendMessage();
 }
 
-/* ─── Post-Processing (separate from research pipeline) ─────── */
+/* ─── Stock Analysis Agent ──────────────────────────────────── */
+function _saParseRating(text){
+  const t=(text||'').toUpperCase();
+  if(/STRONG\s*BUY/.test(t))return 5;
+  if(/STRONG\s*SELL/.test(t))return 1;
+  if(/\bBUY\b/.test(t))return 4;
+  if(/\bSELL\b/.test(t))return 2;
+  if(/\bHOLD\b|\bNEUTRAL\b/.test(t))return 3;
+  return 3;
+}
+function buildSentimentGauge(rating){
+  const labels=['Strong Sell','Sell','Hold','Buy','Strong Buy'];
+  const colors=['#ef4444','#f97316','#eab308','#22c55e','#16a34a'];
+  const pct=((rating-1)/4)*100;
+  const label=labels[rating-1]||'Hold';
+  const color=colors[rating-1]||'#eab308';
+  return `<div class="sa-gauge-wrap"><div class="sa-gauge-title">AI Verdict</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${label}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`;
+}
+function buildGrowthChart(stockData){
+  const items=(stockData||[]).filter(d=>!d.error);
+  if(!items.length)return '';
+  let bars='';
+  for(const d of items){
+    const ticker=d.ticker||'?';
+    const metrics=[];
+    const addM=(label,raw,mult)=>{const v=parseFloat(raw);if(!isNaN(v)&&raw!=null&&raw!=='N/A')metrics.push({label,value:mult?v*100:v})};
+    addM('Revenue Growth',d.revenueGrowth,true);
+    addM('Earnings Growth',d.earningsGrowth,true);
+    if(d.forwardEps!=null&&d.trailingEps!=null&&d.forwardEps!=='N/A'&&d.trailingEps!=='N/A'){
+      const f=parseFloat(d.forwardEps),tr=parseFloat(d.trailingEps);
+      if(!isNaN(f)&&!isNaN(tr)&&tr!==0)metrics.push({label:'EPS Growth',value:((f-tr)/Math.abs(tr))*100});
+    }
+    if(d.targetMeanPrice!=null&&d.currentPrice!=null&&d.targetMeanPrice!=='N/A'){
+      const tgt=parseFloat(d.targetMeanPrice),cur=parseFloat(d.currentPrice);
+      if(!isNaN(tgt)&&!isNaN(cur)&&cur!==0)metrics.push({label:'Analyst Upside',value:((tgt-cur)/cur)*100});
+    }
+    if(!metrics.length)continue;
+    const maxAbs=Math.max(...metrics.map(m=>Math.abs(m.value)),30);
+    bars+=`<div class="sa-growth-ticker">${items.length>1?`<div class="sa-growth-ticker-label">${esc(ticker)}</div>`:''}`;
+    for(const m of metrics){
+      const pct=Math.min(Math.abs(m.value)/maxAbs*100,100);
+      const isPos=m.value>=0;
+      const color=isPos?'var(--green,#22c55e)':'var(--red,#ef4444)';
+      bars+=`<div class="sa-growth-row"><span class="sa-growth-label">${m.label}</span><div class="sa-growth-bar-track"><div class="sa-growth-bar-fill" style="width:${pct}%;background:${color}"></div></div><span class="sa-growth-value" style="color:${color}">${isPos?'+':''}${m.value.toFixed(1)}%</span></div>`;
+    }
+    bars+='</div>';
+  }
+  if(!bars)return '';
+  return `<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Growth & Projections</div>${bars}</div>`;
+}
+async function runStockAgent(stockData, userQuery, contentEl, area, chatId){
+  const tickers=stockData.filter(d=>!d.error).map(d=>d.ticker||'?');
+  const totalSteps=8;
+  const stepNames=['Market Snapshot','News & Headlines','Technical Analysis','Fundamental Analysis','Deep Research','Risk & Ownership','Valuation & Targets','Final Verdict'];
+  let currentStep=0, currentPct=0;
+  const stepTimers={};
+  const stepElapsed={};
+  const manualToggles=new Set();
+  window._saManualToggles=manualToggles;
+
+  const stepsHtml=stepNames.map((name,i)=>`<div class="sa-step" data-sa="${i}"><div class="sa-step-dot" onclick="saScrollToStep(${i+1})">${i+1}</div><div class="sa-step-label">${name}</div></div>`).join('');
+
+  contentEl.innerHTML=`
+    <div class="sa-badge"><span class="sa-badge-icon">📊</span> Stock Analysis Agent</div>
+    <div class="sa-progress" id="_saP">
+      <div class="sa-header">
+        <span class="sa-title" id="_saTitle">Analyzing ${esc(tickers.join(', '))}...</span>
+        <span class="sa-pct" id="_saPct">0%</span>
+      </div>
+      <div class="sa-bar-track"><div class="sa-bar-fill" id="_saBar" style="width:0%"></div></div>
+      <div class="sa-steps" id="_saSteps">
+        <div class="sa-steps-line"><div class="sa-steps-line-fill" id="_saLine" style="width:0%"></div></div>
+        ${stepsHtml}
+      </div>
+      <div class="sa-activity"><span class="sa-activity-dot"></span><span id="_saMsg">Initializing analysis...</span></div>
+      <div class="sa-total-time" id="_saTotalTime" style="display:none"></div>
+    </div>
+    <div class="sa-output" id="_saOut"></div>`;
+  area.scrollTop=area.scrollHeight;
+
+  window.saScrollToStep=function(stepNum){
+    const section=document.getElementById('_saS'+stepNum);
+    if(!section)return;
+    const outEl=document.getElementById('_saOut');
+    // Collapse all other sections, expand the clicked one
+    if(outEl){
+      outEl.querySelectorAll('.sa-section').forEach(sec=>{
+        const sNum=parseInt(sec.id.replace('_saS',''));
+        if(sNum===stepNum){sec.classList.remove('sa-collapsed');}
+        else{sec.classList.add('sa-collapsed');}
+        manualToggles.add(sNum);
+      });
+    }
+    section.scrollIntoView({behavior:'smooth',block:'nearest'});
+  };
+
+  const updateProgress=(step,msg)=>{
+    currentStep=step;
+    currentPct=Math.round((step/totalSteps)*100);
+    const titleEl=document.getElementById('_saTitle');
+    const pctEl=document.getElementById('_saPct');
+    const barEl=document.getElementById('_saBar');
+    const lineEl=document.getElementById('_saLine');
+    const msgEl=document.getElementById('_saMsg');
+    const stepsEl=document.getElementById('_saSteps');
+    if(titleEl)titleEl.textContent=step<totalSteps?stepNames[step]+'...':'Analysis complete!';
+    if(pctEl)pctEl.textContent=currentPct+'%';
+    if(barEl)barEl.style.width=currentPct+'%';
+    if(lineEl)lineEl.style.width=Math.min(((step)/(totalSteps-1))*100,100)+'%';
+    if(msgEl)msgEl.textContent=msg||'Working...';
+    if(stepsEl){
+      stepsEl.querySelectorAll('.sa-step').forEach((dot,i)=>{
+        dot.className='sa-step'+(i<step?' done':(i===step?' active':''));
+        const inner=dot.querySelector('.sa-step-dot');
+        if(inner)inner.textContent=i<step?'✓':String(i+1);
+      });
+    }
+  };
+
+  try{
+    const response=await apiFetch('/api/stock-agent',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:chatId,stock_data:stockData,query:userQuery})
+    });
+    if(!response.ok){
+      const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
+      throw new Error(d.error||'Stock analysis failed');
+    }
+
+    const reader=response.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    const outEl=document.getElementById('_saOut');
+    let currentContentEl=null;
+    let stepContent='';
+    let stepThinking='';
+    let failedSteps=0;
+
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      let nl;
+      while((nl=buffer.indexOf('\n'))>=0){
+        const line=buffer.slice(0,nl).trim();
+        buffer=buffer.slice(nl+1);
+        if(!line)continue;
+        let evt;
+        try{evt=JSON.parse(line)}catch(e){continue}
+
+        if(evt.type==='agent_start'){
+          updateProgress(0,'Starting analysis of '+evt.tickers.join(', ')+'...');
+        }else if(evt.type==='agent_step'){
+          if(evt.status==='running'){
+            stepTimers[evt.step]=Date.now();
+            updateProgress(evt.step-1, evt.title+'...');
+            stepContent='';
+            stepThinking='';
+            // Auto-collapse previous sections (unless manually toggled)
+            if(outEl){
+              outEl.querySelectorAll('.sa-section').forEach(sec=>{
+                const sNum=parseInt(sec.id.replace('_saS',''));
+                if(!manualToggles.has(sNum)) sec.classList.add('sa-collapsed');
+              });
+            }
+            const section=document.createElement('div');
+            section.className='sa-section sa-slide-in';
+            section.id='_saS'+evt.step;
+            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${evt.step}</span><span class="sa-section-title">${esc(evt.title)}</span><span class="sa-section-timer" id="_saT${evt.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block" id="_saThink${evt.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${evt.step}"></div></div><div class="sa-step-content" id="_saC${evt.step}"></div></div>`;
+            if(outEl)outEl.appendChild(section);
+            currentContentEl=section.querySelector('.sa-step-content');
+            area.scrollTop=area.scrollHeight;
+          }else if(evt.status==='complete'){
+            updateProgress(evt.step, evt.title+' complete');
+            const statusEl=document.querySelector('#_saS'+evt.step+' .sa-section-status');
+            if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
+            const elapsed=evt.elapsed||(stepTimers[evt.step]?((Date.now()-stepTimers[evt.step])/1000).toFixed(1):null);
+            stepElapsed[evt.step]=parseFloat(elapsed)||0;
+            const timerEl=document.getElementById('_saT'+evt.step);
+            if(timerEl&&elapsed)timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_saC'+evt.step);
+            if(ce)ce.innerHTML=fmt(stepContent);
+            // Finalize thinking label
+            const thEl=document.getElementById('_saThink'+evt.step);
+            if(thEl&&stepThinking){
+              const lb=thEl.querySelector('.sa-thinking-label');
+              if(lb)lb.textContent='View thinking';
+            }
+            area.scrollTop=area.scrollHeight;
+          }else if(evt.status==='failed'){
+            failedSteps++;
+            const statusEl=document.querySelector('#_saS'+evt.step+' .sa-section-status');
+            if(statusEl){statusEl.textContent='✗ failed';statusEl.className='sa-section-status sa-failed';}
+            const elapsed=evt.elapsed||(stepTimers[evt.step]?((Date.now()-stepTimers[evt.step])/1000).toFixed(1):null);
+            stepElapsed[evt.step]=parseFloat(elapsed)||0;
+            const timerEl=document.getElementById('_saT'+evt.step);
+            if(timerEl&&elapsed)timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_saC'+evt.step);
+            if(ce&&evt.error){
+              ce.innerHTML=`<div class="sa-step-error">⚠️ This analysis step failed: ${esc(evt.error.slice(0,150))}</div>`;
+            }
+            updateProgress(evt.step, evt.title+' failed — continuing...');
+          }
+        }else if(evt.type==='agent_thinking'){
+          stepThinking+=(evt.text||'');
+          const thEl=document.getElementById('_saThink'+evt.step);
+          if(thEl){
+            thEl.style.display='';
+            const thC=document.getElementById('_saThinkC'+evt.step);
+            if(thC)thC.textContent=stepThinking;
+          }
+        }else if(evt.type==='agent_delta'){
+          stepContent+=evt.text;
+          if(currentContentEl){
+            currentContentEl.innerHTML=fmtLive(stepContent);
+            area.scrollTop=area.scrollHeight;
+          }
+        }else if(evt.type==='agent_done'){
+          updateProgress(totalSteps,'Analysis complete!');
+          // Total time
+          const totalTime=Object.values(stepElapsed).reduce((a,b)=>a+b,0).toFixed(1);
+          const ttEl=document.getElementById('_saTotalTime');
+          if(ttEl){ttEl.style.display='';ttEl.innerHTML=`⏱️ Total analysis time: <strong>${totalTime}s</strong>`;}
+          // Hide activity bar
+          const actEl=contentEl.querySelector('.sa-activity');
+          if(actEl)actEl.style.display='none';
+          // Collapse all sections for clean summary view
+          if(outEl) outEl.querySelectorAll('.sa-section').forEach(s=>s.classList.add('sa-collapsed'));
+          // Sentiment gauge from final verdict
+          const lastC=document.getElementById('_saC'+totalSteps);
+          const rating=_saParseRating(lastC?lastC.textContent:'');
+          const gaugeHtml=buildSentimentGauge(rating);
+          const growthHtml=buildGrowthChart(stockData);
+          const extras=document.createElement('div');
+          extras.className='sa-extras';
+          extras.innerHTML=gaugeHtml+growthHtml;
+          if(outEl)outEl.insertBefore(extras,outEl.firstChild);
+          // Quick summary — extract the first ~2 sentences from the final verdict
+          const verdictEl=document.getElementById('_saC'+totalSteps);
+          const verdictText=(verdictEl?verdictEl.textContent:'').trim();
+          if(verdictText){
+            const sentences=verdictText.split(/(?<=[.!?])\s+/).slice(0,3).join(' ');
+            const summaryDiv=document.createElement('div');
+            summaryDiv.className='sa-summary';
+            summaryDiv.innerHTML=`<div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div>`;
+            if(outEl)outEl.insertBefore(summaryDiv,outEl.querySelector('.sa-section'));
+          }
+          // Disclaimer
+          const disc=document.createElement('div');
+          disc.className='stock-disclaimer sa-disclaimer';
+          disc.innerHTML='⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only. Always do your own research and consult a licensed financial advisor. You could lose money.';
+          if(outEl)outEl.appendChild(disc);
+          // Re-analyze button
+          const reBtn=document.createElement('button');
+          reBtn.className='sa-reanalyze';
+          reBtn.innerHTML='🔄 Re-analyze';
+          reBtn.onclick=async()=>{
+            reBtn.disabled=true;reBtn.textContent='⏳ Re-analyzing...';
+            try{
+              contentEl.innerHTML='';
+              await runStockAgent(stockData, userQuery, contentEl, area, chatId);
+            }catch(e2){
+              contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e2.message||'Re-analysis failed.')}</div>`;
+            }
+          };
+          if(outEl)outEl.appendChild(reBtn);
+          // Update badge
+          const badge=contentEl.querySelector('.sa-badge');
+          const completeTxt=failedSteps>0
+            ?`⚠️ Analysis Complete (${totalSteps-failedSteps}/${totalSteps} steps) — ${esc(tickers.join(', '))}`
+            :`✅ Stock Analysis Complete — ${esc(tickers.join(', '))}`;
+          if(badge){badge.innerHTML=completeTxt;if(!failedSteps)badge.classList.add('sa-badge-done');}
+          area.scrollTop=area.scrollHeight;
+        }
+      }
+    }
+  }catch(e){
+    contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">Stock analysis failed: ${esc(e.message||'Unknown error')}</div>`;
+    setStatus('Stock analysis failed.');
+  }
+}
+
 let _lastResearchReport='';
 let _lastResearchSources=[];
 
@@ -2858,6 +3200,7 @@ function stripMetaBlocks(text){
     .replace(/<<<IMAGE_GENERATE:\s*.+?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
+    .replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'')
     .trim();
 }
 
@@ -2943,6 +3286,22 @@ function fmtLive(raw){
   // Completed code blocks: render styled
   html=html.replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>{
     return '<pre class="stream-code"><code>'+c+'</code></pre>';
+  });
+
+  // Markdown tables — protect in live blocks to avoid <br> inside <table>
+  html=html.replace(/(?:^|\n)(\|.+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|.+\|[ \t]*(?:\n|$))+)/gm,(match)=>{
+    const lines=match.trim().split('\n').filter(l=>l.trim());
+    if(lines.length<3)return match;
+    const parseRow=line=>line.replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+    const fmtCell=c=>c.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:1px 4px;border-radius:3px;font-size:11px">$1</code>');
+    const headers=parseRow(lines[0]);
+    if(!/^[\s|:\-]+$/.test(lines[1].replace(/\|/g,'')))return match;
+    const rows=lines.slice(2).map(parseRow);
+    let tbl='<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:12px"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
+    for(const row of rows)tbl+='<tr>'+row.map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
+    tbl+='</tbody></table>';
+    _liveBlocks.push(tbl);
+    return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
   });
 
   // Bold
@@ -3152,10 +3511,20 @@ async function sendMessage(opts){
   setChatRunning(targetChatId,true,{type:'chat',controller,streamId});
   const area=document.getElementById('chatArea');
 
+  // Smart auto-scroll: only scroll to bottom if user is near the bottom already
+  let _userScrolledAway=false;
+  const _scrollThreshold=150;
+  const _onUserScroll=()=>{
+    const distFromBottom=area.scrollHeight-area.scrollTop-area.clientHeight;
+    _userScrolledAway=distFromBottom>_scrollThreshold;
+  };
+  area.addEventListener('scroll',_onUserScroll,{passive:true});
+  const _autoScroll=()=>{if(!_userScrolledAway)area.scrollTop=area.scrollHeight;};
+
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
   msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
-  area.appendChild(msgDiv);area.scrollTop=area.scrollHeight;
+  area.appendChild(msgDiv);_autoScroll();
   startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
@@ -3182,7 +3551,7 @@ async function sendMessage(opts){
     }
 
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation()}),signal:controller.signal});
+      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation(),reminders:_getPendingReminders()}),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -3282,7 +3651,7 @@ async function sendMessage(opts){
                 if(lbl)lbl.textContent='Considering '+subj;
                 _thinkSubjectSet=true;
               }
-              area.scrollTop=area.scrollHeight;
+              _autoScroll();
             }
           }else if(data.type==='delta'){
             // Transition from thinking to response
@@ -3314,7 +3683,7 @@ async function sendMessage(opts){
                 }else{
                   targetEl.innerHTML=fmtLive(fullText);
                 }
-                area.scrollTop=area.scrollHeight;
+                _autoScroll();
               });
             }
           // ── Mid-stream media loading event ──
@@ -3331,7 +3700,7 @@ async function sendMessage(opts){
                 if(!canRender())return;
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 targetEl.innerHTML=fmtLive(fullText);
-                area.scrollTop=area.scrollHeight;
+                _autoScroll();
               });
             }
           }else if(data.type==='done'){
@@ -3426,6 +3795,16 @@ async function sendMessage(opts){
               }
             }
             if(data.memory_added?.length)finalHTML+=`<div class="mops">Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
+            // ── Handle reminders set by AI ──
+            if(data.reminders_set?.length){
+              const state=loadProductivityState();
+              for(const r of data.reminders_set){
+                state.reminders.push({id:'r_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),due:r.due||'',text:r.text||'',done:false,created:new Date().toISOString()});
+              }
+              saveProductivityState(state);
+              finalHTML+=`<div class="mops">⏰ ${data.reminders_set.length} reminder${data.reminders_set.length!==1?'s':''} set</div>`;
+              refreshHomeWidgets();
+            }
 
             // ── Image search — show loading placeholders for pending images ──
             if(!devRawMode&&data.pending_images?.length){
@@ -3540,7 +3919,7 @@ async function sendMessage(opts){
               researchMsgDiv.innerHTML='<div class="lbl">gyro</div>';
               researchMsgDiv.appendChild(researchContentEl);
               chatArea.appendChild(researchMsgDiv);
-              chatArea.scrollTop=chatArea.scrollHeight;
+              _autoScroll();
               setChatRunning(targetChatId,false);
               setChatRunning(targetChatId,true,{type:'research'});
               try{
@@ -3681,7 +4060,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3693,7 +4072,7 @@ async function sendMessage(opts){
                 temp.innerHTML=html;
                 loader.replaceWith(temp.firstElementChild||temp);
               }
-              area.scrollTop=area.scrollHeight;
+              _autoScroll();
             }
           }else if(data.type==='image_failed'){
             _genFailures.push({type:'image_search',query:data.query||''});
@@ -3706,7 +4085,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3729,7 +4108,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3757,7 +4136,7 @@ async function sendMessage(opts){
                 temp.innerHTML=html;
                 loader.replaceWith(temp.firstElementChild||temp);
               }
-              area.scrollTop=area.scrollHeight;
+              _autoScroll();
             }
           }else if(data.type==='image_gen_failed'){
             _genFailures.push({type:'image_gen',prompt:data.prompt||'',error:data.error||''});
@@ -3770,7 +4149,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3793,7 +4172,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3805,7 +4184,7 @@ async function sendMessage(opts){
                 temp.innerHTML=html;
                 loader.replaceWith(temp.firstElementChild||temp);
               }
-              area.scrollTop=area.scrollHeight;
+              _autoScroll();
             }
           }else if(data.type==='stock_failed'){
             if(!_doneReceived){
@@ -3817,7 +4196,7 @@ async function sendMessage(opts){
                   if(!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
-                  area.scrollTop=area.scrollHeight;
+                  _autoScroll();
                 });
               }
             }else if(!devRawMode&&canRender()){
@@ -3829,17 +4208,56 @@ async function sendMessage(opts){
             }
           }else if(data.type==='gen_ops_complete'){
             // All generative operations (image gen, image search, stock) are done
-            // Stock auto-reprompt: send fetched data back to AI for analysis
+            // Stock agent: run multi-step analysis instead of simple reprompt
             if(data.stock_reprompt&&!_genFailures.length){
               setChatRunning(targetChatId,false);
               _continueCount=0;
               _pendingContinueAfterOps=false;
-              setStatus('Analyzing stock data...');
-              try{
-                const inp=document.getElementById('msgInput');
-                inp.value=`[SYSTEM] Stock data has been loaded. Here is the live data from Yahoo Finance for the stocks you just displayed:\n\n${data.stock_reprompt}\n\nNow analyze this data for the user. Reference the ACTUAL numbers shown above. The stock cards are already visible to the user — do NOT re-embed <<<STOCK>>> tags. Instead, provide your analysis, comparison, or recommendation based on the real data. Keep it concise (3-5 sentences max). Include the mandatory disclaimer.`;
-                sendMessage({silent:true,noThinking:true});
-              }catch(_){}
+              setStatus('Running stock analysis agent...');
+              // Collect the fetched stock data objects for the agent
+              const agentStockData=[];
+              if(window._streamMediaResults){
+                for(const [key,result] of Object.entries(window._streamMediaResults)){
+                  if(key.startsWith('stock-')&&result&&result.data){
+                    agentStockData.push(result.data);
+                  }
+                }
+              }
+              // Also try from the _fetched list in done payload
+              if(!agentStockData.length&&data.fetched_stocks){
+                for(const sr of data.fetched_stocks){
+                  if(sr.data&&!sr.data.error)agentStockData.push(sr.data);
+                }
+              }
+              if(agentStockData.length){
+                // Create a new message div for the stock analysis
+                const chatArea=document.getElementById('chatArea');
+                const agentMsgDiv=document.createElement('div');
+                agentMsgDiv.className='msg kairo';
+                const agentContentEl=document.createElement('div');
+                agentContentEl.className='msg-content';
+                agentMsgDiv.innerHTML='<div class="lbl">gyro</div>';
+                agentMsgDiv.appendChild(agentContentEl);
+                chatArea.appendChild(agentMsgDiv);
+                _autoScroll();
+                setChatRunning(targetChatId,true,{type:'stock_agent'});
+                try{
+                  const userQ=data.user_query||'Analyze this stock';
+                  await runStockAgent(agentStockData, userQ, agentContentEl, chatArea, targetChatId);
+                  await refreshChats();
+                }catch(e){
+                  agentContentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Stock analysis failed.')}</div>`;
+                }
+                setChatRunning(targetChatId,false);
+                setStatus('Stock analysis complete.');
+              }else{
+                // Fallback: simple reprompt if we couldn't collect stock data objects
+                try{
+                  const inp=document.getElementById('msgInput');
+                  inp.value=`[SYSTEM] Stock data has been loaded. Here is the live data from Yahoo Finance for the stocks you just displayed:\n\n${data.stock_reprompt}\n\nNow analyze this data for the user. Reference the ACTUAL numbers shown above. The stock cards are already visible to the user — do NOT re-embed <<<STOCK>>> tags. Instead, provide a thorough analysis based on the real data. Include the mandatory disclaimer.`;
+                  sendMessage({silent:true,noThinking:true});
+                }catch(_){}
+              }
               return; // skip the normal gen_ops_complete handling below
             }
             if(_genFailures.length>0){
@@ -3892,6 +4310,7 @@ async function sendMessage(opts){
     // (a silent continue may have started a new stream already)
     const cur=runningStreams.get(targetChatId);
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
+    area.removeEventListener('scroll',_onUserScroll);
   }
 }
 
@@ -4039,7 +4458,61 @@ function addMsg(role,text,files,extra={}){
     }
   }
   if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
-  else if(role==='kairo')html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
+  else if(role==='kairo'){
+    // Render stock_agent messages with styled sections on reload
+    if(extra.stock_agent){
+      // Use pre-split steps if available, otherwise fall back to ## split
+      let steps=[];
+      if(extra.stock_agent_steps&&extra.stock_agent_steps.length){
+        steps=extra.stock_agent_steps;
+      }else{
+        // Legacy fallback: split on ## that are step-level headers
+        // Step headers are joined by \n\n, so top-level ## follows start-of-string or \n\n
+        const raw=displayText;
+        const parts=raw.split(/(?:^|\n\n)## /);
+        for(let p=0;p<parts.length;p++){
+          const part=parts[p].trim();
+          if(!part)continue;
+          // First part may be intro text before any ## if split started at ^
+          if(p===0&&!raw.trimStart().startsWith('## '))continue;
+          const nlIdx=part.indexOf('\n');
+          const title=nlIdx>0?part.slice(0,nlIdx).trim():part.trim();
+          const body=nlIdx>0?part.slice(nlIdx+1).trim():'';
+          if(body.startsWith('---')&&body.includes('Not financial advice'))continue;
+          if(!title)continue;
+          steps.push({title,body});
+        }
+      }
+      if(steps.length){
+        const tickers=extra.stock_agent_tickers||[];
+        const tickerStr=tickers.length?` — ${esc(tickers.join(', '))}`:'';
+        let saHtml=`<div class="sa-badge sa-badge-done">✅ Stock Analysis Complete${tickerStr}</div><div class="sa-output">`;
+        // Sentiment gauge from final step text
+        const lastBody=steps[steps.length-1]?.body||'';
+        const rating=_saParseRating(lastBody);
+        saHtml+=buildSentimentGauge(rating);
+        // Growth chart if we have stock data
+        const stockDataArr=extra.stock_agent_data||[];
+        if(stockDataArr.length)saHtml+=buildGrowthChart(stockDataArr);
+        // Quick summary from last step
+        const plainLast=(lastBody||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+        if(plainLast){
+          const sentences=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
+          if(sentences)saHtml+=`<div class="sa-summary"><div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div></div>`;
+        }
+        // Step sections — all collapsed by default
+        steps.forEach((step,i)=>{
+          // Remove disclaimer from body if present
+          let body=step.body||'';
+          body=body.replace(/\n---\n\*Not financial advice[\s\S]*$/,'').trim();
+          saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">✓ done</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
+        });
+        saHtml+='</div><div class="stock-disclaimer sa-disclaimer">⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
+        html=`<div class="lbl">gyro</div>`+saHtml;
+      }
+    }
+    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
+  }
   div.dataset.text=text||'';
   div.innerHTML=html;area.appendChild(div);area.scrollTop=area.scrollHeight;
 }
@@ -4318,7 +4791,8 @@ function addSubtask(listId,parentId){
 }
 
 function fmt(text){
-  if(!text)return'';let t=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
+  t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
   t=t.replace(/```mermaid\n([\s\S]*?)```/g,(_,c)=>{
     let restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').trim();
@@ -4335,10 +4809,20 @@ function fmt(text){
   // Interactive todo lists
   let _todoBlockIdx=0;
   t=t.replace(/```todolist\n([\s\S]*?)```/g,(_,c)=>{
-    const raw=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').trim();
-    try{
-      const items=JSON.parse(raw);
-      if(Array.isArray(items)){
+    const raw=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").trim();
+    const _tryParseTodo=(str)=>{
+      // Try direct parse first
+      try{ const r=JSON.parse(str); if(Array.isArray(r)) return r; if(r&&typeof r==='object'){ const v=Object.values(r).find(Array.isArray); if(v) return v; } }catch(e){}
+      // Fix trailing commas before ] or }
+      let fixed=str.replace(/,\s*([}\]])/g,'$1');
+      try{ const r=JSON.parse(fixed); if(Array.isArray(r)) return r; if(r&&typeof r==='object'){ const v=Object.values(r).find(Array.isArray); if(v) return v; } }catch(e){}
+      // Try extracting array from text (AI sometimes adds explanation around JSON)
+      const arrMatch=str.match(/\[[\s\S]*\]/);
+      if(arrMatch){ try{ const r=JSON.parse(arrMatch[0].replace(/,\s*([}\]])/g,'$1')); if(Array.isArray(r)) return r; }catch(e){} }
+      return null;
+    };
+    const items=_tryParseTodo(raw);
+    if(items&&items.length){
         const chatPrefix=curChat||'nochat';
         const listId='tl_'+chatPrefix+'_'+(_todoBlockIdx++);
         // Remove old list with same ID to prevent duplicates
@@ -4348,8 +4832,8 @@ function fmt(text){
         syncChatTodosToStorage(listId);
         blocks.push(renderChatTodoList(listId));
         return `%%%BLOCK${blocks.length-1}%%%`;
-      }
-    }catch(e){}
+    }
+    console.warn('[todolist] Failed to parse todolist JSON:',raw.slice(0,200));
     blocks.push(`<pre style="background:var(--bg-deep);padding:14px 16px;border-radius:var(--r-sm);overflow-x:auto;font-family:var(--mono);font-size:11.5px;margin:10px 0;border:1px solid var(--border);line-height:1.65"><code>${c}</code></pre>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
@@ -4401,8 +4885,31 @@ function fmt(text){
     blocks.push(`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${idx}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading stock data...</span></div></div></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
+  // Markdown tables — extract to blocks to protect from <br> conversion
+  t=t.replace(/(?:^|\n)(\|.+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|.+\|[ \t]*(?:\n|$))+)/gm,(match)=>{
+    const lines=match.trim().split('\n').filter(l=>l.trim());
+    if(lines.length<3)return match;
+    const parseRow=line=>line.replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+    const fmtCell=c=>c.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>');
+    const headers=parseRow(lines[0]);
+    if(!/^[\s|:\-]+$/.test(lines[1].replace(/\|/g,'')))return match;
+    const rows=lines.slice(2).map(parseRow);
+    let tbl='<table><thead><tr>'+headers.map(h=>`<th>${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
+    for(const row of rows)tbl+='<tr>'+row.map(c=>`<td>${fmtCell(c)}</td>`).join('')+'</tr>';
+    tbl+='</tbody></table>';
+    blocks.push(tbl);
+    return `\n%%%BLOCK${blocks.length-1}%%%\n`;
+  });
   t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   t=t.replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>');
+  // Headings
+  t=t.replace(/^(#{1,4})\s+(.+)$/gm,(_,h,text)=>{const s=['1.3em','1.15em','1.05em','1em'];return `<div style="font-size:${s[h.length-1]||'1em'};font-weight:700;margin:12px 0 4px;color:var(--text-primary)">${text}</div>`;});
+  // Horizontal rules
+  t=t.replace(/^-{3,}$/gm,'<hr style="border:none;border-top:1px solid var(--border);margin:12px 0">');
+  // Bullet lists
+  t=t.replace(/^[*\-]\s+(.+)$/gm,'<div style="display:flex;gap:8px;padding:2px 0"><span style="color:var(--accent);flex-shrink:0">•</span><span>$1</span></div>');
+  // Numbered lists
+  t=t.replace(/^(\d+)\.\s+(.+)$/gm,'<div style="display:flex;gap:8px;padding:2px 0"><span style="color:var(--accent);flex-shrink:0;min-width:16px;text-align:right">$1.</span><span>$2</span></div>');
   t=t.replace(/\n/g,'<br>');
   blocks.forEach((b,i)=>{t=t.replace(`%%%BLOCK${i}%%%`,b);});
   return t;
@@ -5455,14 +5962,15 @@ const PRODUCTIVITY_KEY='gyro_productivity_v1';
 function loadProductivityState(){
   try{
     const raw=localStorage.getItem(PRODUCTIVITY_KEY);
-    if(!raw)return {todos:[],visions:[]};
+    if(!raw)return {todos:[],visions:[],reminders:[]};
     const parsed=JSON.parse(raw);
     return {
       todos:Array.isArray(parsed.todos)?parsed.todos:[],
       visions:Array.isArray(parsed.visions)?parsed.visions:[],
+      reminders:Array.isArray(parsed.reminders)?parsed.reminders:[],
     };
   }catch{
-    return {todos:[],visions:[]};
+    return {todos:[],visions:[],reminders:[]};
   }
 }
 
@@ -5645,6 +6153,65 @@ function insertProductivityPrompt(kind){
   setDraft(prompts[kind]||prompts.day);
 }
 
+// ─── Reminder CRUD ────────────────────────────────
+function addReminder(due,text){
+  if(!text)return;
+  const state=loadProductivityState();
+  state.reminders.push({id:'r_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),due:due||'',text,done:false,created:new Date().toISOString()});
+  saveProductivityState(state);
+  refreshHomeWidgets();
+}
+
+function completeReminder(id){
+  const state=loadProductivityState();
+  const item=state.reminders.find(r=>r.id===id);
+  if(!item)return;
+  item.done=true;
+  item.completed_at=new Date().toISOString();
+  saveProductivityState(state);
+  refreshHomeWidgets();
+}
+
+function deleteReminder(id){
+  const state=loadProductivityState();
+  state.reminders=state.reminders.filter(r=>r.id!==id);
+  saveProductivityState(state);
+  refreshHomeWidgets();
+}
+
+function snoozeReminder(id,hours=24){
+  const state=loadProductivityState();
+  const item=state.reminders.find(r=>r.id===id);
+  if(!item)return;
+  const now=new Date();
+  now.setHours(now.getHours()+hours);
+  item.due=now.toISOString().slice(0,16).replace('T',' ');
+  item.snoozed=true;
+  saveProductivityState(state);
+  refreshHomeWidgets();
+  showToast('Reminder snoozed for '+hours+' hours','info');
+}
+
+function _getPendingReminders(){
+  const state=loadProductivityState();
+  return (state.reminders||[]).filter(r=>!r.done);
+}
+
+function _getOverdueReminders(){
+  const now=new Date();
+  return _getPendingReminders().filter(r=>{
+    if(!r.due)return false;
+    try{return new Date(r.due)<=now;}catch{return false;}
+  });
+}
+
+function checkAndShowReminderToast(){
+  const overdue=_getOverdueReminders();
+  if(!overdue.length)return;
+  const pick=overdue[Math.floor(Math.random()*overdue.length)];
+  showToast('⏰ Reminder: '+pick.text,'info');
+}
+
 // ─── Mermaid ──────────────────────────────────────
 function initMermaidTheme(){
   if(!window.mermaid)return;
@@ -5687,6 +6254,14 @@ function initMermaidTheme(){
 
 document.addEventListener('DOMContentLoaded',()=>{initMermaidTheme();});
 document.addEventListener('DOMContentLoaded',()=>{renderProductivityHub();});
+
+// ─── Reminder Notifications ──────────────────────
+document.addEventListener('DOMContentLoaded',()=>{
+  // Check for overdue reminders on page load (small delay so toasts don't pile up on login)
+  setTimeout(()=>checkAndShowReminderToast(),3000);
+  // Periodically check for overdue reminders (every 5 minutes)
+  setInterval(()=>checkAndShowReminderToast(),300000);
+});
 
 // ─── Keep-alive ping to prevent Render from sleeping while user is active ───
 (function(){
