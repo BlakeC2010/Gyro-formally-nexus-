@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """gyro - The Flow-State Architect"""
 
 import sys
@@ -1033,16 +1033,15 @@ IMPORTANT: Always output the todolist block DIRECTLY in your response text for t
 Do NOT create todo lists unless the user explicitly requests one. Don't proactively add todo lists to research, summaries, or general answers.
 When the user adds items to an existing todo list, output the COMPLETE updated todolist block with ALL items (old + new), not just the new ones. This replaces the previous list in the chat.
 
-15. DEEP RESEARCH — You have access to Gemini's built-in Deep Research agent that performs comprehensive web searching, source analysis, and report generation with PDF export.
-IMPORTANT: Deep Research is a HEAVY operation. Do NOT trigger it unless the user explicitly asks for it or the "research" tool is active. For normal questions about current events, news, or simple lookups, just use your built-in web search grounding — that is already enabled and handles those automatically. Deep Research is for multi-source investigative reports, NOT quick answers.
+15. RESEARCH AGENT — You have access to a multi-step Research Agent that performs comprehensive web searching with URL deep-reading, source analysis, cross-referencing, and expert synthesis.
+IMPORTANT: The Research Agent is a HEAVY operation. Do NOT trigger it unless the user explicitly asks for it or the "research" tool is active. For normal questions about current events, news, or simple lookups, just use your built-in web search grounding — that is already enabled and handles those automatically. The Research Agent is for multi-source investigative reports, NOT quick answers.
 
 To trigger the pipeline, emit this tag in your response:
 <<<DEEP_RESEARCH: detailed research query here>>>
 
 WHEN TO TRIGGER:
-- The user explicitly asks for "deep research", "investigation", "comprehensive report", or "research report"
+- The user explicitly asks for "research", "deep research", "investigation", "comprehensive report", or "research report"
 - The "research" tool hint is active (the system will tell you)
-- The user opens the Deep Research modal and submits a query
 - The user says something like "research this deeply" or "do a full analysis"
 
 WHEN NOT TO TRIGGER:
@@ -1056,7 +1055,7 @@ WHEN NOT TO TRIGGER:
 HOW TO USE IT:
 - Write a detailed, specific research query in the tag — the more specific, the better the results
 - Keep your message brief when triggering — just acknowledge what you're researching and emit the tag
-- DO NOT write research content yourself. DO NOT fake or simulate research. The agent does the real work.
+- DO NOT write research content yourself. DO NOT fake or simulate research. The Research Agent does the real work with 6 steps: query analysis, deep source analysis, cross-referencing, expert perspectives, synthesis, and final report.
 - After the research completes, the system will auto-request a brief executive summary from you.
 
 File operations format:
@@ -1732,14 +1731,14 @@ def _build_tool_instructions(active_tools):
             "Keep code focused and concise. The execution has a 30-second timeout."
         ),
         "research": (
-            "[TOOL HINT: DEEP RESEARCH REQUESTED]\n"
-            "The user has specifically activated the Deep Research tool for this message. "
-            "This uses Gemini's built-in Deep Research agent for comprehensive web research.\n"
+            "[TOOL HINT: RESEARCH AGENT REQUESTED]\n"
+            "The user has specifically activated the Research Agent tool for this message. "
+            "This launches a multi-step Research Agent with web search and deep URL reading for comprehensive research.\n"
             "You should strongly consider triggering it. You can:\n"
             "- Trigger it immediately if their intent is clear: emit <<<DEEP_RESEARCH: detailed query>>>\n"
             "- Ask 1-2 quick clarifying questions first if the scope is genuinely unclear, then trigger on the next response\n"
             "- In rare cases, decline if the request truly doesn't need research (e.g. simple greeting)\n"
-            "Remember: DO NOT write research yourself. The Gemini Deep Research agent handles real web searching, analysis, and report generation.\n"
+            "Remember: DO NOT write research yourself. The Research Agent handles real web searching, URL deep-reading, cross-referencing, and report generation.\n"
             "Keep your response brief — acknowledge and trigger, or ask quick clarifying questions."
         ),
         "imagegen": (
@@ -5403,624 +5402,611 @@ def home_widgets_route():
     plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions, reminders=reminders)
     return jsonify(plan)
 
-# ─── Deep Research Engine ────────────────────────────────────────────────────
+# ─── Research Agent (multi-step with web search + URL context) ────────────────
 
-import threading as _threading
-_research_jobs = {}  # job_id -> {"status": ..., "events": [...]}
+def _research_agent_steps(query):
+    """Return the multi-step prompts for the research agent. 8 steps with web search and URL context."""
 
-def _run_research_job(job_id, query, api_key):
-    """Background thread: Gemini Deep Research via Interactions API."""
-    import warnings as _w
-    _w.filterwarnings("ignore", message="Interactions usage is experimental")
-    job = _research_jobs[job_id]
-
-    def push(evt_type, **kw):
-        job["events"].append({"type": evt_type, **kw})
-
-    total_steps = 3  # Start, Research, Export
-
-    try:
-        genai, types = _import_google()
-        client = genai.Client(api_key=api_key)
-
-        push("progress", step="starting", pct=2, total_steps=total_steps, current_step=1,
-             message="Initializing Gemini Deep Research agent...")
-
-        # Stream the interaction so we can relay progress
-        stream = client.interactions.create(
-            input=query,
-            agent="deep-research-pro-preview-12-2025",
-            background=True,
-            stream=True,
-            agent_config={
-                "type": "deep-research",
-                "thinking_summaries": "auto",
-            },
-        )
-
-        push("progress", step="researching", pct=8, total_steps=total_steps, current_step=2,
-             message="Deep Research agent is searching and analyzing sources...")
-
-        interaction = None
-        last_status = ""
-        pct = 10
-
-        for event in stream:
-            if job.get("cancelled"):
-                try:
-                    if interaction and interaction.id:
-                        client.interactions.cancel(id=interaction.id)
-                except Exception:
-                    pass
-                push("cancelled")
-                job["status"] = "cancelled"
-                return
-
-            etype = getattr(event, "event_type", "")
-
-            if etype == "interaction.start":
-                interaction = event.interaction
-                push("progress", step="researching", pct=10, total_steps=total_steps, current_step=2,
-                     message="Research started — agent is searching the web...")
-
-            elif etype == "content.delta":
-                # Streaming progress updates from the agent
-                delta = getattr(event, "delta", None)
-                if delta:
-                    delta_type = getattr(delta, "type", "")
-                    if delta_type == "thought_summary":
-                        thought_text = ""
-                        content_obj = getattr(delta, "content", None)
-                        if content_obj:
-                            thought_text = getattr(content_obj, "text", "")
-                        if thought_text:
-                            pct = min(pct + 3, 85)
-                            push("progress", step="researching", pct=pct, total_steps=total_steps, current_step=2,
-                                 message=thought_text[:200])
-                    elif delta_type == "text":
-                        # Partial research text arriving — just bump progress
-                        pct = min(pct + 1, 85)
-
-            elif etype == "interaction.status_update":
-                status = getattr(event, "status", "")
-                if status != last_status:
-                    last_status = status
-                    pct = min(pct + 8, 85)
-                    msg_map = {
-                        "in_progress": "Researching — analyzing sources and gathering data...",
-                        "requires_action": "Processing research findings...",
-                    }
-                    push("progress", step="researching", pct=pct, total_steps=total_steps, current_step=2,
-                         message=msg_map.get(status, f"Research status: {status}"))
-
-            elif etype == "interaction.complete":
-                interaction = event.interaction
-                break
-
-        if not interaction:
-            push("error", error="Deep Research returned no result. The agent may be temporarily unavailable. Try again.")
-            job["status"] = "error"
-            return
-
-        status = getattr(interaction, "status", "")
-        if status in ("failed", "cancelled", "incomplete"):
-            err_msgs = {
-                "failed": "Deep Research failed. The query may be too complex or unsupported.",
-                "cancelled": "Deep Research was cancelled.",
-                "incomplete": "Deep Research ended before finishing. Try a simpler or more focused query.",
-            }
-            push("error", error=err_msgs.get(status, f"Deep Research ended with status: {status}"))
-            job["status"] = "error"
-            return
-
-        # Extract text from outputs
-        push("progress", step="exporting", pct=88, total_steps=total_steps, current_step=3,
-             message="Extracting research report...")
-
-        outputs = getattr(interaction, "outputs", None) or []
-        report_parts = []
-        source_urls = []
-        for item in outputs:
-            item_type = getattr(item, "type", "")
-            if item_type == "text" and hasattr(item, "text"):
-                report_parts.append(item.text)
-                # Extract URLs from annotations if present
-                for ann in (getattr(item, "annotations", None) or []):
-                    url = getattr(ann, "url", None) or getattr(ann, "uri", None)
-                    title_a = getattr(ann, "title", "")
-                    if url and url not in [s.get("url") for s in source_urls]:
-                        source_urls.append({"title": title_a or "Source", "url": url, "snippet": ""})
-            elif item_type == "google_search_result":
-                # Extract sources from search results
-                for sr in (getattr(item, "search_results", None) or []):
-                    url = getattr(sr, "url", None) or getattr(sr, "uri", None) or ""
-                    title_s = getattr(sr, "title", "") or ""
-                    snip = getattr(sr, "snippet", "") or ""
-                    if url and url not in [s.get("url") for s in source_urls]:
-                        source_urls.append({"title": title_s, "url": url, "snippet": snip})
-
-        report_md = "\n\n".join(report_parts) if report_parts else ""
-
-        if not report_md or len(report_md) < 100:
-            push("error", error="Deep Research produced no usable output. Try a more specific query.")
-            job["status"] = "error"
-            return
-
-        push("progress", step="exporting", pct=92, total_steps=total_steps, current_step=3,
-             message=f"Report extracted ({len(report_md)} chars). Saving files...")
-
-        # Save markdown and try PDF
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_q = re.sub(r"[^\w\s-]", "", query[:40]).strip().replace(" ", "_")
-        md_fn = f"research_{safe_q}_{ts}.md"
-        pdf_fn = f"research_{safe_q}_{ts}.pdf"
-        rdir = WORKSPACE / "notes" / "research"
-        rdir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            (rdir / md_fn).write_text(report_md, encoding="utf-8")
-        except Exception as e:
-            print(f"  [research] Markdown save failed: {e}")
-
-        pdf_ok = False
-        try:
-            _generate_research_pdf(query, report_md, source_urls, rdir / pdf_fn)
-            pdf_ok = True
-        except Exception as e:
-            print(f"  [research] PDF generation failed (non-fatal): {e}")
-
-        push("progress", step="exporting", pct=100, total_steps=total_steps, current_step=3,
-             message="Export complete!")
-
-        job["report"] = report_md
-        push("done",
-             report=report_md,
-             pdf_file=pdf_fn if pdf_ok else None,
-             md_file=md_fn,
-             sources=source_urls[:30],
-             sub_questions=[query],
-             source_count=len(source_urls),
-        )
-        job["status"] = "done"
-
-    except Exception as e:
-        import traceback
-        print(f"  [research] Gemini Deep Research failed: {e}\n{traceback.format_exc()}")
-        push("error", error=f"Research failed: {str(e)[:200]}")
-        job["status"] = "error"
-
-def _research_ai_call(prompt, resolved, max_tokens=4096, timeout=90):
-    """Non-streaming AI call for research steps with timeout protection."""
-    provider = resolved.get("provider", "google")
-    import concurrent.futures as _cf
-    def _inner():
-        fn = PROVIDERS.get(provider, call_openai)
-        return fn(
-            api_key=resolved.get("api_key",""),
-            model=resolved.get("actual_model",""),
-            sysprompt="You are a precise, expert research analyst. Follow instructions exactly. Output only what is asked.",
-            messages=[{"role": "user", "text": prompt}],
-            base_url=resolved.get("base_url"),
-        )
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_inner)
-            result = future.result(timeout=timeout)
-        return result or ""
-    except _cf.TimeoutError:
-        return "[AI error: call timed out after {}s]".format(timeout)
-    except Exception as e:
-        return f"[AI error: {e}]"
-
-def _generate_research_pdf(title, report_md, sources, output_path):
-    """Convert markdown research report to a styled multi-page PDF."""
-    from fpdf import FPDF
-
-    class PDF(FPDF):
-        def header(self):
-            if self.page_no() > 1:
-                self.set_font("Helvetica", "I", 7)
-                self.set_text_color(160, 160, 160)
-                safe_title = title[:60].encode("latin-1", "replace").decode("latin-1")
-                self.cell(0, 6, f"gyro Research  |  {safe_title}", align="R", new_x="LMARGIN", new_y="NEXT")
-                self.set_draw_color(220, 220, 220)
-                self.line(10, self.get_y(), 200, self.get_y())
-                self.ln(2)
-        def footer(self):
-            self.set_y(-13)
-            self.set_font("Helvetica", "I", 7)
-            self.set_text_color(160, 160, 160)
-            self.cell(0, 6, f"Page {self.page_no()}", align="C")
-
-    def safe(t):
-        return t.encode("latin-1", "replace").decode("latin-1")
-
-    pdf = PDF()
-    pdf.set_auto_page_break(auto=True, margin=16)
-    pdf.set_margins(14, 14, 14)
-    pdf.add_page()
-
-    # ── Cover page ──
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_text_color(40, 40, 40)
-    pdf.ln(8)
-    pdf.cell(0, 12, "gyro DEEP RESEARCH", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_draw_color(191, 107, 58)
-    pdf.set_line_width(0.8)
-    pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-    pdf.ln(6)
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(60, 60, 60)
-    # Title word-wrap
-    words = title.split()
-    lines_out, cur_line = [], []
-    for w in words:
-        cur_line.append(w)
-        if len(" ".join(cur_line)) > 55:
-            lines_out.append(" ".join(cur_line[:-1]))
-            cur_line = [w]
-    if cur_line:
-        lines_out.append(" ".join(cur_line))
-    for ln_txt in lines_out:
-        pdf.cell(0, 9, safe(ln_txt), align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-    pdf.set_draw_color(191, 107, 58)
-    pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-    pdf.ln(8)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 6, f"Generated by gyro AI  |  {datetime.datetime.now().strftime('%B %d, %Y  %H:%M')}", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 6, f"Sources consulted: {len(sources)}", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.add_page()
-
-    # ── Report body ──
-    in_code = False
-    code_buf = []
-
-    def render_inline(txt):
-        """Strip inline markdown for safe PDF text."""
-        txt = re.sub(r"\*\*(.*?)\*\*", r"\1", txt)
-        txt = re.sub(r"\*(.*?)\*", r"\1", txt)
-        txt = re.sub(r"`(.*?)`", r"\1", txt)
-        txt = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", txt)
-        return safe(txt)
-
-    for line in report_md.split("\n"):
-        s = line.strip()
-        if s.startswith("```"):
-            if not in_code:
-                in_code = True; code_buf = []
-            else:
-                in_code = False
-                pdf.set_font("Courier", "", 7.5)
-                pdf.set_text_color(50, 50, 50)
-                pdf.set_fill_color(245, 245, 240)
-                for cl in code_buf:
-                    pdf.cell(0, 4.2, safe(cl[:140]), new_x="LMARGIN", new_y="NEXT", fill=True)
-                pdf.ln(2)
-            continue
-        if in_code:
-            code_buf.append(line)
-            continue
-
-        if s.startswith("# "):
-            pdf.add_page()
-            pdf.set_font("Helvetica", "B", 16)
-            pdf.set_text_color(30, 30, 30)
-            pdf.multi_cell(0, 10, render_inline(s[2:]))
-            pdf.set_draw_color(191, 107, 58)
-            pdf.set_line_width(0.5)
-            pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-            pdf.set_line_width(0.2)
-            pdf.ln(4)
-        elif s.startswith("## "):
-            pdf.ln(4)
-            pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(191, 107, 58)
-            pdf.multi_cell(0, 8, render_inline(s[3:]))
-            pdf.set_draw_color(220, 200, 180)
-            pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-            pdf.ln(2)
-            pdf.set_text_color(40, 40, 40)
-        elif s.startswith("### "):
-            pdf.ln(2)
-            pdf.set_font("Helvetica", "B", 11)
-            pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(0, 7, render_inline(s[4:]))
-            pdf.ln(1)
-        elif s.startswith("#### "):
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(60, 60, 60)
-            pdf.multi_cell(0, 6, render_inline(s[5:]))
-        elif s.startswith(("- ", "* ")):
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(40, 40, 40)
-            pdf.set_x(19)
-            pdf.cell(5, 5, chr(149), new_x="RIGHT", new_y="LAST")
-            pdf.multi_cell(0, 5, render_inline(s[2:]))
-        elif re.match(r"^\d+\.\s", s):
-            num, rest = s.split(".", 1)
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(40, 40, 40)
-            pdf.set_x(19)
-            pdf.cell(8, 5, safe(num + "."), new_x="RIGHT", new_y="LAST")
-            pdf.multi_cell(0, 5, render_inline(rest.strip()))
-        elif s in ("---", "***", "___"):
-            pdf.ln(2)
-            pdf.set_draw_color(210, 210, 210)
-            pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-            pdf.ln(2)
-        elif s:
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(40, 40, 40)
-            pdf.multi_cell(0, 5, render_inline(s))
-            pdf.ln(1)
-        else:
-            pdf.ln(2)
-
-    # ── Sources page ──
-    if sources:
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(191, 107, 58)
-        pdf.cell(0, 9, "Sources & References", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_draw_color(191, 107, 58)
-        pdf.line(14, pdf.get_y(), 196, pdf.get_y())
-        pdf.ln(5)
-        for idx, src in enumerate(sources, 1):
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.set_text_color(40, 40, 40)
-            pdf.multi_cell(0, 5, safe(f"{idx}. {src.get('title','Untitled')[:90]}"))
-            pdf.set_font("Helvetica", "I", 8)
-            pdf.set_text_color(60, 60, 180)
-            pdf.multi_cell(0, 4, safe(src.get("url","")[:120]))
-            snip = src.get("snippet","")[:220]
-            if snip:
-                pdf.set_font("Helvetica", "", 8)
-                pdf.set_text_color(100, 100, 100)
-                pdf.multi_cell(0, 4, safe(snip))
-            pdf.ln(3)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    pdf.output(str(output_path))
-
-
-@app.route("/api/research/plan", methods=["POST"])
-@require_auth_or_guest
-def research_plan():
-    """Generate a research plan without executing. Returns the plan for user review."""
-    d = request.get_json() or {}
-    query = (d.get("query") or "").strip()
-    depth = d.get("depth", "standard")
-    if not query:
-        return jsonify({"error": "Query required"}), 400
-    if depth not in ("quick", "standard", "deep"):
-        depth = "standard"
-
-    depth_cfg = {
-        "quick":    {"sub_q": 3},
-        "standard": {"sub_q": 5},
-        "deep":     {"sub_q": 7},
-    }.get(depth, {"sub_q": 5})
-
-    settings = load_settings()
-    available_model = None
-    for mid in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
-        mi = MODELS.get(mid, {})
-        api_key, _ = resolve_provider_key(settings, mi.get("provider","google"))
-        if api_key:
-            available_model = mid
-            break
-    if not available_model:
-        available_model = DEFAULT_MODEL
-    resolved = {
-        "provider": MODELS[available_model]["provider"],
-        "actual_model": available_model,
-        "api_key": resolve_provider_key(settings, MODELS[available_model]["provider"])[0],
-        "base_url": None,
-    }
-    if not resolved["api_key"]:
-        return jsonify({"error": "No AI API key configured. Add a key in Settings first."}), 400
-
-    plan_text = _research_ai_call(
-        f"""You are a Planner Agent. Deeply analyze this research topic and create a comprehensive research plan.
-
-RESEARCH TOPIC: {query}
-
-Think step by step:
-1. What is being asked? What are the core concepts?
-2. What domains of knowledge does this span?
-3. What are the key tensions, debates, or open questions?
-4. What would a world-class researcher investigate?
-5. What primary sources and data would be most valuable?
-
-Produce a clear plan with investigation angles the user can review and edit.
-Format your response as a numbered list of specific research angles/sub-questions to investigate.
-Each line should be one numbered investigation angle. Write exactly {depth_cfg['sub_q']} angles.
-
-Example format:
-1. How has X evolved over the past decade and what key milestones defined its trajectory?
-2. What are the current leading approaches to Y and how do they compare?
-...""",
-        resolved, max_tokens=1500
+    base_system = (
+        "You are an elite intelligence analyst at a Tier-1 research firm. "
+        "Your reports are used by executives, policymakers, and domain experts to make critical decisions. "
+        "You have access to Google Search and deep URL reading — USE THEM AGGRESSIVELY. "
+        "Search the web multiple times with different queries. Read full pages for primary evidence.\n\n"
+        "ABSOLUTE RULES:\n"
+        "1. ALWAYS search the web — never rely on training data alone. Search multiple angles.\n"
+        "2. Cite EVERY major claim with [Source Title](URL). No uncited assertions.\n"
+        "3. Use exact numbers, dates, names, direct quotes from sources. Vague claims = failure.\n"
+        "4. Clearly distinguish: confirmed fact vs. expert opinion vs. analysis vs. speculation\n"
+        "5. Rich markdown: **bold** key findings, tables for comparisons, bullet lists for data points\n"
+        "6. NO disclaimers, NO 'I'm an AI', NO hedging. Be authoritative and decisive.\n"
+        "7. When sources conflict: present both sides, explain which is more credible and why\n"
+        "8. At the end of your response, include a SOURCE LIST in this exact format:\n"
+        "   <<<SOURCES>>>\n"
+        "   - [Source Title](URL) — one-line description\n"
+        "   - [Source Title](URL) — one-line description\n"
+        "   <<<END_SOURCES>>>\n"
+        "   This helps track all references across steps."
     )
 
-    # Parse into structured angles
-    angles = []
-    for line in (plan_text or "").split("\n"):
-        m = re.match(r"^\s*\d+[.)]\s+(.+)", line.strip())
-        if m:
-            angles.append(m.group(1).strip())
+    return [
+        {
+            "title": "Intelligence Gathering",
+            "icon": "🔍",
+            "system": (
+                "You are a research intelligence operative. Your job is to conduct the first wave of "
+                "information gathering — cast a WIDE net. Search for the topic from multiple angles: "
+                "news, academic, industry, government, and social sources. Identify every relevant "
+                "thread of information that exists on this topic."
+            ),
+            "web_search": True,
+            "url_context": False,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Execute the initial intelligence sweep:\n\n"
+                "**1. Multi-Angle Search** (search the web extensively):\n"
+                "Run at least 3-4 different search queries approaching this topic from different angles. "
+                "Don't just search the obvious — search related terms, synonyms, expert names, "
+                "organizations involved, recent developments, and technical terminology.\n\n"
+                "**2. Source Mapping:**\n"
+                "For every source found, document:\n"
+                "| Source | Type | Recency | Why Relevant |\n"
+                "|--------|------|---------|-------------|\n"
+                "| [Title](URL) | News/Academic/Official/Industry | Date | Brief reason |\n\n"
+                "Aim for 10-15+ diverse sources.\n\n"
+                "**3. Initial Findings:**\n"
+                "What are the key themes emerging? What's the current state of knowledge on this topic?\n\n"
+                "**4. Research Gaps & Priority Targets:**\n"
+                "- What questions remain unanswered?\n"
+                "- Which sources need deep reading in the next step?\n"
+                "- What specific data/stats/quotes should we look for?"
+            ),
+        },
+        {
+            "title": "Deep Source Analysis",
+            "icon": "📖",
+            "system": base_system + (
+                "\n\nYour role: PRIMARY SOURCE ANALYST. "
+                "You have URL context ability — you can READ FULL WEB PAGES. Use this power. "
+                "Read the most important sources found in the previous step in their entirety. "
+                "Extract detailed data, statistics, quotes, methodologies, and evidence. "
+                "Don't just skim — read deeply and extract everything valuable."
+            ),
+            "web_search": True,
+            "url_context": True,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Deep-read the most important sources. Extract everything:\n\n"
+                "**1. Primary Source Deep Dive** (read 3-5 key pages in full):\n"
+                "For each source you read deeply:\n"
+                "- **Source**: [Title](URL)\n"
+                "- **Key Data Points**: exact numbers, statistics, percentages\n"
+                "- **Direct Quotes**: important statements from experts/officials\n"
+                "- **Methodology/Evidence**: how claims are supported\n"
+                "- **Publication Context**: who published this, when, potential biases\n\n"
+                "**2. Additional Discovery:**\n"
+                "Search for additional sources that fill gaps from the first step. "
+                "Look specifically for:\n"
+                "- Statistical data and official reports\n"
+                "- Expert analysis and opinion pieces\n"
+                "- Counter-narratives and alternative viewpoints\n"
+                "- The most recent developments (last 6 months)\n\n"
+                "**3. Evidence Inventory:**\n"
+                "Create a structured inventory of all hard evidence collected:\n"
+                "- Statistics and data points (with sources)\n"
+                "- Expert quotes (with attribution)\n"
+                "- Key dates and timeline events\n"
+                "- Organizations and people involved"
+            ),
+        },
+        {
+            "title": "Fact Verification",
+            "icon": "✅",
+            "system": base_system + (
+                "\n\nYour role: FACT CHECKER AND SKEPTIC. "
+                "Cross-reference every major claim against multiple sources. "
+                "Look for contradictions, outdated information, and unsupported assertions. "
+                "Verify statistics by finding their original source. "
+                "Rate confidence in each finding. Be brutally honest about what's confirmed vs. uncertain."
+            ),
+            "web_search": True,
+            "url_context": True,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Verify and cross-reference all findings:\n\n"
+                "**1. Claim Verification Matrix:**\n"
+                "| Claim | Sources Confirming | Sources Contradicting | Confidence |\n"
+                "|-------|-------------------|----------------------|------------|\n"
+                "| [Key claim] | [Source1], [Source2] | [Source3] or None | High/Med/Low |\n\n"
+                "Check EVERY major claim from previous steps.\n\n"
+                "**2. Contradiction Analysis:**\n"
+                "Where sources disagree, investigate further:\n"
+                "- Search for the original/primary source of disputed claims\n"
+                "- Read source pages to understand the full context\n"
+                "- Determine which source is more authoritative and why\n\n"
+                "**3. Recency Check:**\n"
+                "- Are any findings based on outdated information?\n"
+                "- Search for the very latest developments on this topic\n"
+                "- Note anything that has changed recently\n\n"
+                "**4. Confidence Summary:**\n"
+                "Rate the overall research confidence:\n"
+                "- 🟢 **High Confidence**: Multiple independent sources confirm\n"
+                "- 🟡 **Medium Confidence**: Single authoritative source or partial corroboration\n"
+                "- 🔴 **Low Confidence**: Limited sources, potential bias, or contradictions"
+            ),
+        },
+        {
+            "title": "Expert & Stakeholder Analysis",
+            "icon": "👥",
+            "system": base_system + (
+                "\n\nYour role: EXPERT OPINION ANALYST. "
+                "Find what the leading experts, institutions, and stakeholders say about this topic. "
+                "Search for interviews, papers, and commentary from domain authorities. "
+                "Map out the different perspectives and schools of thought."
+            ),
+            "web_search": True,
+            "url_context": True,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Map the expert landscape:\n\n"
+                "**1. Expert Voices:**\n"
+                "Search for and document what leading experts say:\n"
+                "- Who are the top 3-5 authorities on this topic?\n"
+                "- What are their stated positions?\n"
+                "- Direct quotes with attribution and URLs\n\n"
+                "**2. Stakeholder Map:**\n"
+                "Who are the key stakeholders and what are their interests?\n"
+                "| Stakeholder | Position | Motivation | Credibility |\n"
+                "|-------------|----------|------------|-------------|\n\n"
+                "**3. Schools of Thought:**\n"
+                "Are there distinct perspectives or camps on this topic?\n"
+                "- What does each side argue?\n"
+                "- What evidence do they cite?\n"
+                "- Where do they agree/disagree?\n\n"
+                "**4. Historical Context & Trajectory:**\n"
+                "- How has thinking on this topic evolved?\n"
+                "- What are the key milestones or turning points?\n"
+                "- What's the current trajectory and where is it heading?"
+            ),
+        },
+        {
+            "title": "Data & Comparative Analysis",
+            "icon": "📊",
+            "system": base_system + (
+                "\n\nYour role: DATA ANALYST. "
+                "Compile all quantitative data, create comparisons, and identify patterns. "
+                "Search for additional statistics, benchmarks, and metrics. "
+                "Present data in clear tables and structured formats."
+            ),
+            "web_search": True,
+            "url_context": True,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Compile and analyze all data:\n\n"
+                "**1. Key Metrics Dashboard:**\n"
+                "Create a comprehensive data summary table with all statistics found:\n"
+                "| Metric | Value | Source | Date | Trend |\n"
+                "|--------|-------|--------|------|-------|\n\n"
+                "**2. Comparative Analysis:**\n"
+                "If applicable, compare across:\n"
+                "- Different time periods (trends)\n"
+                "- Different regions/markets/entities\n"
+                "- Different approaches/solutions/options\n"
+                "Use tables for all comparisons.\n\n"
+                "**3. Pattern Recognition:**\n"
+                "- What trends emerge from the data?\n"
+                "- Are there any surprising outliers?\n"
+                "- What correlations or patterns are visible?\n\n"
+                "**4. Implications of Data:**\n"
+                "- What does the data tell us about the answer to the research question?\n"
+                "- What data is MISSING that would be valuable?\n"
+                "- How reliable are the data sources?"
+            ),
+        },
+        {
+            "title": "Synthesis & Insights",
+            "icon": "🧠",
+            "system": (
+                "You are a master strategist and synthesizer. Your job is to transform all previous "
+                "research into crystal-clear, actionable intelligence. Identify the key themes, "
+                "connect dots between different findings, and surface non-obvious insights. "
+                "Think like a senior advisor briefing a decision-maker."
+            ),
+            "web_search": False,
+            "url_context": False,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Synthesize ALL research into actionable intelligence:\n\n"
+                "**1. Core Findings** (the 5-8 most important discoveries):\n"
+                "For each finding:\n"
+                "- 📌 **Finding**: Clear, one-sentence statement\n"
+                "- **Evidence**: Supporting data/quotes from research\n"
+                "- **Confidence**: 🟢 High / 🟡 Medium / 🔴 Low\n"
+                "- **Source(s)**: Citation(s)\n\n"
+                "**2. Non-Obvious Connections:**\n"
+                "What patterns or connections emerge when combining different research threads? "
+                "What might others miss?\n\n"
+                "**3. Risk & Opportunity Assessment:**\n"
+                "| Factor | Type | Likelihood | Impact | Evidence |\n"
+                "|--------|------|-----------|--------|---------|\n\n"
+                "**4. Confidence Dashboard:**\n"
+                "- Overall research confidence: [High/Medium/Low]\n"
+                "- Strongest evidence areas: [list]\n"
+                "- Weakest evidence areas: [list]\n"
+                "- Number of independent sources consulted: [count]\n\n"
+                "**5. Open Questions:**\n"
+                "What remains genuinely uncertain or requires further investigation?"
+            ),
+        },
+        {
+            "title": "Strategic Assessment",
+            "icon": "🎯",
+            "system": (
+                "You are a strategic advisor. Based on all research, provide forward-looking analysis, "
+                "scenario planning, and actionable recommendations. Think about implications, "
+                "second-order effects, and what the reader should actually DO with this information."
+            ),
+            "web_search": False,
+            "url_context": False,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "Provide strategic analysis and recommendations:\n\n"
+                "**1. Scenario Analysis:**\n"
+                "Based on all evidence, what are the likely outcomes?\n"
+                "- 🟢 **Best Case**: What happens if things go well? (probability estimate)\n"
+                "- 🟡 **Base Case**: Most likely outcome (probability estimate)\n"
+                "- 🔴 **Worst Case**: What could go wrong? (probability estimate)\n\n"
+                "**2. Actionable Recommendations:**\n"
+                "What should the reader DO with this information? Specific, concrete actions.\n"
+                "Number each recommendation and explain the rationale.\n\n"
+                "**3. What to Watch:**\n"
+                "Key indicators, dates, or events to monitor going forward.\n"
+                "| Indicator | Why It Matters | Timeline |\n"
+                "|-----------|---------------|----------|\n\n"
+                "**4. Second-Order Effects:**\n"
+                "What are the ripple effects and downstream implications that aren't obvious?"
+            ),
+        },
+        {
+            "title": "Final Intelligence Brief",
+            "icon": "📋",
+            "system": (
+                "You are a senior intelligence briefing writer. Produce the final, publication-quality "
+                "intelligence brief. It must be comprehensive yet scannable, authoritative yet accessible, "
+                "and immediately actionable. This is the document that matters — make it exceptional. "
+                "Include ALL sources with clickable URLs. Use clear hierarchy, bold key points, and "
+                "tables where appropriate."
+            ),
+            "web_search": False,
+            "url_context": False,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "You have completed 7 research steps: Intelligence Gathering, Deep Source Analysis, "
+                "Fact Verification, Expert Analysis, Data Analysis, Synthesis, and Strategic Assessment.\n\n"
+                "Now produce the DEFINITIVE intelligence brief:\n\n"
+                "## 📋 Intelligence Brief\n"
+                f"**Subject:** {query}\n\n"
+                "---\n\n"
+                "### ⚡ TL;DR\n"
+                "3-4 sentences. The absolute most important things. Bold the key facts.\n\n"
+                "### 🔍 Executive Summary\n"
+                "Detailed 6-8 sentence overview of all major findings, data, and conclusions.\n\n"
+                "### 📊 Key Findings\n"
+                "Detailed coverage organized by theme. Each section needs:\n"
+                "- Clear subheading\n"
+                "- Key facts with source citations as [Title](URL)\n"
+                "- Data tables and statistics where available\n"
+                "- Expert perspectives with direct quotes\n"
+                "- Confidence indicator (🟢/🟡/🔴)\n\n"
+                "### 🎯 Analysis & Implications\n"
+                "Expert interpretation of what findings mean:\n"
+                "- Trends and patterns identified\n"
+                "- Risks and opportunities\n"
+                "- Scenario analysis (best/base/worst case)\n"
+                "- Second-order effects\n\n"
+                "### ✅ Actionable Takeaways\n"
+                "Numbered list of 5-8 specific, concrete actions or conclusions.\n\n"
+                "### 📡 What to Watch\n"
+                "Key indicators, upcoming events, and things to monitor.\n\n"
+                "### 📚 Sources & References\n"
+                "Complete list of ALL sources used across all research steps:\n"
+                "- [Source Title](URL) — Brief description of what it contributed\n"
+                "List ALL URLs discovered during research.\n\n"
+                "---\n"
+                "Make this the kind of intelligence brief that would be presented to a CEO, "
+                "policymaker, or board of directors. Every sentence must earn its place."
+            ),
+        },
+    ]
 
-    if not angles:
-        angles = [query]
 
-    return jsonify({
-        "ok": True,
-        "query": query,
-        "depth": depth,
-        "angles": angles,
-        "raw_plan": plan_text,
-    })
-
-
-@app.route("/api/research/cancel/<job_id>", methods=["POST"])
+@app.route("/api/research-agent", methods=["POST"])
 @require_auth_or_guest
-def cancel_research(job_id):
-    """Cancel a running research job."""
-    job = _research_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    job["cancelled"] = True
-    return jsonify({"ok": True})
+def research_agent():
+    """Multi-step research agent with web search and URL context. Streams NDJSON events."""
+    data = request.get_json() or {}
+    chat_id = data.get("chat_id")
+    query = (data.get("query") or "").strip()
 
-
-@app.route("/api/research", methods=["POST"])
-@require_auth_or_guest
-def start_research():
-    d = request.get_json() or {}
-    query = (d.get("query") or "").strip()
     if not query:
-        return jsonify({"error": "Query required"}), 400
+        return jsonify({"error": "No research query provided"}), 400
 
     settings = load_settings()
-    api_key, _ = resolve_provider_key(settings, "google")
-    if not api_key:
-        return jsonify({"error": "No Google AI API key configured. Add a key in Settings first."}), 400
-
-    job_id = str(uuid.uuid4())[:12]
-    _research_jobs[job_id] = {"status": "running", "events": [], "cancelled": False, "created": datetime.datetime.now().isoformat()}
-    _threading.Thread(target=_run_research_job, args=(job_id, query, api_key), daemon=True).start()
-
-    import time as _time
-
-    @stream_with_context
-    def generate():
-        yield json.dumps({"type": "job_id", "job_id": job_id}) + "\n"
-        sent = 0
-        last_send = _time.time()
-        job_start = _time.time()
-        JOB_TIMEOUT = 1500  # 25 minute total timeout
-        while True:
-            job = _research_jobs.get(job_id, {})
-            evts = job.get("events", [])
-            while sent < len(evts):
-                yield json.dumps(evts[sent]) + "\n"
-                sent += 1
-                last_send = _time.time()
-            if job.get("status") in ("done", "error", "cancelled") and sent >= len(evts):
-                break
-            # Total job timeout
-            if _time.time() - job_start > JOB_TIMEOUT:
-                yield json.dumps({"type": "error", "error": "Research timed out after 25 minutes. Try a narrower query or 'quick' depth."}) + "\n"
-                job["cancelled"] = True
-                job["status"] = "error"
-                break
-            # Send heartbeat every 2 seconds to prevent proxy/connection timeout
-            if _time.time() - last_send > 2:
-                yield json.dumps({"type": "heartbeat"}) + "\n"
-                last_send = _time.time()
-            _time.sleep(0.2)
-        # Clean up old jobs (keep last 20)
-        if len(_research_jobs) > 20:
-            oldest = sorted(_research_jobs.keys(),
-                            key=lambda k: _research_jobs[k].get("created",""))[:-20]
-            for k in oldest:
-                _research_jobs.pop(k, None)
-
-    # Critical: disable nginx/proxy buffering so heartbeats reach client immediately
-    resp = Response(generate(), mimetype="application/x-ndjson")
-    resp.headers["X-Accel-Buffering"] = "no"        # nginx
-    resp.headers["Cache-Control"] = "no-cache"        # general
-    resp.headers["Transfer-Encoding"] = "chunked"
-    return resp
-
-
-@app.route("/api/research/download/<path:filename>")
-@require_auth
-def download_research_file(filename):
-    safe_fn = re.sub(r"[^\w.\-]", "", Path(filename).name)
-    return send_from_directory(str(WORKSPACE / "notes" / "research"), safe_fn, as_attachment=True)
-
-
-# ─── Post-Processing Endpoints (separate from research pipeline) ──────────────
-
-@app.route("/api/research/export/pdf", methods=["POST"])
-@require_auth_or_guest
-def research_export_pdf():
-    """Generate PDF from an existing research report (separate from main pipeline)."""
-    d = request.get_json() or {}
-    report = (d.get("report") or "").strip()
-    title = (d.get("title") or "Research Report").strip()
-    sources = d.get("sources") or []
-    if not report:
-        return jsonify({"error": "No report content provided."}), 400
-
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_q = re.sub(r"[^\w\s-]", "", title[:40]).strip().replace(" ", "_")
-    pdf_fn = f"research_{safe_q}_{ts}.pdf"
-    rdir = WORKSPACE / "notes" / "research"
-    rdir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        _generate_research_pdf(title, report, sources, rdir / pdf_fn)
-        return jsonify({"ok": True, "pdf_file": pdf_fn})
-    except Exception as e:
-        return jsonify({"error": f"PDF generation failed: {str(e)[:200]}"}), 500
-
-
-@app.route("/api/research/export/mindmap", methods=["POST"])
-@require_auth_or_guest
-def research_export_mindmap():
-    """Generate mind map JSON from a research report."""
-    d = request.get_json() or {}
-    report = (d.get("report") or "").strip()
-    if not report:
-        return jsonify({"error": "No report content provided."}), 400
-
-    settings = load_settings()
-    available_model = None
-    for mid in ("gemini-2.5-flash", "gemini-2.5-pro"):
+    # Prefer models that support url_context
+    selected = None
+    for mid in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"):
         mi = MODELS.get(mid, {})
         if not mi:
             continue
-        api_key, _ = resolve_provider_key(settings, mi.get("provider", "google"))
-        if api_key:
-            available_model = mid
+        ak, _ = resolve_provider_key(settings, mi.get("provider", "google"))
+        if ak:
+            selected = mid
             break
-    if not available_model:
-        available_model = DEFAULT_MODEL
-    resolved = {
-        "provider": MODELS[available_model]["provider"],
-        "actual_model": available_model,
-        "api_key": resolve_provider_key(settings, MODELS[available_model]["provider"])[0],
-        "base_url": None,
-    }
-    if not resolved["api_key"]:
-        return jsonify({"error": "No AI API key configured."}), 400
+    if not selected:
+        selected = normalize_selected_model(settings)
 
-    mindmap_raw = _research_ai_call(
-        f"""Analyze this research report and create a mind map structure.
-Return ONLY valid JSON (no markdown, no code fences) with this exact format:
-{{"title": "Main Topic", "children": [{{"title": "Subtopic 1", "children": [{{"title": "Detail 1"}}, {{"title": "Detail 2"}}]}}, {{"title": "Subtopic 2", "children": [...]}}]}}
+    resolved = resolve_chat_model({"model": selected}, settings)
+    if resolved.get("error"):
+        return jsonify({"error": resolved["error"]}), 403
 
-Keep it to 3-4 levels deep max. Each node title should be concise (under 60 chars).
+    provider = resolved.get("provider")
+    api_key = resolved.get("api_key")
+    model = resolved.get("actual_model")
+    base_url = resolved.get("base_url")
 
-REPORT:
-{report[:12000]}""",
-        resolved, max_tokens=3000, timeout=60
-    )
+    steps = _research_agent_steps(query)
 
-    # Parse JSON from response (strip markdown fences if present)
-    cleaned = (mindmap_raw or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-    try:
-        data = json.loads(cleaned)
-        return jsonify({"ok": True, "mindmap": data})
-    except (json.JSONDecodeError, TypeError):
-        return jsonify({"error": "Failed to generate mind map structure."}), 500
+    def evt(payload):
+        return json.dumps(payload) + "\n"
+
+    def _extract_sources(text):
+        """Extract URLs from markdown links and <<<SOURCES>>> blocks."""
+        sources = []
+        seen = set()
+        src_blocks = re.findall(r'<<<SOURCES>>>(.*?)<<<END_SOURCES>>>', text, re.DOTALL)
+        for block in src_blocks:
+            for m in re.finditer(r'\[([^\]]+)\]\((https?://[^)]+)\)', block):
+                url = m.group(2).strip()
+                if url not in seen:
+                    seen.add(url)
+                    sources.append({"title": m.group(1).strip(), "url": url})
+        for m in re.finditer(r'\[([^\]]+)\]\((https?://[^)]+)\)', text):
+            url = m.group(2).strip()
+            if url not in seen:
+                seen.add(url)
+                sources.append({"title": m.group(1).strip(), "url": url})
+        return sources
+
+    def _extract_key_findings(text):
+        """Extract key findings / important statements from step output."""
+        findings = []
+        seen = set()
+        # 📌 Finding pattern
+        for m in re.finditer(r'📌\s*\*\*([^*]+)\*\*[:\s]*([^\n]*)', text):
+            f = m.group(1).strip()
+            desc = m.group(2).strip()
+            if desc:
+                f += ": " + desc
+            key = f.lower()[:50]
+            if key not in seen and len(f) > 10:
+                seen.add(key)
+                findings.append(f)
+        # **Bold Key**: description pattern
+        for m in re.finditer(r'\*\*([^*]{5,60})\*\*[:\s]+([^\n]{15,})', text):
+            label = m.group(1).strip()
+            desc = m.group(2).strip()[:120]
+            # skip table headers and format labels
+            if any(x in label.lower() for x in ['source', 'metric', 'claim', 'stakeholder', 'indicator', '|', 'finding']):
+                continue
+            f = label + ": " + desc
+            key = f.lower()[:50]
+            if key not in seen:
+                seen.add(key)
+                findings.append(f)
+        # 🟢/🟡/🔴 confidence-tagged items
+        for m in re.finditer(r'[🟢🟡🔴]\s*\*\*([^*]{5,80})\*\*', text):
+            f = m.group(1).strip()
+            key = f.lower()[:50]
+            if key not in seen and len(f) > 10:
+                seen.add(key)
+                findings.append(f)
+        return findings[:8]
+
+    @stream_with_context
+    def generate():
+        import time as _time
+        all_research = []
+        all_sources = []
+        all_findings = []
+        step_durations = []
+        seen_urls = set()
+        total_word_count = 0
+
+        yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
+                    "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
+
+        for i, step in enumerate(steps):
+            step_start = _time.time()
+            yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                        "icon": step.get("icon", "📄"), "status": "running"})
+
+            # Smart context: summarize earlier steps to avoid token overflow
+            if len(all_research) <= 3:
+                prev_text = "\n\n".join(all_research)
+            else:
+                # Keep first 2 and last 2 in full, summarize middle
+                early = "\n\n".join(all_research[:2])
+                recent = "\n\n".join(all_research[-2:])
+                prev_text = f"{early}\n\n[... earlier research steps omitted for brevity — key findings are incorporated in the recent steps below ...]\n\n{recent}"
+
+            if all_research:
+                prev_section = (
+                    f"[YOUR RESEARCH SO FAR — {len(all_research)} steps completed]\n"
+                    f"{prev_text}\n\n"
+                    f"Build on this research — don't repeat what you've already found. Go deeper, find NEW information.\n\n"
+                )
+            else:
+                prev_section = ""
+
+            messages = [{
+                "role": "user",
+                "text": f"{prev_section}[YOUR TASK — STEP {i+1}/{len(steps)}: {step['title']}]\n{step['prompt']}",
+            }]
+
+            try:
+                step_pieces = []
+                use_web = step.get("web_search", False)
+                use_url_ctx = step.get("url_context", False)
+
+                # Build tools list for Google provider
+                if provider == "google" and (use_web or use_url_ctx):
+                    genai, types = _import_google()
+                    tools_list = []
+                    if use_web:
+                        tools_list.append(types.Tool(google_search=types.GoogleSearch()))
+                    if use_url_ctx:
+                        tools_list.append(types.Tool(url_context=types.UrlContext()))
+
+                    client = genai.Client(api_key=api_key)
+                    contents = _google_contents_from_messages(messages, types)
+                    cfg = types.GenerateContentConfig(
+                        system_instruction=step["system"],
+                        tools=tools_list,
+                        thinking_config=types.ThinkingConfig(thinking_budget=32000, include_thoughts=True),
+                        max_output_tokens=65536,
+                    )
+                    stream = client.models.generate_content_stream(
+                        model=model,
+                        contents=contents,
+                        config=cfg,
+                    )
+                    for chunk in stream:
+                        try:
+                            for candidate in (chunk.candidates or []):
+                                for part in (candidate.content.parts or []):
+                                    is_thought = getattr(part, "thought", None)
+                                    if is_thought and part.text:
+                                        yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
+                                        continue
+                                    if part.text:
+                                        step_pieces.append(part.text)
+                                        yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                        except (AttributeError, TypeError):
+                            text = getattr(chunk, "text", "") or ""
+                            if text:
+                                step_pieces.append(text)
+                                yield evt({"type": "agent_delta", "step": i + 1, "text": text})
+                else:
+                    stream_fn = STREAM_PROVIDERS.get(provider)
+                    if stream_fn:
+                        for chunk in stream_fn(
+                            api_key, model, step["system"], messages,
+                            base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
+                        ):
+                            if isinstance(chunk, dict) and chunk.get("__thinking__"):
+                                yield evt({"type": "agent_thinking", "step": i + 1, "text": chunk.get("text", "")})
+                                continue
+                            step_pieces.append(chunk)
+                            yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
+                    else:
+                        full = PROVIDERS.get(provider, call_openai)(
+                            api_key, model, step["system"], messages,
+                            base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
+                        )
+                        step_pieces.append(full)
+                        yield evt({"type": "agent_delta", "step": i + 1, "text": full})
+
+                step_result = "".join(step_pieces)
+                # Strip source blocks from display text but keep for extraction
+                display_result = re.sub(r'<<<SOURCES>>>.*?<<<END_SOURCES>>>', '', step_result, flags=re.DOTALL).strip()
+                all_research.append(f"## {step['title']}\n{display_result}")
+
+                # Extract and emit sources
+                new_sources = _extract_sources(step_result)
+                for src in new_sources:
+                    if src["url"] not in seen_urls:
+                        seen_urls.add(src["url"])
+                        all_sources.append(src)
+                if new_sources:
+                    yield evt({"type": "agent_sources", "step": i + 1,
+                               "sources": [s for s in new_sources if s["url"] in seen_urls],
+                               "total_sources": len(all_sources)})
+
+                # Extract key findings
+                findings = _extract_key_findings(step_result)
+                if findings:
+                    all_findings.extend(findings)
+                    yield evt({"type": "agent_findings", "step": i + 1,
+                               "findings": findings, "total_findings": len(all_findings)})
+
+                step_word_count = len(step_result.split())
+                total_word_count += step_word_count
+                elapsed = round(_time.time() - step_start, 1)
+                step_durations.append({"step": i + 1, "title": step["title"], "elapsed": elapsed})
+                yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                            "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
+                            "word_count": step_word_count, "source_count": len(new_sources)})
+            except Exception as e:
+                elapsed = round(_time.time() - step_start, 1)
+                all_research.append(f"## {step['title']}\n*Research step failed: {str(e)[:100]}*")
+                yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                            "icon": step.get("icon", "📄"), "status": "failed",
+                            "error": str(e)[:200], "elapsed": elapsed})
+
+        full_report = "\n\n".join(all_research)
+        # Generate follow-up research questions from report content
+        followups = []
+        for m in re.finditer(r'(?:open question|further (?:investigation|research)|remains? (?:uncertain|unclear|unknown)|what about)[:\s]*([^\n]{15,100})', full_report, re.IGNORECASE):
+            q = m.group(1).strip().rstrip('.').strip()
+            if '?' not in q:
+                q += '?'
+            if len(q) > 15 and q not in followups:
+                followups.append(q)
+        if len(followups) < 2:
+            # Fallback: generate from "What to Watch" items
+            for m in re.finditer(r'watch[^\n]*\n[^|]*\|\s*([^|]{10,60})\s*\|', full_report, re.IGNORECASE):
+                item = m.group(1).strip()
+                if item and not any(x in item.lower() for x in ['indicator', '---', 'why']):
+                    q = f"What are the latest developments on {item}?"
+                    if q not in followups:
+                        followups.append(q)
+        followups = followups[:4]
+
+        yield evt({"type": "agent_done", "report": full_report, "query": query,
+                    "sources": all_sources, "total_sources": len(all_sources),
+                    "total_words": total_word_count, "step_durations": step_durations,
+                    "findings": all_findings, "followup_questions": followups})
+
+        # Save to chat history
+        if chat_id:
+            try:
+                chat, _ = load_chat(chat_id)
+                if chat:
+                    step_breakdown = []
+                    for entry in all_research:
+                        nl = entry.find('\n')
+                        if nl > 0:
+                            step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
+                        else:
+                            step_breakdown.append({"title": entry[3:].strip(), "body": ""})
+                    chat["messages"].append({
+                        "role": "model",
+                        "text": full_report,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "research_agent": True,
+                        "research_agent_steps": step_breakdown,
+                        "research_agent_query": query,
+                        "research_agent_sources": all_sources,
+                        "research_agent_findings": all_findings,
+                        "research_agent_durations": step_durations,
+                        "research_agent_words": total_word_count,
+                        "research_agent_followups": followups,
+                    })
+                    save_chat(chat)
+            except Exception:
+                pass
+
+    return Response(generate(), mimetype="application/x-ndjson")
+
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-// ─── State ────────────────────────────────────────
+﻿// ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
 let _continueCount=0;const _MAX_CONTINUES=5;
@@ -149,9 +149,7 @@ function setChatRunning(chatId,state,meta={}){
 function stopStreaming(){
   if(!curChat)return;
   const run=runningStreams.get(curChat);
-  if(run?.type==='research'){
-    cancelCurrentResearch();
-  }else if(run?.controller){
+  if(run?.controller){
     run.controller.abort();
   }
 }
@@ -351,19 +349,33 @@ function toggleTheme(){
 
 /* ─── Dev Raw Log Mode ──────────────────────────── */
 let devRawMode=localStorage.getItem('gyro_dev_raw')==='1';
+let devButtonVisible=localStorage.getItem('gyro_dev_visible')==='1'||devRawMode;
 function toggleDevRaw(on){
   devRawMode=!!on;
   localStorage.setItem('gyro_dev_raw',on?'1':'0');
+  // Keep button visible once it's been turned on — user must disable from settings
+  if(on&&!devButtonVisible){devButtonVisible=true;localStorage.setItem('gyro_dev_visible','1');}
   const dot=document.getElementById('devRawDot');
   if(dot)dot.style.transform=on?'translateX(18px)':'none';
   if(dot)dot.style.background=on?'var(--accent)':'var(--text-muted)';
-  // Update topbar indicator
+  // Update topbar indicator — keep visible but dim when off
   const topDev=document.getElementById('devModeIndicator');
-  if(topDev)topDev.style.display=on?'':'none';
+  if(topDev&&devButtonVisible){
+    topDev.style.display='';
+    topDev.style.opacity=on?'1':'.4';
+    topDev.style.color=on?'var(--accent)':'var(--text-muted)';
+  }
   // Live re-render: re-render current chat to apply new mode
   if(curChat){
     reRenderCurrentChat();
   }
+}
+function hideDevButton(){
+  devButtonVisible=false;devRawMode=false;
+  localStorage.setItem('gyro_dev_visible','0');
+  localStorage.setItem('gyro_dev_raw','0');
+  const topDev=document.getElementById('devModeIndicator');
+  if(topDev)topDev.style.display='none';
 }
 function initDevRawToggle(){
   const cb=document.getElementById('devRawToggle');
@@ -498,7 +510,11 @@ async function showApp(){
   updateUserUI();
   // Initialize dev mode indicator in topbar
   const topDev=document.getElementById('devModeIndicator');
-  if(topDev)topDev.style.display=devRawMode?'':'none';
+  if(topDev){
+    topDev.style.display=devButtonVisible?'':'none';
+    topDev.style.opacity=devRawMode?'1':'.4';
+    topDev.style.color=devRawMode?'var(--accent)':'var(--text-muted)';
+  }
   if(!curChat){ loadWelcome(); }
   await ensureOAuthConfigLoaded();
   await loadModels();
@@ -2039,7 +2055,7 @@ function renderToolBadges(){
   }
   if(!activeTools.size){wrap.style.display='none';return;}
   wrap.style.display='flex';
-  const names={canvas:'Canvas',search:'Web Search',mindmap:'Mind Map',research:'Deep Research',summarize:'Summarize',code:'Code Execution',imagegen:'Image Generation'};
+  const names={canvas:'Canvas',search:'Web Search',mindmap:'Mind Map',research:'Research Agent',summarize:'Summarize',code:'Code Execution',imagegen:'Image Generation'};
   wrap.innerHTML=[...activeTools].map(t=>`<span class="tool-badge" onclick="activateTool('${t}')">${names[t]||t} <span class="tb-x">×</span></span>`).join('');
 }
 
@@ -2047,375 +2063,104 @@ function toggleResearch(){
   activateTool('research');
 }
 
-function openResearchModal(){
-  const q=document.getElementById('msgInput')?.value?.trim()||'';
-  const rq=document.getElementById('researchQuery');
-  if(rq&&!rq.value.trim()&&q)rq.value=q;
-  document.getElementById('researchDepth').value=deepResearchDepth;
-  // Reset to phase 1
-  document.getElementById('researchPhase1').style.display='';
-  document.getElementById('researchPhase2').style.display='none';
-  document.getElementById('researchPhaseLoading').style.display='none';
-  document.getElementById('researchPlanBtn').disabled=false;
-  document.getElementById('researchModal').classList.add('open');
-}
-
-let _researchPlanData=null;
-
-async function generateResearchPlan(){
-  const q=(document.getElementById('researchQuery').value||'').trim();
-  if(!q){showToast('Add a research question first.','info');return;}
-  deepResearchDepth=document.getElementById('researchDepth').value||'standard';
-  const btn=document.getElementById('researchPlanBtn');
-  btn.disabled=true;
-  document.getElementById('researchPhase1').style.display='none';
-  document.getElementById('researchPhaseLoading').style.display='';
-  try{
-    const r=await apiFetch('/api/research/plan',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query:q,depth:deepResearchDepth})});
-    const d=await r.json();
-    if(!r.ok||d.error){
-      showToast(d.error||'Failed to generate plan.','error');
-      document.getElementById('researchPhase1').style.display='';
-      document.getElementById('researchPhaseLoading').style.display='none';
-      btn.disabled=false;
-      return;
-    }
-    _researchPlanData={query:q,depth:deepResearchDepth,angles:d.angles||[]};
-    // Show plan editor
-    document.getElementById('researchPlanQuery').textContent=q;
-    const planText=(d.angles||[]).map((a,i)=>`${i+1}. ${a}`).join('\n');
-    document.getElementById('researchPlanEditor').value=planText;
-    document.getElementById('researchPhaseLoading').style.display='none';
-    document.getElementById('researchPhase2').style.display='';
-  }catch(e){
-    showToast('Failed to generate plan: '+e.message,'error');
-    document.getElementById('researchPhase1').style.display='';
-    document.getElementById('researchPhaseLoading').style.display='none';
-    btn.disabled=false;
-  }
-}
-
-function backToResearchInput(){
-  document.getElementById('researchPhase2').style.display='none';
-  document.getElementById('researchPhase1').style.display='';
-  document.getElementById('researchPlanBtn').disabled=false;
-}
-
-async function confirmResearchPlan(){
-  if(!_researchPlanData)return;
-  const planText=document.getElementById('researchPlanEditor').value.trim();
-  if(!planText){showToast('Plan cannot be empty.','info');return;}
-  closeM('researchModal');
-  const input=document.getElementById('msgInput');
-  input.value=_researchPlanData.query;
-  deepResearchDepth=_researchPlanData.depth;
-  if(!activeTools.has('research')) activateTool('research');
-  // Pass the plan along through a temporary global
-  window._pendingResearchPlan=planText;
-  await sendMessage();
-  // Note: _pendingResearchPlan is consumed in the research_trigger handler, don't clear here
-}
-
-async function startResearchFromModal(){
-  const q=(document.getElementById('researchQuery').value||'').trim();
-  if(!q){showToast('Add a research question first.','info');return;}
-  deepResearchDepth=document.getElementById('researchDepth').value||'standard';
-  closeM('researchModal');
-  const input=document.getElementById('msgInput');
-  input.value=q;
-  if(!activeTools.has('research')){
-    activateTool('research');
-  }
-  await sendMessage();
-}
-
-let _currentResearchJobId=null;
-let _currentResearchReader=null;
-
-async function cancelCurrentResearch(){
-  if(!_currentResearchJobId)return;
-  try{await apiFetch(`/api/research/cancel/${_currentResearchJobId}`,{method:'POST'})}catch(e){}
-}
-
-async function runDeepResearch(query,contentEl,area,planText){
-  const depth='standard';
-
-  const stepNames=['Start','Research','Export'];
-  const stepIcons=['1','2','3'];
-  let currentPct=0, currentStep=0, lastMessage='Initializing Gemini Deep Research...';
-  let wasCancelled=false;
-  let researchCompleted=false;
-  let finalReport='';
-  let finalSources=[];
-  let finalQuery=query;
-
-  // Build initial progress card HTML once
-  const stepsInitHtml=stepNames.map((name,i)=>{
-    return `<div class="research-step" data-rs="${i}"><div class="research-step-dot">${i+1}</div><div class="research-step-label">${name}</div></div>`;
-  }).join('');
-  contentEl.innerHTML=`
-    <div class="research-badge">🔬 Gemini Deep Research</div>
-    <div class="research-progress" id="_rp">
-      <div class="research-progress-header">
-        <span class="research-progress-title" id="_rpTitle">Plan...</span>
-        <span class="research-progress-pct" id="_rpPct">0%</span>
-      </div>
-      <div class="research-bar-track">
-        <div class="research-bar-fill" id="_rpBar" style="width:0%"></div>
-      </div>
-      <div class="research-steps" id="_rpSteps">
-        <div class="research-steps-line"><div class="research-steps-line-fill" id="_rpLine" style="width:0%"></div></div>
-        ${stepsInitHtml}
-      </div>
-      <div class="research-activity">
-        <span class="research-activity-dot"></span>
-        <span id="_rpMsg">Initializing Gemini Deep Research...</span>
-      </div>
-      <div class="research-log" id="_rpLog"><div class="rline">⏳ Starting Gemini Deep Research...</div></div>
-    </div>`;
-  area.scrollTop=area.scrollHeight;
-  let _logLines=1;
-
-  // Update existing DOM nodes in-place — no layout thrash
-  const renderProgressBar=()=>{
-    const titleEl=document.getElementById('_rpTitle');
-    const pctEl=document.getElementById('_rpPct');
-    const barEl=document.getElementById('_rpBar');
-    const lineEl=document.getElementById('_rpLine');
-    const msgEl=document.getElementById('_rpMsg');
-    const stepsEl=document.getElementById('_rpSteps');
-    const logEl=document.getElementById('_rpLog');
-    if(!titleEl)return;
-    titleEl.textContent=currentStep<stepNames.length?stepNames[currentStep]+'...':'Complete...';
-    pctEl.textContent=Math.round(currentPct)+'%';
-    barEl.style.width=currentPct+'%';
-    const lineProgress=currentStep>0?Math.min(((currentStep)/(stepNames.length-1))*100,100):0;
-    lineEl.style.width=lineProgress+'%';
-    msgEl.textContent=lastMessage;
-    // Append to activity log
-    if(logEl&&lastMessage){
-      const line=document.createElement('div');
-      line.className='rline';
-      line.textContent=`[${Math.round(currentPct)}%] ${lastMessage}`;
-      logEl.appendChild(line);
-      logEl.scrollTop=logEl.scrollHeight;
-      _logLines++;
-    }
-    // Update step dots
-    if(stepsEl){
-      const dots=stepsEl.querySelectorAll('.research-step');
-      dots.forEach((dot,i)=>{
-        dot.className='research-step'+(i<currentStep?' done':(i===currentStep?' active':''));
-        const dotInner=dot.querySelector('.research-step-dot');
-        if(dotInner)dotInner.textContent=i<currentStep?'✓':(i===currentStep?stepIcons[i]:String(i+1));
-      });
-    }
-  };
-
-  const bodyObj={query};
-  const response=await apiFetch('/api/research',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(bodyObj)
-  });
-  if(!response.ok){
-    const d=await response.json().catch(()=>({error:'Failed to start research.'}));
-    throw new Error(d.error||'Failed to start research.');
-  }
-
-  const reader=response.body.getReader();
-  _currentResearchReader=reader;
-  const decoder=new TextDecoder();
-  let buffer='';
-  let lastEventTime=Date.now();
-  const STALL_TIMEOUT=600000; // 10 minutes — deep research can take up to 20 min
-
-  while(true){
-    // Race between reading and a stall timeout
-    let stallTimer;
-    const timeoutPromise=new Promise((_,reject)=>{
-      stallTimer=setTimeout(()=>reject(new Error('Research appears stalled — no response from server for 10 minutes. Try again with a simpler query.')),STALL_TIMEOUT);
-    });
-    let readResult;
-    try{
-      readResult=await Promise.race([reader.read(),timeoutPromise]);
-    }catch(e){
-      clearTimeout(stallTimer);
-      try{reader.cancel()}catch(_){}
-      throw e;
-    }
-    clearTimeout(stallTimer);
-    const{done,value}=readResult;
-    if(done)break;
-    lastEventTime=Date.now();
-    buffer+=decoder.decode(value,{stream:true});
-    let nl;
-    while((nl=buffer.indexOf('\n'))>=0){
-      const line=buffer.slice(0,nl).trim();
-      buffer=buffer.slice(nl+1);
-      if(!line)continue;
-      let evt=null;
-      try{evt=JSON.parse(line)}catch(e){continue}
-
-      if(evt.type==='job_id'){
-        _currentResearchJobId=evt.job_id;
-      }else if(evt.type==='heartbeat'){
-        // Keep-alive, ignore
-      }else if(evt.type==='progress'){
-        lastMessage=evt.message||'Working...';
-        if(typeof evt.pct==='number') currentPct=evt.pct;
-        if(typeof evt.current_step==='number') currentStep=evt.current_step-1;
-        if(currentStep<0)currentStep=0;
-        renderProgressBar();
-      }else if(evt.type==='cancelled'){
-        wasCancelled=true;
-        contentEl.innerHTML=`
-          <div class="research-badge">⏹ Research stopped</div>
-          <div style="margin-top:10px;color:var(--text-secondary)">Research was cancelled.</div>
-          <button class="research-regen-btn" onclick="regenerateResearch('${esc(query).replace(/'/g,"\\'")}')">🔄 Regenerate</button>`;
-        setStatus('Research cancelled.');
-      }else if(evt.type==='done'){
-        currentPct=100;
-        currentStep=stepNames.length;
-        lastMessage='Research complete!';
-        const report=evt.report||'';
-        const srcs=evt.sources||[];
-        const isPartial=!!evt.partial;
-        finalReport=report;
-        finalSources=srcs;
-        const srcHtml=srcs.slice(0,15).map((s,i)=>`<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title||('Source '+(i+1)))}</a></li>`).join('');
-        const dl=[];
-        if(evt.pdf_file)dl.push(`<a class="choice-btn" href="/api/research/download/${encodeURIComponent(evt.pdf_file)}">Download PDF</a>`);
-        if(evt.md_file)dl.push(`<a class="choice-btn" href="/api/research/download/${encodeURIComponent(evt.md_file)}">Download Markdown</a>`);
-        // Post-processing buttons (separate pipelines)
-        const ppBtns=[];
-        if(!evt.pdf_file)ppBtns.push(`<button class="choice-btn" onclick="postprocessPDF(this)" data-query="${esc(query).replace(/"/g,'&quot;')}">📄 Generate PDF</button>`);
-        ppBtns.push(`<button class="choice-btn" onclick="postprocessMindmap(this)" data-query="${esc(query).replace(/"/g,'&quot;')}">🧠 Build Mind Map</button>`);
-        const partialNote=isPartial?`<div class="research-partial-note" style="background:var(--surface-2);border-left:3px solid var(--amber);padding:8px 12px;margin:8px 0;border-radius:6px;font-size:0.9em;color:var(--text-secondary)">⚠️ This report was generated from partial data. ${evt.error_note||'Research may have been interrupted.'}</div>`:'';
-        contentEl.innerHTML=`
-          <div class="research-badge">${isPartial?'⚠️ Research (partial)':'✅ Gemini Deep Research complete'} · ${Number(evt.source_count||srcs.length)} sources</div>
-          ${partialNote}
-          <div class="research-actions">${dl.join('')}</div>
-          <div class="research-postprocess" style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap">${ppBtns.join('')}</div>
-          ${srcHtml?`<div class="research-summary"><strong>Top sources</strong><ol style="margin:8px 0 0 18px">${srcHtml}</ol></div>`:''}
-          <div style="margin-top:10px">${fmt(report.slice(0,32000))}</div>
-          <button class="research-regen-btn" onclick="regenerateResearch('${esc(query).replace(/'/g,"\\'")}')">🔄 Regenerate</button>
-        `;
-        setStatus(isPartial?'Research completed with partial data.':'Research complete. You can download the report.');
-        researchCompleted=true;
-        // Store for post-processing
-        _lastResearchReport=finalReport;
-        _lastResearchSources=finalSources;
-      }else if(evt.type==='error'){
-        throw new Error(evt.error||'Research failed.');
-      }
-    }
-  }
-  _currentResearchJobId=null;
-  _currentResearchReader=null;
-  // If stream ended but we never got a 'done' event, it stalled
-  if(!researchCompleted&&!wasCancelled){
-    throw new Error('Research ended unexpectedly. Try again with a different query.');
-  }
-}
-
-function regenerateResearch(query){
-  const input=document.getElementById('msgInput');
-  input.value=query;
-  if(!activeTools.has('research')) activateTool('research');
-  sendMessage();
-}
-
-/* ─── Stock Analysis Agent ──────────────────────────────────── */
-function _saParseRating(text){
-  const t=(text||'').toUpperCase();
-  if(/STRONG\s*BUY/.test(t))return 5;
-  if(/STRONG\s*SELL/.test(t))return 1;
-  if(/\bBUY\b/.test(t))return 4;
-  if(/\bSELL\b/.test(t))return 2;
-  if(/\bHOLD\b|\bNEUTRAL\b/.test(t))return 3;
-  return 3;
-}
-function buildSentimentGauge(rating){
-  const labels=['Strong Sell','Sell','Hold','Buy','Strong Buy'];
-  const colors=['#ef4444','#f97316','#eab308','#22c55e','#16a34a'];
-  const pct=((rating-1)/4)*100;
-  const label=labels[rating-1]||'Hold';
-  const color=colors[rating-1]||'#eab308';
-  return `<div class="sa-gauge-wrap"><div class="sa-gauge-title">AI Verdict</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${label}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`;
-}
-function buildGrowthChart(stockData){
-  const items=(stockData||[]).filter(d=>!d.error);
-  if(!items.length)return '';
-  let bars='';
-  for(const d of items){
-    const ticker=d.ticker||'?';
-    const metrics=[];
-    const addM=(label,raw,mult)=>{const v=parseFloat(raw);if(!isNaN(v)&&raw!=null&&raw!=='N/A')metrics.push({label,value:mult?v*100:v})};
-    addM('Revenue Growth',d.revenueGrowth,true);
-    addM('Earnings Growth',d.earningsGrowth,true);
-    if(d.forwardEps!=null&&d.trailingEps!=null&&d.forwardEps!=='N/A'&&d.trailingEps!=='N/A'){
-      const f=parseFloat(d.forwardEps),tr=parseFloat(d.trailingEps);
-      if(!isNaN(f)&&!isNaN(tr)&&tr!==0)metrics.push({label:'EPS Growth',value:((f-tr)/Math.abs(tr))*100});
-    }
-    if(d.targetMeanPrice!=null&&d.currentPrice!=null&&d.targetMeanPrice!=='N/A'){
-      const tgt=parseFloat(d.targetMeanPrice),cur=parseFloat(d.currentPrice);
-      if(!isNaN(tgt)&&!isNaN(cur)&&cur!==0)metrics.push({label:'Analyst Upside',value:((tgt-cur)/cur)*100});
-    }
-    if(!metrics.length)continue;
-    const maxAbs=Math.max(...metrics.map(m=>Math.abs(m.value)),30);
-    bars+=`<div class="sa-growth-ticker">${items.length>1?`<div class="sa-growth-ticker-label">${esc(ticker)}</div>`:''}`;
-    for(const m of metrics){
-      const pct=Math.min(Math.abs(m.value)/maxAbs*100,100);
-      const isPos=m.value>=0;
-      const color=isPos?'var(--green,#22c55e)':'var(--red,#ef4444)';
-      bars+=`<div class="sa-growth-row"><span class="sa-growth-label">${m.label}</span><div class="sa-growth-bar-track"><div class="sa-growth-bar-fill" style="width:${pct}%;background:${color}"></div></div><span class="sa-growth-value" style="color:${color}">${isPos?'+':''}${m.value.toFixed(1)}%</span></div>`;
-    }
-    bars+='</div>';
-  }
-  if(!bars)return '';
-  return `<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Growth & Projections</div>${bars}</div>`;
-}
-async function runStockAgent(stockData, userQuery, contentEl, area, chatId){
-  const tickers=stockData.filter(d=>!d.error).map(d=>d.ticker||'?');
+async function runResearchAgent(query, contentEl, area, chatId){
+  const stepIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
+  const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert & Stakeholder Analysis','Data & Comparative Analysis','Synthesis & Insights','Strategic Assessment','Final Intelligence Brief'];
   const totalSteps=8;
-  const stepNames=['Market Snapshot','News & Headlines','Technical Analysis','Fundamental Analysis','Deep Research','Risk & Ownership','Valuation & Targets','Final Verdict'];
-  let currentStep=0, currentPct=0;
+  let currentStep=0;
   const stepTimers={};
   const stepElapsed={};
+  const stepWordCounts={};
+  const stepSourceCounts={};
   const manualToggles=new Set();
-  window._saManualToggles=manualToggles;
+  window._raManualToggles=manualToggles;
+  const discoveredSources=[];
+  const discoveredFindings=[];
+  let startTime=Date.now();
+  let totalWords=0;
 
-  const stepsHtml=stepNames.map((name,i)=>`<div class="sa-step" data-sa="${i}"><div class="sa-step-dot" onclick="saScrollToStep(${i+1})">${i+1}</div><div class="sa-step-label">${name}</div></div>`).join('');
+  const stepsHtml=stepNames.map((name,i)=>`<div class="ra-step" data-ra="${i}"><div class="ra-step-dot" onclick="raScrollToStep(${i+1})">${stepIcons[i]}</div><div class="ra-step-label">${name}</div></div>`).join('');
 
   contentEl.innerHTML=`
-    <div class="sa-badge"><span class="sa-badge-icon">📊</span> Stock Analysis Agent</div>
-    <div class="sa-progress" id="_saP">
-      <div class="sa-header">
-        <span class="sa-title" id="_saTitle">Analyzing ${esc(tickers.join(', '))}...</span>
-        <span class="sa-pct" id="_saPct">0%</span>
+    <div class="ra-container">
+      <div class="ra-badge" id="_raBadge">🔬 Research Agent — In Progress</div>
+      <div class="ra-progress">
+        <div class="ra-header">
+          <span class="ra-title">${esc(query)}</span>
+          <span class="ra-pct" id="_raPct">0%</span>
+        </div>
+        <div class="ra-bar-track"><div class="ra-bar-fill" id="_raBar" style="width:0%"></div></div>
+        <div class="ra-steps" id="_raSteps">
+          <div class="ra-steps-line"><div class="ra-steps-line-fill" id="_raLine" style="width:0%"></div></div>
+          ${stepsHtml}
+        </div>
+        <div class="ra-stats-row">
+          <span>📚 <strong id="_raSourceCount">0</strong> sources</span>
+          <span>📝 <strong id="_raWordCount">0</strong> words</span>
+          <span>⏱️ <strong id="_raElapsed">0s</strong></span>
+        </div>
+        <div class="ra-activity" id="_raActivity"><span class="ra-pulse"></span><span id="_raMsg">Initializing research agent...</span></div>
       </div>
-      <div class="sa-bar-track"><div class="sa-bar-fill" id="_saBar" style="width:0%"></div></div>
-      <div class="sa-steps" id="_saSteps">
-        <div class="sa-steps-line"><div class="sa-steps-line-fill" id="_saLine" style="width:0%"></div></div>
-        ${stepsHtml}
+      <div class="ra-findings-panel" id="_raFindings" style="display:none">
+        <div class="ra-findings-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')">
+          <span class="ra-findings-icon">💡</span>
+          <span class="ra-findings-title">Key Findings</span>
+          <span class="ra-findings-count" id="_raFindCount">0</span>
+          <span class="ra-findings-chevron">▾</span>
+        </div>
+        <div class="ra-findings-list" id="_raFindList"></div>
       </div>
-      <div class="sa-activity"><span class="sa-activity-dot"></span><span id="_saMsg">Initializing analysis...</span></div>
-      <div class="sa-total-time" id="_saTotalTime" style="display:none"></div>
-    </div>
-    <div class="sa-output" id="_saOut"></div>`;
+      <div class="ra-output" id="_raOut"></div>
+      <div class="ra-sources-panel" id="_raSrcPanel" style="display:none">
+        <div class="ra-sources-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')">
+          <span class="ra-sources-icon">📚</span>
+          <span class="ra-sources-title">Sources Discovered</span>
+          <span class="ra-sources-count" id="_raSrcCount2">0</span>
+          <span class="ra-sources-chevron">▾</span>
+        </div>
+        <div class="ra-sources-list" id="_raSrcList"></div>
+      </div>
+      <div class="ra-toast-container" id="_raToasts"></div>
+    </div>`;
   area.scrollTop=area.scrollHeight;
 
-  window.saScrollToStep=function(stepNum){
-    const section=document.getElementById('_saS'+stepNum);
+  // Live elapsed timer
+  const elTimer=setInterval(()=>{
+    const el=document.getElementById('_raElapsed');
+    if(el) el.textContent=((Date.now()-startTime)/1000|0)+'s';
+  },1000);
+
+  // Toast notification system
+  const showToast=(msg,icon='ℹ️')=>{
+    const container=document.getElementById('_raToasts');
+    if(!container)return;
+    const toast=document.createElement('div');
+    toast.className='ra-toast ra-toast-in';
+    toast.innerHTML=`<span class="ra-toast-icon">${icon}</span><span class="ra-toast-msg">${esc(msg)}</span>`;
+    container.appendChild(toast);
+    setTimeout(()=>{toast.classList.remove('ra-toast-in');toast.classList.add('ra-toast-out')},3000);
+    setTimeout(()=>toast.remove(),3600);
+  };
+
+  // Milestone tracker
+  let lastSourceMilestone=0;
+  const checkMilestones=()=>{
+    const sc=discoveredSources.length;
+    if(sc>=5&&lastSourceMilestone<5){lastSourceMilestone=5;showToast('5 sources discovered','📚');}
+    else if(sc>=10&&lastSourceMilestone<10){lastSourceMilestone=10;showToast('10 sources analyzed','🔥');}
+    else if(sc>=20&&lastSourceMilestone<20){lastSourceMilestone=20;showToast('20+ sources compiled','⚡');}
+    else if(sc>=30&&lastSourceMilestone<30){lastSourceMilestone=30;showToast('30+ deep source network','🌐');}
+  };
+
+  window.raScrollToStep=function(stepNum){
+    const section=document.getElementById('_raS'+stepNum);
     if(!section)return;
-    const outEl=document.getElementById('_saOut');
-    // Collapse all other sections, expand the clicked one
+    const outEl=document.getElementById('_raOut');
     if(outEl){
-      outEl.querySelectorAll('.sa-section').forEach(sec=>{
-        const sNum=parseInt(sec.id.replace('_saS',''));
-        if(sNum===stepNum){sec.classList.remove('sa-collapsed');}
-        else{sec.classList.add('sa-collapsed');}
+      outEl.querySelectorAll('.ra-section').forEach(sec=>{
+        const sNum=parseInt(sec.id.replace('_raS',''));
+        if(sNum===stepNum) sec.classList.remove('ra-collapsed');
+        else sec.classList.add('ra-collapsed');
         manualToggles.add(sNum);
       });
     }
@@ -2424,357 +2169,275 @@ async function runStockAgent(stockData, userQuery, contentEl, area, chatId){
 
   const updateProgress=(step,msg)=>{
     currentStep=step;
-    currentPct=Math.round((step/totalSteps)*100);
-    const titleEl=document.getElementById('_saTitle');
-    const pctEl=document.getElementById('_saPct');
-    const barEl=document.getElementById('_saBar');
-    const lineEl=document.getElementById('_saLine');
-    const msgEl=document.getElementById('_saMsg');
-    const stepsEl=document.getElementById('_saSteps');
-    if(titleEl)titleEl.textContent=step<totalSteps?stepNames[step]+'...':'Analysis complete!';
-    if(pctEl)pctEl.textContent=currentPct+'%';
-    if(barEl)barEl.style.width=currentPct+'%';
-    if(lineEl)lineEl.style.width=Math.min(((step)/(totalSteps-1))*100,100)+'%';
-    if(msgEl)msgEl.textContent=msg||'Working...';
+    const pct=Math.round((step/totalSteps)*100);
+    const barEl=document.getElementById('_raBar');
+    const lineEl=document.getElementById('_raLine');
+    const msgEl=document.getElementById('_raMsg');
+    const pctEl=document.getElementById('_raPct');
+    if(barEl) barEl.style.width=pct+'%';
+    if(pctEl) pctEl.textContent=pct+'%';
+    if(lineEl) lineEl.style.width=Math.min((step/(totalSteps-1))*100,100)+'%';
+    if(msgEl) msgEl.textContent=msg||'Working...';
+    const stepsEl=document.getElementById('_raSteps');
     if(stepsEl){
-      stepsEl.querySelectorAll('.sa-step').forEach((dot,i)=>{
-        dot.className='sa-step'+(i<step?' done':(i===step?' active':''));
-        const inner=dot.querySelector('.sa-step-dot');
-        if(inner)inner.textContent=i<step?'✓':String(i+1);
+      stepsEl.querySelectorAll('.ra-step').forEach((dot,i)=>{
+        dot.className='ra-step'+(i<step?' done':(i===step?' active':''));
+        const inner=dot.querySelector('.ra-step-dot');
+        if(inner) inner.textContent=i<step?'✓':stepIcons[i];
       });
     }
   };
 
+  const addSource=(src)=>{
+    discoveredSources.push(src);
+    const panel=document.getElementById('_raSrcPanel');
+    if(panel) panel.style.display='';
+    const cntEl=document.getElementById('_raSourceCount');
+    const cnt2=document.getElementById('_raSrcCount2');
+    if(cntEl) cntEl.textContent=discoveredSources.length;
+    if(cnt2) cnt2.textContent=discoveredSources.length;
+    const list=document.getElementById('_raSrcList');
+    if(list){
+      try{
+        const domain=new URL(src.url).hostname.replace('www.','');
+        const card=document.createElement('a');
+        card.className='ra-src-card ra-src-card-in';
+        card.href=src.url;
+        card.target='_blank';
+        card.rel='noopener noreferrer';
+        card.innerHTML=`<img class="ra-src-favicon" src="https://www.google.com/s2/favicons?domain=${esc(domain)}&sz=32" alt="" onerror="this.style.display='none'"><div class="ra-src-info"><div class="ra-src-name">${esc(src.title.length>60?src.title.slice(0,60)+'…':src.title)}</div><div class="ra-src-domain">${esc(domain)}</div></div>`;
+        list.appendChild(card);
+      }catch(e){}
+    }
+    checkMilestones();
+  };
+
+  const addFinding=(text,step)=>{
+    discoveredFindings.push({text,step});
+    const panel=document.getElementById('_raFindings');
+    if(panel) panel.style.display='';
+    const cntEl=document.getElementById('_raFindCount');
+    if(cntEl) cntEl.textContent=discoveredFindings.length;
+    const list=document.getElementById('_raFindList');
+    if(list){
+      const item=document.createElement('div');
+      item.className='ra-finding-item ra-finding-in';
+      const icon=stepIcons[step-1]||'📄';
+      item.innerHTML=`<span class="ra-finding-step">${icon}</span><span class="ra-finding-text">${esc(text.length>140?text.slice(0,140)+'…':text)}</span>`;
+      list.appendChild(item);
+    }
+  };
+
   try{
-    const response=await apiFetch('/api/stock-agent',{
+    const response=await apiFetch('/api/research-agent',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chatId,stock_data:stockData,query:userQuery})
+      body:JSON.stringify({chat_id:chatId,query:query})
     });
     if(!response.ok){
-      const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
-      throw new Error(d.error||'Stock analysis failed');
+      const d=await response.json().catch(()=>({error:'Failed to start research'}));
+      throw new Error(d.error||'Research failed');
     }
 
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
     let buffer='';
-    const outEl=document.getElementById('_saOut');
+    const outEl=document.getElementById('_raOut');
     let currentContentEl=null;
     let stepContent='';
     let stepThinking='';
     let failedSteps=0;
+    let followupQuestions=[];
 
     while(true){
       const{done,value}=await reader.read();
-      if(done)break;
+      if(done) break;
       buffer+=decoder.decode(value,{stream:true});
       let nl;
       while((nl=buffer.indexOf('\n'))>=0){
         const line=buffer.slice(0,nl).trim();
         buffer=buffer.slice(nl+1);
-        if(!line)continue;
-        let evt;
-        try{evt=JSON.parse(line)}catch(e){continue}
+        if(!line) continue;
+        let ev;
+        try{ev=JSON.parse(line)}catch(e){continue}
 
-        if(evt.type==='agent_start'){
-          updateProgress(0,'Starting analysis of '+evt.tickers.join(', ')+'...');
-        }else if(evt.type==='agent_step'){
-          if(evt.status==='running'){
-            stepTimers[evt.step]=Date.now();
-            updateProgress(evt.step-1, evt.title+'...');
+        if(ev.type==='agent_start'){
+          updateProgress(0,'Starting intelligence gathering on: '+ev.query);
+        }else if(ev.type==='agent_step'){
+          const icon=ev.icon||stepIcons[(ev.step-1)]||'📄';
+          if(ev.status==='running'){
+            stepTimers[ev.step]=Date.now();
+            updateProgress(ev.step-1, icon+' '+ev.title+'...');
             stepContent='';
             stepThinking='';
-            // Auto-collapse previous sections (unless manually toggled)
             if(outEl){
-              outEl.querySelectorAll('.sa-section').forEach(sec=>{
-                const sNum=parseInt(sec.id.replace('_saS',''));
-                if(!manualToggles.has(sNum)) sec.classList.add('sa-collapsed');
+              outEl.querySelectorAll('.ra-section').forEach(sec=>{
+                const sNum=parseInt(sec.id.replace('_raS',''));
+                if(!manualToggles.has(sNum)) sec.classList.add('ra-collapsed');
               });
             }
             const section=document.createElement('div');
-            section.className='sa-section sa-slide-in';
-            section.id='_saS'+evt.step;
-            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${evt.step}</span><span class="sa-section-title">${esc(evt.title)}</span><span class="sa-section-timer" id="_saT${evt.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block" id="_saThink${evt.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${evt.step}"></div></div><div class="sa-step-content" id="_saC${evt.step}"></div></div>`;
-            if(outEl)outEl.appendChild(section);
-            currentContentEl=section.querySelector('.sa-step-content');
+            section.className='ra-section ra-slide-in';
+            section.id='_raS'+ev.step;
+            section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">▾</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
+            if(outEl) outEl.appendChild(section);
+            currentContentEl=section.querySelector('.ra-step-content');
+            showToast(`Step ${ev.step}: ${ev.title}`,icon);
             area.scrollTop=area.scrollHeight;
-          }else if(evt.status==='complete'){
-            updateProgress(evt.step, evt.title+' complete');
-            const statusEl=document.querySelector('#_saS'+evt.step+' .sa-section-status');
-            if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
-            const elapsed=evt.elapsed||(stepTimers[evt.step]?((Date.now()-stepTimers[evt.step])/1000).toFixed(1):null);
-            stepElapsed[evt.step]=parseFloat(elapsed)||0;
-            const timerEl=document.getElementById('_saT'+evt.step);
-            if(timerEl&&elapsed)timerEl.textContent=elapsed+'s';
-            const ce=document.getElementById('_saC'+evt.step);
-            if(ce)ce.innerHTML=fmt(stepContent);
-            // Finalize thinking label
-            const thEl=document.getElementById('_saThink'+evt.step);
+          }else if(ev.status==='complete'){
+            updateProgress(ev.step, '✓ '+ev.title+' complete');
+            const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
+            if(statusEl){statusEl.textContent='✓ done';statusEl.className='ra-section-status ra-done';}
+            const elapsed=ev.elapsed||(stepTimers[ev.step]?((Date.now()-stepTimers[ev.step])/1000).toFixed(1):null);
+            stepElapsed[ev.step]=parseFloat(elapsed)||0;
+            if(ev.word_count) stepWordCounts[ev.step]=ev.word_count;
+            if(ev.source_count!==undefined) stepSourceCounts[ev.step]=ev.source_count;
+            totalWords+=(ev.word_count||0);
+            const wcEl=document.getElementById('_raWordCount');
+            if(wcEl) wcEl.textContent=totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords;
+            const timerEl=document.getElementById('_raT'+ev.step);
+            if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_raC'+ev.step);
+            if(ce) ce.innerHTML=fmt(stepContent);
+            const thEl=document.getElementById('_raThink'+ev.step);
             if(thEl&&stepThinking){
-              const lb=thEl.querySelector('.sa-thinking-label');
-              if(lb)lb.textContent='View thinking';
+              const lb=thEl.querySelector('.ra-thinking-label');
+              if(lb) lb.textContent='View thinking';
             }
             area.scrollTop=area.scrollHeight;
-          }else if(evt.status==='failed'){
+          }else if(ev.status==='failed'){
             failedSteps++;
-            const statusEl=document.querySelector('#_saS'+evt.step+' .sa-section-status');
-            if(statusEl){statusEl.textContent='✗ failed';statusEl.className='sa-section-status sa-failed';}
-            const elapsed=evt.elapsed||(stepTimers[evt.step]?((Date.now()-stepTimers[evt.step])/1000).toFixed(1):null);
-            stepElapsed[evt.step]=parseFloat(elapsed)||0;
-            const timerEl=document.getElementById('_saT'+evt.step);
-            if(timerEl&&elapsed)timerEl.textContent=elapsed+'s';
-            const ce=document.getElementById('_saC'+evt.step);
-            if(ce&&evt.error){
-              ce.innerHTML=`<div class="sa-step-error">⚠️ This analysis step failed: ${esc(evt.error.slice(0,150))}</div>`;
-            }
-            updateProgress(evt.step, evt.title+' failed — continuing...');
+            const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
+            if(statusEl){statusEl.textContent='✗ failed';statusEl.className='ra-section-status ra-failed';}
+            const elapsed=ev.elapsed||(stepTimers[ev.step]?((Date.now()-stepTimers[ev.step])/1000).toFixed(1):null);
+            stepElapsed[ev.step]=parseFloat(elapsed)||0;
+            const timerEl=document.getElementById('_raT'+ev.step);
+            if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_raC'+ev.step);
+            if(ce&&ev.error) ce.innerHTML=`<div class="ra-step-error">⚠️ Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, '⚠️ '+ev.title+' failed — continuing...');
           }
-        }else if(evt.type==='agent_thinking'){
-          stepThinking+=(evt.text||'');
-          const thEl=document.getElementById('_saThink'+evt.step);
+        }else if(ev.type==='agent_thinking'){
+          stepThinking+=(ev.text||'');
+          const thEl=document.getElementById('_raThink'+ev.step);
           if(thEl){
             thEl.style.display='';
-            const thC=document.getElementById('_saThinkC'+evt.step);
-            if(thC)thC.textContent=stepThinking;
+            const thC=document.getElementById('_raThinkC'+ev.step);
+            if(thC) thC.textContent=stepThinking;
           }
-        }else if(evt.type==='agent_delta'){
-          stepContent+=evt.text;
+        }else if(ev.type==='agent_delta'){
+          stepContent+=ev.text;
           if(currentContentEl){
             currentContentEl.innerHTML=fmtLive(stepContent);
             area.scrollTop=area.scrollHeight;
           }
-        }else if(evt.type==='agent_done'){
-          updateProgress(totalSteps,'Analysis complete!');
-          // Total time
-          const totalTime=Object.values(stepElapsed).reduce((a,b)=>a+b,0).toFixed(1);
-          const ttEl=document.getElementById('_saTotalTime');
-          if(ttEl){ttEl.style.display='';ttEl.innerHTML=`⏱️ Total analysis time: <strong>${totalTime}s</strong>`;}
-          // Hide activity bar
-          const actEl=contentEl.querySelector('.sa-activity');
-          if(actEl)actEl.style.display='none';
-          // Collapse all sections for clean summary view
-          if(outEl) outEl.querySelectorAll('.sa-section').forEach(s=>s.classList.add('sa-collapsed'));
-          // Sentiment gauge from final verdict
-          const lastC=document.getElementById('_saC'+totalSteps);
-          const rating=_saParseRating(lastC?lastC.textContent:'');
-          const gaugeHtml=buildSentimentGauge(rating);
-          const growthHtml=buildGrowthChart(stockData);
-          const extras=document.createElement('div');
-          extras.className='sa-extras';
-          extras.innerHTML=gaugeHtml+growthHtml;
-          if(outEl)outEl.insertBefore(extras,outEl.firstChild);
-          // Quick summary — extract the first ~2 sentences from the final verdict
-          const verdictEl=document.getElementById('_saC'+totalSteps);
-          const verdictText=(verdictEl?verdictEl.textContent:'').trim();
-          if(verdictText){
-            const sentences=verdictText.split(/(?<=[.!?])\s+/).slice(0,3).join(' ');
-            const summaryDiv=document.createElement('div');
-            summaryDiv.className='sa-summary';
-            summaryDiv.innerHTML=`<div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div>`;
-            if(outEl)outEl.insertBefore(summaryDiv,outEl.querySelector('.sa-section'));
+        }else if(ev.type==='agent_sources'){
+          for(const src of (ev.sources||[])){
+            if(!discoveredSources.find(s=>s.url===src.url)) addSource(src);
           }
-          // Disclaimer
-          const disc=document.createElement('div');
-          disc.className='stock-disclaimer sa-disclaimer';
-          disc.innerHTML='⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only. Always do your own research and consult a licensed financial advisor. You could lose money.';
-          if(outEl)outEl.appendChild(disc);
-          // Re-analyze button
-          const reBtn=document.createElement('button');
-          reBtn.className='sa-reanalyze';
-          reBtn.innerHTML='🔄 Re-analyze';
-          reBtn.onclick=async()=>{
-            reBtn.disabled=true;reBtn.textContent='⏳ Re-analyzing...';
-            try{
-              contentEl.innerHTML='';
-              await runStockAgent(stockData, userQuery, contentEl, area, chatId);
-            }catch(e2){
-              contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e2.message||'Re-analysis failed.')}</div>`;
-            }
-          };
-          if(outEl)outEl.appendChild(reBtn);
+        }else if(ev.type==='agent_findings'){
+          for(const f of (ev.findings||[])){
+            addFinding(f, ev.step);
+          }
+        }else if(ev.type==='agent_done'){
+          clearInterval(elTimer);
+          updateProgress(totalSteps,'Research complete!');
+          followupQuestions=ev.followup_questions||[];
+          totalWords=ev.total_words||totalWords;
+          const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+          const elapsedEl=document.getElementById('_raElapsed');
+          if(elapsedEl) elapsedEl.textContent=totalTime+'s';
+          const wcEl=document.getElementById('_raWordCount');
+          if(wcEl) wcEl.textContent=totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords;
+          const actEl=document.getElementById('_raActivity');
+          if(actEl) actEl.innerHTML=`<span class="ra-complete-icon">✅</span> Research complete in <strong>${totalTime}s</strong> — ${discoveredSources.length} sources, ${totalWords.toLocaleString()} words analyzed`;
+
+          // Collapse all sections
+          if(outEl) outEl.querySelectorAll('.ra-section').forEach(s=>s.classList.add('ra-collapsed'));
+
+          // Extract TL;DR from final step
+          const lastC=document.getElementById('_raC'+totalSteps);
+          const reportText=(lastC?lastC.textContent:'').trim();
+          let tldr='';
+          const tldrMatch=reportText.match(/TL;DR[:\s]*([\s\S]*?)(?=Executive Summary|Key Findings|$)/i);
+          if(tldrMatch) tldr=tldrMatch[1].trim().split(/\n\n/)[0].trim();
+          if(!tldr){
+            const sentences=reportText.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
+            tldr=sentences;
+          }
+
+          // Build step timing bars data
+          const durations=ev.step_durations||Object.keys(stepElapsed).map(k=>({step:parseInt(k),title:stepNames[parseInt(k)-1]||'Step '+k,elapsed:stepElapsed[k]}));
+          const maxDur=Math.max(...durations.map(d=>d.elapsed),1);
+
+          // TL;DR summary card (sa-summary style)
+          if(tldr){
+            const summaryEl=document.createElement('div');
+            summaryEl.className='ra-summary ra-slide-in';
+            summaryEl.innerHTML=`<div class="ra-summary-hd">⚡ Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div>`;
+            if(outEl) outEl.insertBefore(summaryEl,outEl.querySelector('.ra-section'));
+          }
+
+          // Build completion dashboard
+          const dashboard=document.createElement('div');
+          dashboard.className='ra-dashboard ra-slide-in';
+          let dashHtml=`<div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Intelligence Brief Complete</span></div>`;
+          dashHtml+=`<div class="ra-dash-stats">
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalSteps-failedSteps}/${totalSteps}</div><div class="ra-dash-stat-lbl">Steps</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredSources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</div><div class="ra-dash-stat-lbl">Words</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredFindings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTime}s</div><div class="ra-dash-stat-lbl">Time</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${failedSteps===0?'🟢 High':'🟡 Partial'}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
+          </div>`;
+          // Step timing chart
+          if(durations.length){
+            dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">⏱️ Step Performance</div><div class="ra-timing-chart">`;
+            durations.forEach(d=>{
+              const pct=Math.round((d.elapsed/maxDur)*100);
+              dashHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
+            });
+            dashHtml+=`</div></div>`;
+          }
+          dashboard.innerHTML=dashHtml;
+          if(outEl) outEl.insertBefore(dashboard,outEl.querySelector('.ra-summary')||outEl.querySelector('.ra-section'));
+
+          // Follow-up question chips
+          if(followupQuestions.length){
+            const followupEl=document.createElement('div');
+            followupEl.className='ra-followups';
+            followupEl.innerHTML=`<div class="ra-followups-hd">🔮 Continue Researching</div><div class="ra-followups-list">${followupQuestions.map(q=>`<button class="ra-followup-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div>`;
+            if(outEl) outEl.appendChild(followupEl);
+          }
+
+          // Search box
+          const searchEl=document.createElement('div');
+          searchEl.className='ra-search-wrap';
+          searchEl.innerHTML=`<input class="ra-search-input" type="text" placeholder="🔍 Search within results..." oninput="(function(inp){var q=inp.value.toLowerCase().trim();var out=document.getElementById('_raOut');if(!out)return;out.querySelectorAll('.ra-section').forEach(function(s){var body=s.querySelector('.ra-step-content');if(!body)return;if(!q){s.style.display='';return}var txt=body.textContent.toLowerCase();if(txt.includes(q)){s.style.display='';s.classList.remove('ra-collapsed')}else{s.style.display='none'}})})(this)">`;
+
+          // Action bar
+          const actionBar=document.createElement('div');
+          actionBar.className='ra-actions';
+          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-researching...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){var b=event.target;b.textContent='✓ Copied!';setTimeout(function(){b.textContent='📋 Copy Report'},1500)})})(this)">📋 Copy Report</button>`;
+
           // Update badge
-          const badge=contentEl.querySelector('.sa-badge');
-          const completeTxt=failedSteps>0
-            ?`⚠️ Analysis Complete (${totalSteps-failedSteps}/${totalSteps} steps) — ${esc(tickers.join(', '))}`
-            :`✅ Stock Analysis Complete — ${esc(tickers.join(', '))}`;
-          if(badge){badge.innerHTML=completeTxt;if(!failedSteps)badge.classList.add('sa-badge-done');}
+          const badge=document.getElementById('_raBadge');
+          if(badge){badge.classList.add('ra-badge-done');badge.textContent='✅ Research Complete — '+totalTime+'s';}
+
+          if(outEl){
+            outEl.appendChild(searchEl);
+            outEl.appendChild(actionBar);
+          }
+          showToast('Research complete!','✅');
           area.scrollTop=area.scrollHeight;
         }
       }
     }
   }catch(e){
-    contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">Stock analysis failed: ${esc(e.message||'Unknown error')}</div>`;
-    setStatus('Stock analysis failed.');
-  }
-}
-
-let _lastResearchReport='';
-let _lastResearchSources=[];
-
-async function postprocessPDF(btn){
-  if(!btn)return;
-  // Find the report from the closest research result
-  const contentEl=btn.closest('.msg-content')||btn.closest('.msg');
-  const reportText=_lastResearchReport||contentEl?.innerText||'';
-  if(!reportText||reportText.length<100){showToast('No research report found to export.','info');return;}
-
-  const origText=btn.textContent;
-  btn.disabled=true;
-  btn.textContent='⏳ Generating PDF...';
-
-  try{
-    const r=await apiFetch('/api/research/export/pdf',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({report:_lastResearchReport,title:btn.dataset.query||'Research Report',sources:_lastResearchSources})});
-    const d=await r.json();
-    if(!r.ok||d.error){
-      showToast(d.error||'PDF generation failed.','error');
-      btn.textContent=origText;btn.disabled=false;
-      return;
-    }
-    // Replace button with download link
-    const link=document.createElement('a');
-    link.className='choice-btn';
-    link.href=`/api/research/download/${encodeURIComponent(d.pdf_file)}`;
-    link.textContent='📄 Download PDF';
-    btn.replaceWith(link);
-    showToast('PDF generated successfully!','success');
-  }catch(e){
-    showToast('PDF generation failed: '+e.message,'error');
-    btn.textContent=origText;btn.disabled=false;
-  }
-}
-
-async function postprocessMindmap(btn){
-  if(!btn)return;
-  if(!_lastResearchReport||_lastResearchReport.length<100){showToast('No research report found.','info');return;}
-
-  const origText=btn.textContent;
-  btn.disabled=true;
-  btn.textContent='⏳ Building mind map...';
-
-  try{
-    const r=await apiFetch('/api/research/export/mindmap',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({report:_lastResearchReport})});
-    const d=await r.json();
-    if(!r.ok||d.error){
-      showToast(d.error||'Mind map generation failed.','error');
-      btn.textContent=origText;btn.disabled=false;
-      return;
-    }
-    // Render mind map inline
-    const mmData=d.mindmap;
-    const mmId='mm_'+Date.now();
-    const mmHtml=_renderMindmapNode(mmData,0);
-    const container=document.createElement('div');
-    container.className='research-mindmap';
-    container.id=mmId;
-    container.innerHTML=`<div class="research-mindmap-title">🧠 Mind Map</div>${mmHtml}`;
-    btn.replaceWith(container);
-    showToast('Mind map generated!','success');
-  }catch(e){
-    showToast('Mind map failed: '+e.message,'error');
-    btn.textContent=origText;btn.disabled=false;
-  }
-}
-
-function _renderMindmapNode(node,level){
-  if(!node||!node.title)return'';
-  const indent=level*20;
-  const isRoot=level===0;
-  const cls=isRoot?'mm-root':'mm-node';
-  const childHtml=(node.children||[]).map(c=>_renderMindmapNode(c,level+1)).join('');
-  return`<div class="${cls}" style="margin-left:${indent}px">
-    <div class="mm-label" style="font-weight:${level<2?'600':'400'};font-size:${Math.max(12,15-level)}px;padding:4px 8px;margin:2px 0;border-left:${level>0?'2px solid var(--accent)':'none'};${isRoot?'font-size:16px;font-weight:700;margin-bottom:6px':''}">
-      ${esc(node.title)}
-    </div>
-    ${childHtml?'<div class="mm-children">'+childHtml+'</div>':''}
-  </div>`;
-}
-
-/* ─── Inline Research Plan (in-chat + canvas) ─────── */
-let _inlineResearchState=null; // {query, cardEl, contentEl}
-
-async function startInlineResearchPlan(query,depth){
-  // Gemini Deep Research handles planning internally — start directly
-  const area=document.getElementById('chatArea');
-
-  // Create inline card in chat
-  const msgDiv=document.createElement('div');
-  msgDiv.className='msg kairo';
-  const contentEl=document.createElement('div');
-  contentEl.className='msg-content';
-  msgDiv.innerHTML='<div class="lbl">gyro</div>';
-  msgDiv.appendChild(contentEl);
-  area.appendChild(msgDiv);
-  area.scrollTop=area.scrollHeight;
-
-  _inlineResearchState={query,cardEl:msgDiv,contentEl};
-
-  const targetChatId=curChat;
-  setChatRunning(targetChatId,true,{type:'research'});
-  try{
-    await runDeepResearch(query,contentEl,area);
-    await refreshChats();
-    // Auto-continue with summary
-    setChatRunning(targetChatId,false);
-    try{
-      const inp=document.getElementById('msgInput');
-      inp.value='The deep research report above is now complete. Provide a brief executive summary highlighting the 3-5 most important findings, key takeaways, and any actionable recommendations. Be concise.';
-      sendMessage({silent:true,noThinking:true});
-    }catch(_){}
-  }catch(e){
-    contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;
+    clearInterval(elTimer);
+    contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}</div>`;
     setStatus('Research failed.');
-    setChatRunning(targetChatId,false);
   }
-  _inlineResearchState=null;
-}
-
-function toggleResearchPlan(){
-  const wrap=document.getElementById('riAnglesWrap');
-  const btn=document.getElementById('riTogglePlan');
-  if(!wrap||!btn)return;
-  wrap.classList.toggle('expanded');
-  btn.classList.toggle('expanded');
-}
-
-function editResearchPlanInCanvas(){}
-
-async function confirmInlineResearchPlan(){
-  if(!_inlineResearchState)return;
-  const {query,contentEl}=_inlineResearchState;
-  _inlineResearchState=null;
-
-  const targetChatId=curChat;
-  setChatRunning(targetChatId,true,{type:'research'});
-  const area=document.getElementById('chatArea');
-  try{
-    await runDeepResearch(query,contentEl,area);
-    await refreshChats();
-  }catch(e){
-    contentEl.innerHTML=`<div style="color:var(--red)">${esc(e.message||'Research failed.')}</div>`;
-    setStatus('Research failed.');
-  }finally{
-    setChatRunning(targetChatId,false);
-  }
-}
-
-function cancelInlineResearch(){
-  if(_inlineResearchState&&_inlineResearchState.cardEl){
-    _inlineResearchState.cardEl.remove();
-  }
-  // Close canvas plan tab if open
-  const tab=canvasTabs.find(t=>t.sourcePath==='__research_plan__');
-  if(tab){
-    canvasTabs=canvasTabs.filter(t=>t.id!==tab.id);
-    if(activeCanvasTabId===tab.id){
-      if(canvasTabs.length)switchCanvasTab(canvasTabs[canvasTabs.length-1].id);
-      else closeCanvas();
-    }else{renderCanvasTabs();}
-  }
-  _inlineResearchState=null;
-  setStatus('Research cancelled.');
 }
 
 // ─── Messaging ────────────────────────────────────
@@ -3037,8 +2700,6 @@ function renderChoiceWizard(choiceBlocks){
   return `<div class="cq-wizard" data-blocks="${blocksJSON}" data-current="0" data-total="${total}" data-answers="[]">`
     +progressHTML
     +`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
-    +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickWizardCustom(this)}"/>`
-    +`<button class="cq-send" onclick="pickWizardCustom(this.previousElementSibling)" title="Send">→</button></div>`
     +nextBtnHTML
     +`</div></div>`;
 }
@@ -3091,14 +2752,16 @@ function wizardNext(el){
   wizard.dataset.answers=JSON.stringify(answers);
   const next=current+1;
   if(next>=total){
-    // All questions answered — submit
-    card.style.opacity='0';card.style.transform='translateX(-20px)';
-    setTimeout(()=>{
-      const parts=answers.map(a=>a.question?(a.question+' '+a.answer):a.answer);
-      // Disable the wizard
-      wizard.innerHTML=`<div class="cq-done"><span class="cq-done-icon">✓</span> Answered ${total} question${total>1?'s':''}</div>`;
-      sendQ(parts.join('\n'));
-    },200);
+    // All questions answered — highlight chosen options and submit silently
+    wizard.querySelectorAll('.cq-opt.cq-selected').forEach(b=>{
+      b.style.background='var(--green,#22c55e)';b.style.color='#fff';b.style.borderColor='var(--green,#22c55e)';
+    });
+    wizard.querySelectorAll('.cq-opt:not(.cq-selected)').forEach(b=>{b.style.opacity='.35';b.style.pointerEvents='none';});
+    // Hide progress bar
+    const prog=wizard.querySelector('.cq-progress');if(prog)prog.style.display='none';
+    // Send answer silently (no visible user message)
+    const parts=answers.map(a=>a.question?`${a.question}: ${a.answer}`:a.answer);
+    sendMessage({silent:true,message:parts.join('\n')});
     return;
   }
   // Animate to next card
@@ -3120,8 +2783,6 @@ function wizardNext(el){
     const multiHint=nb.multi?'<div class="cq-multi-hint">Select multiple, then press Next</div>':'';
     const nextBtnHTML=nb.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next →</button>`:'';
     card.outerHTML=`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
-      +`<div class="cq-custom"><input class="cq-input" placeholder="Or type your own answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();pickWizardCustom(this)}"/>`
-      +`<button class="cq-send" onclick="pickWizardCustom(this.previousElementSibling)" title="Send">→</button></div>`
       +nextBtnHTML+`</div>`;
     // Update progress
     const fill=wizard.querySelector('.cq-progress-fill');
@@ -3503,7 +3164,7 @@ async function sendMessage(opts){
   if(!_silent)for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
   // ── Research when explicitly activated via tool ──
-  // Deep research silently enhances the prompt — no visible plan/modal
+  // Research agent silently enhances the prompt — no visible plan/modal
   // It's sent as part of activeTools in the normal chat flow
 
   const controller=new AbortController();
@@ -3899,18 +3560,15 @@ async function sendMessage(opts){
               }
             }
 
-            // ── AI-triggered deep research ──
+            // ── AI-triggered research agent ──
             if(data.research_trigger&&!choiceBlocks.length){
               const rq=data.research_trigger;
-              // Use pending plan from modal if available
-              const planText=window._pendingResearchPlan||undefined;
-              window._pendingResearchPlan=null;
-              // Show the AI's text first (don't overwrite it)
+              // Show the AI's text first
               if(canRender()){
                 contentEl.innerHTML=finalHTML;
                 if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
               }
-              // Create a SEPARATE message div for the research card so the AI text stays visible
+              // Create a SEPARATE message div for the research agent
               const chatArea=document.getElementById('chatArea');
               const researchMsgDiv=document.createElement('div');
               researchMsgDiv.className='msg kairo';
@@ -3923,15 +3581,9 @@ async function sendMessage(opts){
               setChatRunning(targetChatId,false);
               setChatRunning(targetChatId,true,{type:'research'});
               try{
-                await runDeepResearch(rq,researchContentEl,chatArea,planText);
+                await runResearchAgent(rq, researchContentEl, chatArea, targetChatId);
                 await refreshChats();
-                // After research completes, silently auto-continue so the AI can add commentary
                 setChatRunning(targetChatId,false);
-                try{
-                  const inp=document.getElementById('msgInput');
-                  inp.value='The deep research report above is now complete. Provide a brief executive summary highlighting the 3-5 most important findings, key takeaways, and any actionable recommendations. Be concise.';
-                  sendMessage({silent:true,noThinking:true});
-                }catch(_){}
               }catch(e){
                 researchContentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Research failed.')}</div>`;
                 setStatus('Research failed.');
@@ -4511,6 +4163,97 @@ function addMsg(role,text,files,extra={}){
         html=`<div class="lbl">gyro</div>`+saHtml;
       }
     }
+    // Render research_agent messages with styled sections on reload
+    if(extra.research_agent){
+      const raIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
+      let steps=[];
+      if(extra.research_agent_steps&&extra.research_agent_steps.length){
+        steps=extra.research_agent_steps;
+      }else{
+        const raw=displayText;
+        const parts=raw.split(/(?:^|\n\n)## /);
+        for(let p=0;p<parts.length;p++){
+          const part=parts[p].trim();
+          if(!part)continue;
+          if(p===0&&!raw.trimStart().startsWith('## '))continue;
+          const nlIdx=part.indexOf('\n');
+          const title=nlIdx>0?part.slice(0,nlIdx).trim():part.trim();
+          const body=nlIdx>0?part.slice(nlIdx+1).trim():'';
+          if(!title)continue;
+          steps.push({title,body});
+        }
+      }
+      if(steps.length){
+        const rQuery=extra.research_agent_query||'Research';
+        const sources=extra.research_agent_sources||[];
+        const findings=extra.research_agent_findings||[];
+        const durations=extra.research_agent_durations||[];
+        const totalWordsH=extra.research_agent_words||0;
+        const followups=extra.research_agent_followups||[];
+        let raHtml=`<div class="ra-container">`;
+        // Badge
+        raHtml+=`<div class="ra-badge ra-badge-done">✅ Research Complete</div>`;
+        // Progress container (done state)
+        raHtml+=`<div class="ra-progress"><div class="ra-header"><span class="ra-title">${esc(rQuery)}</span><span class="ra-pct" style="color:#22c55e">100%</span></div><div class="ra-bar-track"><div class="ra-bar-fill" style="width:100%"></div></div><div class="ra-steps">`;
+        raHtml+=`<div class="ra-steps-line"><div class="ra-steps-line-fill" style="width:100%"></div></div>`;
+        for(let i=0;i<Math.min(steps.length,8);i++){
+          raHtml+=`<div class="ra-step done"><div class="ra-step-dot">✓</div><div class="ra-step-label">${esc(['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert Analysis','Data & Comparative','Synthesis & Insights','Strategic Assessment','Final Brief'][i]||'Step '+(i+1))}</div></div>`;
+        }
+        raHtml+=`</div><div class="ra-stats-row"><span>📚 <strong>${sources.length}</strong> sources</span><span>📝 <strong>${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</strong> words</span></div><div class="ra-activity"><span class="ra-complete-icon">✅</span> Research complete — ${sources.length} sources, ${totalWordsH.toLocaleString()} words analyzed</div></div>`;
+        // Summary card (TL;DR)
+        const lastBody=steps[steps.length-1]?.body||'';
+        const plainLast=(lastBody||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+        let tldr='';
+        const tldrMatch=plainLast.match(/TL;DR[:\s]*([\s\S]*?)(?=Executive Summary|Key Findings|$)/i);
+        if(tldrMatch) tldr=tldrMatch[1].trim().split(/\n\n/)[0].trim();
+        if(!tldr) tldr=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
+        if(tldr) raHtml+=`<div class="ra-summary"><div class="ra-summary-hd">⚡ Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div></div>`;
+        // Dashboard
+        raHtml+=`<div class="ra-dashboard"><div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Intelligence Brief Complete</span></div><div class="ra-dash-stats"><div class="ra-dash-stat"><div class="ra-dash-stat-val">${steps.length}/${steps.length}</div><div class="ra-dash-stat-lbl">Steps</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${sources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</div><div class="ra-dash-stat-lbl">Words</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${findings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">🟢 High</div><div class="ra-dash-stat-lbl">Confidence</div></div></div>`;
+        // Timing chart
+        if(durations.length){
+          const maxDur=Math.max(...durations.map(d=>d.elapsed),1);
+          raHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">⏱️ Step Performance</div><div class="ra-timing-chart">`;
+          durations.forEach(d=>{
+            const pct=Math.round((d.elapsed/maxDur)*100);
+            raHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
+          });
+          raHtml+=`</div></div>`;
+        }
+        raHtml+=`</div>`;
+        // Key findings panel
+        if(findings.length){
+          raHtml+=`<div class="ra-findings-panel"><div class="ra-findings-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')"><span class="ra-findings-icon">💡</span><span class="ra-findings-title">Key Findings</span><span class="ra-findings-count">${findings.length}</span><span class="ra-findings-chevron">▾</span></div><div class="ra-findings-list">`;
+          findings.forEach(f=>{
+            raHtml+=`<div class="ra-finding-item"><span class="ra-finding-step">💡</span><span class="ra-finding-text">${esc(typeof f==='string'?f:(f.text||''))}</span></div>`;
+          });
+          raHtml+=`</div></div>`;
+        }
+        raHtml+=`<div class="ra-output">`;
+        steps.forEach((step,i)=>{
+          let body=step.body||'';
+          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">✓ done</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
+        });
+        raHtml+=`</div>`;
+        // Source cards
+        if(sources.length){
+          raHtml+=`<div class="ra-sources-panel"><div class="ra-sources-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')"><span class="ra-sources-icon">📚</span><span class="ra-sources-title">Sources</span><span class="ra-sources-count">${sources.length}</span><span class="ra-sources-chevron">▾</span></div><div class="ra-sources-list">`;
+          sources.forEach(src=>{
+            try{
+              const domain=new URL(src.url).hostname.replace('www.','');
+              raHtml+=`<a class="ra-src-card" href="${esc(src.url)}" target="_blank" rel="noopener noreferrer"><img class="ra-src-favicon" src="https://www.google.com/s2/favicons?domain=${esc(domain)}&sz=32" alt="" onerror="this.style.display='none'"><div class="ra-src-info"><div class="ra-src-name">${esc(src.title.length>60?src.title.slice(0,60)+'…':src.title)}</div><div class="ra-src-domain">${esc(domain)}</div></div></a>`;
+            }catch(e){}
+          });
+          raHtml+=`</div></div>`;
+        }
+        // Follow-up chips
+        if(followups.length){
+          raHtml+=`<div class="ra-followups"><div class="ra-followups-hd">🔮 Continue Researching</div><div class="ra-followups-list">${followups.map(q=>`<button class="ra-followup-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div></div>`;
+        }
+        raHtml+=`</div>`;
+        html=`<div class="lbl">gyro</div>`+raHtml;
+      }
+    }
     html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
   }
   div.dataset.text=text||'';
@@ -5001,9 +4744,9 @@ function closeImageLightbox(){
       const text=(sel&&sel.toString()||'').trim();
       const tip=getOrCreateTooltip();
       if(!text||text.length<3){tip.classList.remove('visible');return;}
-      // Only show if selection is within a message
+      // Only show if selection is within a bot message (not user's own)
       const anchor=sel.anchorNode?.parentElement?.closest?.('.msg');
-      if(!anchor){tip.classList.remove('visible');return;}
+      if(!anchor||anchor.classList.contains('user')){tip.classList.remove('visible');return;}
       const range=sel.getRangeAt(0);
       const rect=range.getBoundingClientRect();
       tip.style.top=(rect.top+window.scrollY-40)+'px';
