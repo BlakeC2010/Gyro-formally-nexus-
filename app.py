@@ -4048,6 +4048,219 @@ def delete_all_chats():
             deleted += 1
     return jsonify({"ok": True, "deleted": deleted})
 
+# ─── Chat Export / Import ─────────────────────────────────────────────────────
+
+@app.route("/api/chats/export", methods=["GET"])
+@require_auth_or_guest
+def export_chats():
+    """Export all chats as a JSON download."""
+    chat_list = list_chats()
+    full_chats = []
+    for c in chat_list:
+        data, _ = load_chat(c["id"])
+        if data:
+            full_chats.append(data)
+    payload = {
+        "format": "gyro",
+        "version": 1,
+        "exported": datetime.datetime.now().isoformat(),
+        "chat_count": len(full_chats),
+        "chats": full_chats,
+    }
+    return app.response_class(
+        json.dumps(payload, ensure_ascii=False, default=str),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=gyro-chats-export.json"},
+    )
+
+
+def _convert_chatgpt_export(data):
+    """Convert a ChatGPT conversations.json export to Gyro format."""
+    chats = []
+    items = data if isinstance(data, list) else [data]
+    for conv in items:
+        if not isinstance(conv, dict):
+            continue
+        messages = []
+        mapping = conv.get("mapping") or {}
+        for node in mapping.values():
+            msg = node.get("message")
+            if not msg or not isinstance(msg, dict):
+                continue
+            author = (msg.get("author") or {}).get("role", "")
+            content = msg.get("content") or {}
+            parts = content.get("parts") or []
+            text = ""
+            for p in parts:
+                if isinstance(p, str):
+                    text += p
+                elif isinstance(p, dict) and p.get("text"):
+                    text += p["text"]
+            if not text.strip():
+                continue
+            role = "user" if author == "user" else "kairo"
+            messages.append({"role": role, "content": text.strip()})
+        if not messages:
+            continue
+        created = ""
+        ts = conv.get("create_time")
+        if ts:
+            try:
+                created = datetime.datetime.fromtimestamp(ts).isoformat()
+            except Exception:
+                pass
+        chats.append({
+            "id": str(uuid.uuid4())[:12],
+            "title": conv.get("title") or "Imported Chat",
+            "created": created or datetime.datetime.now().isoformat(),
+            "updated": datetime.datetime.now().isoformat(),
+            "model": conv.get("default_model_slug") or "",
+            "messages": messages,
+            "folder": "Imported",
+        })
+    return chats
+
+
+def _convert_claude_export(data):
+    """Convert a Claude export to Gyro format."""
+    chats = []
+    items = data if isinstance(data, list) else [data]
+    for conv in items:
+        if not isinstance(conv, dict):
+            continue
+        messages = []
+        for msg in conv.get("chat_messages") or conv.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            sender = msg.get("sender") or msg.get("role") or ""
+            text = ""
+            content = msg.get("content") or msg.get("text") or ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("text"):
+                        text += part["text"]
+                    elif isinstance(part, str):
+                        text += part
+            if not text.strip():
+                continue
+            role = "user" if sender in ("human", "user") else "kairo"
+            messages.append({"role": role, "content": text.strip()})
+        if not messages:
+            continue
+        chats.append({
+            "id": str(uuid.uuid4())[:12],
+            "title": conv.get("name") or conv.get("title") or "Imported Chat",
+            "created": conv.get("created_at") or datetime.datetime.now().isoformat(),
+            "updated": datetime.datetime.now().isoformat(),
+            "model": conv.get("model") or "",
+            "messages": messages,
+            "folder": "Imported",
+        })
+    return chats
+
+
+def _convert_generic_export(data):
+    """Best-effort conversion for other AI export formats (Gemini, etc.)."""
+    chats = []
+    items = data if isinstance(data, list) else [data]
+    for conv in items:
+        if not isinstance(conv, dict):
+            continue
+        messages = []
+        for msg in conv.get("messages") or conv.get("history") or []:
+            if not isinstance(msg, dict):
+                continue
+            role_raw = msg.get("role") or msg.get("author") or msg.get("sender") or ""
+            text = ""
+            content = msg.get("content") or msg.get("text") or msg.get("parts") or ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, str):
+                        text += part
+                    elif isinstance(part, dict):
+                        text += part.get("text") or ""
+            if not text.strip():
+                continue
+            role = "user" if role_raw.lower() in ("user", "human") else "kairo"
+            messages.append({"role": role, "content": text.strip()})
+        if not messages:
+            continue
+        chats.append({
+            "id": str(uuid.uuid4())[:12],
+            "title": conv.get("title") or conv.get("name") or "Imported Chat",
+            "created": conv.get("created") or conv.get("create_time") or datetime.datetime.now().isoformat(),
+            "updated": datetime.datetime.now().isoformat(),
+            "model": conv.get("model") or "",
+            "messages": messages,
+            "folder": "Imported",
+        })
+    return chats
+
+
+def _detect_and_convert(data):
+    """Auto-detect the export format and convert to Gyro chats."""
+    # Already Gyro format
+    if isinstance(data, dict) and data.get("format") == "gyro":
+        return data.get("chats") or []
+
+    # ChatGPT: has 'mapping' key with message nodes
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "mapping" in data[0]:
+        return _convert_chatgpt_export(data)
+    if isinstance(data, dict) and "mapping" in data:
+        return _convert_chatgpt_export(data)
+
+    # Claude: has 'chat_messages' key
+    if isinstance(data, list) and data and isinstance(data[0], dict) and ("chat_messages" in data[0] or "sender" in (data[0].get("messages") or [{}])[0] if data[0].get("messages") else False):
+        return _convert_claude_export(data)
+    if isinstance(data, dict) and "chat_messages" in data:
+        return _convert_claude_export(data)
+
+    # Generic fallback
+    return _convert_generic_export(data)
+
+
+MAX_IMPORT_SIZE = 50 * 1024 * 1024  # 50 MB
+
+@app.route("/api/chats/import", methods=["POST"])
+@require_auth_or_guest
+def import_chats():
+    """Import chats from a JSON file (supports Gyro, ChatGPT, Claude formats)."""
+    if request.content_length and request.content_length > MAX_IMPORT_SIZE:
+        return jsonify({"error": "File too large (max 50 MB)"}), 413
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON file"}), 400
+    if not data:
+        return jsonify({"error": "Empty file"}), 400
+
+    try:
+        chats_to_import = _detect_and_convert(data)
+    except Exception as e:
+        return jsonify({"error": f"Could not parse export: {str(e)[:200]}"}), 400
+
+    if not chats_to_import:
+        return jsonify({"error": "No chats found in the file"}), 400
+
+    imported = 0
+    for chat in chats_to_import:
+        if not isinstance(chat, dict) or not chat.get("messages"):
+            continue
+        chat["id"] = str(uuid.uuid4())[:12]
+        chat.setdefault("title", "Imported Chat")
+        chat.setdefault("created", datetime.datetime.now().isoformat())
+        chat["updated"] = datetime.datetime.now().isoformat()
+        chat.setdefault("model", "")
+        chat.setdefault("folder", "Imported")
+        save_chat(chat)
+        imported += 1
+
+    return jsonify({"ok": True, "imported": imported})
+
 @app.route("/api/cross-references")
 @require_auth
 def cross_references_route():
@@ -5900,12 +6113,14 @@ def research_agent():
     def generate():
         import time as _time
         import itertools
+        import threading
         all_research = []
         all_sources = []
         all_findings = []
         step_durations = []
         seen_urls = set()
         total_word_count = 0
+        STEP_TIMEOUT = 300  # 5 minute timeout per step
 
         yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
                     "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
@@ -5952,7 +6167,7 @@ def research_agent():
                     if use_url_ctx:
                         tools_list.append(types.Tool(url_context=types.UrlContext()))
 
-                    client = genai.Client(api_key=api_key)
+                    client = genai.Client(api_key=api_key, http_options={"timeout": 300})
                     contents = _google_contents_from_messages(messages, types)
 
                     # Try with thinking first, fall back without on 400 errors
@@ -5984,7 +6199,9 @@ def research_agent():
                             raise
 
                     import itertools  # noqa: already imported above
+                    _last_chunk_time = _time.time()
                     for chunk in itertools.chain([_first] if _first else [], _ra_stream):
+                        _last_chunk_time = _time.time()
                         try:
                             for candidate in (chunk.candidates or []):
                                 for part in (candidate.content.parts or []):
@@ -6051,6 +6268,79 @@ def research_agent():
                             "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
                             "word_count": step_word_count, "source_count": len(new_sources)})
             except Exception as e:
+                # Retry the step once on failure before giving up
+                if not step.get("_retried"):
+                    step["_retried"] = True
+                    print(f"  [research] Step {i+1} failed ({str(e)[:80]}), retrying once...")
+                    yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                                "icon": step.get("icon", "📄"), "status": "running"})
+                    _time.sleep(2)  # Brief pause before retry
+                    try:
+                        step_pieces_retry = []
+                        if provider == "google" and (use_web or use_url_ctx):
+                            genai, types = _import_google()
+                            tools_list = []
+                            if use_web:
+                                tools_list.append(types.Tool(google_search=types.GoogleSearch()))
+                            if use_url_ctx:
+                                tools_list.append(types.Tool(url_context=types.UrlContext()))
+                            client_retry = genai.Client(api_key=api_key, http_options={"timeout": 300})
+                            contents_retry = _google_contents_from_messages(messages, types)
+                            cfg_retry = types.GenerateContentConfig(
+                                system_instruction=step["system"],
+                                tools=tools_list,
+                                max_output_tokens=65536,
+                            )
+                            stream_retry = client_retry.models.generate_content_stream(
+                                model=model, contents=contents_retry, config=cfg_retry,
+                            )
+                            for chunk in stream_retry:
+                                try:
+                                    for candidate in (chunk.candidates or []):
+                                        for part in (candidate.content.parts or []):
+                                            if getattr(part, "thought", None):
+                                                continue
+                                            if part.text:
+                                                step_pieces_retry.append(part.text)
+                                                yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                                except (AttributeError, TypeError):
+                                    t2 = getattr(chunk, "text", "") or ""
+                                    if t2:
+                                        step_pieces_retry.append(t2)
+                                        yield evt({"type": "agent_delta", "step": i + 1, "text": t2})
+                        else:
+                            stream_fn = STREAM_PROVIDERS.get(provider)
+                            if stream_fn:
+                                for chunk in stream_fn(api_key, model, step["system"], messages, base_url=base_url, web_search=use_web):
+                                    if isinstance(chunk, dict):
+                                        continue
+                                    step_pieces_retry.append(chunk)
+                                    yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
+                        retry_result = "".join(step_pieces_retry)
+                        if retry_result.strip():
+                            display_retry = re.sub(r'<<<SOURCES>>>.*?<<<END_SOURCES>>>', '', retry_result, flags=re.DOTALL).strip()
+                            all_research.append(f"## {step['title']}\n{display_retry}")
+                            new_sources = _extract_sources(retry_result)
+                            for src in new_sources:
+                                if src["url"] not in seen_urls:
+                                    seen_urls.add(src["url"])
+                                    all_sources.append(src)
+                            if new_sources:
+                                yield evt({"type": "agent_sources", "step": i + 1, "sources": new_sources, "total_sources": len(all_sources)})
+                            findings = _extract_key_findings(retry_result)
+                            if findings:
+                                all_findings.extend(findings)
+                                yield evt({"type": "agent_findings", "step": i + 1, "findings": findings, "total_findings": len(all_findings)})
+                            step_word_count = len(retry_result.split())
+                            total_word_count += step_word_count
+                            elapsed = round(_time.time() - step_start, 1)
+                            step_durations.append({"step": i + 1, "title": step["title"], "elapsed": elapsed})
+                            yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                                        "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
+                                        "word_count": step_word_count, "source_count": len(new_sources)})
+                            continue  # Skip the failure path below
+                    except Exception as e2:
+                        print(f"  [research] Step {i+1} retry also failed: {str(e2)[:80]}")
                 elapsed = round(_time.time() - step_start, 1)
                 all_research.append(f"## {step['title']}\n*Research step failed: {str(e)[:100]}*")
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],

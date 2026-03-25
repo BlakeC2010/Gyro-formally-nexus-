@@ -366,7 +366,8 @@ body.light .sidebar{background:var(--bg-raised)}
   min-height:var(--topbar-h);
 }
 .sb-brand{display:flex;align-items:center;gap:14px}
-.sb-logo{width:54px;height:54px;border-radius:12px;flex-shrink:0;object-fit:contain}
+.sb-logo{width:54px;height:54px;border-radius:12px;flex-shrink:0;object-fit:contain;filter:drop-shadow(0 2px 12px rgba(191,107,58,.35));transition:filter .3s var(--ease)}
+.sb-logo:hover{filter:drop-shadow(0 4px 18px rgba(191,107,58,.55)) brightness(1.1)}
 .sb-title{font-size:24px;font-weight:800;letter-spacing:-.02em;color:var(--text-primary)}
 .sb-x{color:var(--text-muted);font-size:15px;padding:4px;border-radius:var(--r-xs);transition:all .15s}
 .sb-x:hover{color:var(--text-primary);background:var(--bg-hover)}
@@ -1400,7 +1401,7 @@ input[type="file"]{display:none}
 }
 .plus-btn:hover{color:var(--text-primary);border-color:var(--border-hover);background:var(--bg-hover)}
 .plus-btn.open{color:var(--accent);border-color:var(--accent-border);background:var(--accent-dim)}
-.plus-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:220px;max-height:min(420px,calc(100vh - 120px));overflow-y:auto;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 12px 40px rgba(0,0,0,.4);padding:6px 0;display:none;z-index:80;transform-origin:bottom left}
+.plus-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:220px;max-height:min(420px,calc(100vh - 120px));overflow-y:auto;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 12px 40px rgba(0,0,0,.4);padding:6px 0;display:none;z-index:210;transform-origin:bottom left}
 .plus-popup.open{display:block;animation:plusIn .25s var(--ease-spring-snappy)}
 @keyframes plusIn{from{opacity:0;transform:translateY(8px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
 .plus-item{display:flex;align-items:center;gap:10px;padding:9px 14px;font-size:12px;color:var(--text-secondary);cursor:pointer;transition:all .15s var(--ease);border-left:2px solid transparent}
@@ -2111,6 +2112,7 @@ input[type="file"]{display:none}
     border-radius:20px 20px 0 0;
     box-shadow:0 -8px 40px rgba(0,0,0,.5);
     padding-bottom:env(safe-area-inset-bottom,16px);
+    z-index:210;
   }
 
   /* Login page — small mobile */

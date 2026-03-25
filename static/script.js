@@ -4405,6 +4405,9 @@ function addMsg(role,text,files,extra={}){
     cBlocks.push({question:(cbm2[1]||'').trim(),choices:cbm2[2].trim().split('\n').filter(c=>c.trim()),multi:isMulti});
   }
   displayText=displayText.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
+  // Detect research/stock agent messages early — skip fmt() for these since the card replaces everything
+  const _isResearchMsg=!!(extra.research_agent||(role==='kairo'&&/^## (?:Intelligence Gathering|📋 Intelligence Brief)/m.test(displayText)));
+  const _isStockMsg=!!extra.stock_agent;
   // Long user text → collapsible file block
   if(role==='user'&&displayText.length>600){
     const lines=displayText.split('\n');
@@ -4415,7 +4418,7 @@ function addMsg(role,text,files,extra={}){
       +`<div class="upf-full"><pre>${esc(displayText)}</pre></div></div>`;
   } else if(devRawMode&&role==='kairo'){
     html+='<pre class="dev-raw-log">'+esc(extra.raw_text||text||'')+'</pre>';
-  } else {
+  } else if(!_isResearchMsg&&!_isStockMsg){
     html+=fmt(displayText);
   }
   if(!devRawMode&&cBlocks.length&&role==='kairo'){
@@ -4557,10 +4560,12 @@ function addMsg(role,text,files,extra={}){
         });
         saHtml+='</div><div class="stock-disclaimer sa-disclaimer">⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
         html=`<div class="lbl">gyro</div>`+saHtml;
+      } else if(_isStockMsg) {
+        html+=fmt(displayText);
       }
     }
     // Render research_agent messages with styled sections on reload
-    if(extra.research_agent){
+    if(_isResearchMsg){
       const raIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
       let steps=[];
       if(extra.research_agent_steps&&extra.research_agent_steps.length){
@@ -4648,6 +4653,9 @@ function addMsg(role,text,files,extra={}){
         }
         raHtml+=`</div>`;
         html=`<div class="lbl">gyro</div>`+raHtml;
+      } else {
+        // research_agent flag set but no steps parsed — fallback to formatted text
+        html+=fmt(displayText);
       }
     }
     // Suggested follow-up questions (from history)
@@ -5324,6 +5332,42 @@ async function deleteAllChats(){
   await refreshChats();
   loadWelcome(true);
   showToast(`All ${count} chats deleted.`,'success');
+}
+
+// ─── Export / Import Chats ────────────────────────
+async function exportChats(){
+  if(!allChats.length){showToast('No chats to export.','info');return;}
+  showToast('Preparing export…','info');
+  try{
+    const r=await apiFetch('/api/chats/export');
+    if(!r.ok){showToast('Export failed.','error');return;}
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download='gyro-chats-export.json';
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${allChats.length} chats.`,'success');
+  }catch(e){showToast('Export failed: '+e.message,'error');}
+}
+
+async function importChats(input){
+  const file=input.files&&input.files[0];
+  if(!file){return;}
+  input.value='';
+  if(!file.name.endsWith('.json')){showToast('Please select a JSON file.','error');return;}
+  if(file.size>50*1024*1024){showToast('File too large (max 50 MB).','error');return;}
+  showToast('Importing chats…','info');
+  try{
+    const text=await file.text();
+    const data=JSON.parse(text);
+    const r=await fetch('/api/chats/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const res=await r.json();
+    if(res.error){showToast(res.error,'error');return;}
+    await refreshChats();
+    showToast(`Imported ${res.imported} chat${res.imported===1?'':'s'}.`,'success');
+  }catch(e){showToast('Import failed: '+e.message,'error');}
 }
 
 // ─── Files ────────────────────────────────────────

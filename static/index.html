@@ -349,6 +349,15 @@
       </label>
     </div>
     <hr>
+
+    <p class="st">Export &amp; Import Chats</p>
+    <p class="hint">Export your chats as JSON, or import chats from Gyro, ChatGPT, Claude, or other AI services.</p>
+    <div class="kr" style="gap:8px">
+      <button onclick="exportChats()" style="display:flex;align-items:center;gap:6px">📤 Export Chats</button>
+      <button onclick="document.getElementById('importFileInput').click()" style="display:flex;align-items:center;gap:6px">📥 Import Chats</button>
+      <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importChats(this)">
+    </div>
+    <hr>
     <p class="st">Delete All Chats</p>
     <p class="hint">Permanently delete every chat. Your memory, settings, and account will not be affected.</p>
     <div class="kr"><button onclick="deleteAllChats()" style="background:var(--error);color:#fff">Delete All Chats</button></div>
