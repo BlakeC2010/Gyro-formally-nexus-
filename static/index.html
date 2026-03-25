@@ -203,7 +203,18 @@
               <div class="plus-item" onclick="document.getElementById('fileInput').click();closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></span><span class="pi-label">Upload file</span></div>
               <div class="plus-divider"></div>
               <div class="plus-header">Modes</div>
-              <div class="plus-item plus-toggle" id="thinkMenuItem" style="flex-wrap:wrap"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></span><span class="pi-label">Thinking</span><span class="pi-badge" id="thinkMenuBadge">OFF</span><div class="think-levels" id="thinkLevels"><button class="think-lvl active" data-lvl="off" onclick="setThinkingLevel('off')">Off</button><button class="think-lvl" data-lvl="minimal" onclick="setThinkingLevel('minimal')">Minimal</button><button class="think-lvl" data-lvl="low" onclick="setThinkingLevel('low')">Low</button><button class="think-lvl" data-lvl="medium" onclick="setThinkingLevel('medium')">Medium</button><button class="think-lvl" data-lvl="high" onclick="setThinkingLevel('high')">High</button></div></div>
+              <div class="plus-item plus-toggle" id="thinkMenuItem" style="flex-wrap:wrap"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></span><span class="pi-label">Thinking</span><span class="pi-badge" id="thinkMenuBadge">OFF</span>
+                <div class="think-picker" id="thinkLevels">
+                  <div class="think-track">
+                    <div class="think-slider" id="thinkSlider"></div>
+                    <button class="think-opt" data-lvl="off" onclick="setThinkingLevel('off')"><span class="think-opt-icon">○</span><span class="think-opt-label">Off</span></button>
+                    <button class="think-opt" data-lvl="low" onclick="setThinkingLevel('low')"><span class="think-opt-icon">◐</span><span class="think-opt-label">Low</span></button>
+                    <button class="think-opt" data-lvl="medium" onclick="setThinkingLevel('medium')"><span class="think-opt-icon">◕</span><span class="think-opt-label">Med</span></button>
+                    <button class="think-opt" data-lvl="high" onclick="setThinkingLevel('high')"><span class="think-opt-icon">●</span><span class="think-opt-label">Max</span></button>
+                  </div>
+                  <div class="think-desc" id="thinkDesc">Auto-detects when deeper reasoning is needed</div>
+                </div>
+              </div>
               <div class="plus-divider"></div>
               <div class="plus-header">Tools</div>
               <div class="plus-item" onclick="activateTool('canvas');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span class="pi-label">Canvas</span></div>

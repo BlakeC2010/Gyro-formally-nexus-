@@ -870,6 +870,22 @@ Capabilities:
    - When STATUS.md lists friction items, check if they've been resolved; if not, suggest the smallest concrete next step.
    - Never nag. Frame nudges as "I noticed..." not "You should...". One nudge per conversation max unless asked.
    - The homepage already surfaces friction widgets — reinforce them conversationally when relevant.
+
+IMAGE ANALYSIS (CRITICAL — when images are attached/uploaded):
+When the user uploads or attaches images, you can SEE them natively. Analyze images thoroughly:
+- DESCRIBE what you see in detail — objects, text, colors, layout, people, expressions, settings
+- READ all text in images meticulously — OCR every word, number, label, caption. Be extremely accurate with spelling and numbers.
+- For HOMEWORK/WORKSHEETS: Read every single question, every answer option, every instruction. Don't skip or summarize — transcribe exactly what's written. Then solve each problem step by step.
+- For SCREENSHOTS: Identify the app/website, read all visible UI text, describe the state of the interface
+- For CHARTS/GRAPHS: Read all axes, labels, values, legends, and trends. Extract the actual data points when possible.
+- For DOCUMENTS: Transcribe the full visible text, maintain formatting structure
+- For CODE: Read every line exactly as written, note syntax, identify the language
+- For PHOTOS: Describe composition, subjects, setting, lighting, notable details
+- When you need to examine small details, do PRECISE analysis — look carefully at every pixel region of interest
+- If an image contains a problem to solve (math, science, grammar, etc.) — SOLVE IT completely. Don't just describe the image.
+- If an image is blurry or has small text that's hard to read, use your best interpretation and note any uncertainty
+- When working with MULTIPLE images, analyze each one separately and then synthesize if needed
+- For complex diagrams, maps, or dense images, use CODE EXECUTION with Pillow to programmatically crop, enhance, or annotate the image if it would help your analysis
 9. CODE EXECUTION — you can run Python code and show the output. When computation, data processing, math, generating files (PDFs, CSVs, images, etc.), simulations, plotting, or ANY task that benefits from running actual code is involved, write executable Python inside:
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
@@ -1251,6 +1267,32 @@ def fallback_chat_title(user_text, assistant_text=""):
     return title[:48].strip(" -:,.?") or "New Chat"
 
 
+def _clean_raw_title(raw_title, user_text="", assistant_text=""):
+    """Clean AI-generated title text."""
+    title = re.sub(r"\s+", " ", (raw_title or "").strip())
+    title = title.strip('"\'` ')
+    title = re.sub(r"[\r\n]+", " ", title)
+    title = re.sub(r"[.!?]+$", "", title)
+    if not title:
+        return fallback_chat_title(user_text, assistant_text)
+    return title[:48]
+
+def generate_chat_title_fast(user_text):
+    """Generate a title quickly using only the user's message with the lite model."""
+    prompt = (
+        "Create a short, friendly chat title for this message. "
+        "Return only the title, no quotes, no punctuation at the end, 2 to 6 words max.\n\n"
+        f"User: {user_text[:400]}"
+    )
+    title_messages = [{"role": "user", "text": prompt}]
+    title_system = "You write concise conversation titles. Keep them specific, natural, and easy to scan."
+    g_key = load_settings().get("keys", {}).get("google", "")
+    if g_key:
+        raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+    else:
+        raise ValueError("No Google API key")
+    return _clean_raw_title(raw_title, user_text)
+
 def generate_chat_title(api_key, provider, model_name, base_url, user_text, assistant_text):
     prompt = (
         "Create a short, friendly chat title for this conversation. "
@@ -1264,7 +1306,6 @@ def generate_chat_title(api_key, provider, model_name, base_url, user_text, assi
         "Keep them specific, natural, and easy to scan."
     )
     try:
-        # Always use gemini-2.5-flash-lite for titles if a Google key is available
         g_key = load_settings().get("keys", {}).get("google", "")
         if g_key:
             raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
@@ -1272,13 +1313,7 @@ def generate_chat_title(api_key, provider, model_name, base_url, user_text, assi
             raw_title = PROVIDERS.get(provider, call_openai)(
                 api_key, model_name, title_system, title_messages, base_url=base_url
             )
-        title = re.sub(r"\s+", " ", (raw_title or "").strip())
-        title = title.strip('"\'` ')
-        title = re.sub(r"[\r\n]+", " ", title)
-        title = re.sub(r"[.!?]+$", "", title)
-        if not title:
-            return fallback_chat_title(user_text, assistant_text)
-        return title[:48]
+        return _clean_raw_title(raw_title, user_text, assistant_text)
     except Exception:
         return fallback_chat_title(user_text, assistant_text)
 
@@ -2759,15 +2794,18 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
             clean_with_placeholders = clean_response(pre_code_raw, keep_img_placeholders=True).strip()
 
     if not chat["messages"] and ctx["user_text"]:
-        resolved = ctx["resolved"]
-        chat["title"] = generate_chat_title(
-            resolved["api_key"],
-            resolved["provider"],
-            resolved["actual_model"],
-            resolved["base_url"],
-            ctx["user_text"],
-            clean,
-        )
+        # Only generate title if the frontend hasn't already set one via /generate-title
+        current_title = (chat.get("title") or "").strip().lower()
+        if current_title in ("", "new chat"):
+            resolved = ctx["resolved"]
+            chat["title"] = generate_chat_title(
+                resolved["api_key"],
+                resolved["provider"],
+                resolved["actual_model"],
+                resolved["base_url"],
+                ctx["user_text"],
+                clean,
+            )
 
     chat["messages"].append(ctx["user_msg"])
     msg_obj = {
@@ -3374,7 +3412,9 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
     if _level:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=16000, include_thoughts=True)
+        _budgets = {"low": 4096, "medium": 10000, "high": 16000}
+        _budget = _budgets.get(_level, 8000)
+        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=_budget, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
         print(f"  [thinking] Google non-stream: thinking enabled, level={_level}")
     else:
@@ -3407,9 +3447,11 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
     use_thinking = bool(_level)
     if use_thinking:
-        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=16000, include_thoughts=True)
+        _budgets = {"low": 4096, "medium": 10000, "high": 16000}
+        _budget = _budgets.get(_level, 8000)
+        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=_budget, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
-        print(f"  [thinking] Google stream: thinking enabled, level={_level}")
+        print(f"  [thinking] Google stream: thinking enabled, level={_level}, budget={_budget}")
     else:
         cfg["max_output_tokens"] = 65536
     if web_search:
@@ -4013,6 +4055,28 @@ def new_chat():
     c = create_new_chat(model=requested_model, folder=d.get("folder", ""))
     save_chat(c)
     return jsonify(c)
+
+@app.route("/api/chats/<chat_id>/generate-title", methods=["POST"])
+@require_auth_or_guest
+def generate_title_endpoint(chat_id):
+    """Quick-generate a chat title from the user's first message using the lite model."""
+    d = request.get_json() or {}
+    user_text = (d.get("text") or "").strip()
+    if not user_text:
+        return jsonify({"title": "New Chat"})
+    chat, _ = load_chat(chat_id)
+    if not chat:
+        return jsonify({"title": "New Chat"})
+    try:
+        title = generate_chat_title_fast(user_text)
+        chat["title"] = title
+        save_chat(chat)
+        return jsonify({"title": title})
+    except Exception:
+        title = fallback_chat_title(user_text, "")
+        chat["title"] = title
+        save_chat(chat)
+        return jsonify({"title": title})
 
 @app.route("/api/chats/<chat_id>")
 @require_auth_or_guest

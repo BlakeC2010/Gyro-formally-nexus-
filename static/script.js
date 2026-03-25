@@ -1881,14 +1881,25 @@ function refreshModeMenuUI(){
   const isOn=thinkingLevel&&thinkingLevel!=='off';
   if(thinkItem)thinkItem.classList.toggle('active',isOn);
   if(thinkBadge)thinkBadge.textContent=isOn?thinkingLevel.toUpperCase():'OFF';
-  document.querySelectorAll('.think-lvl').forEach(b=>b.classList.toggle('active',b.dataset.lvl===thinkingLevel));
+  // Update segmented control
+  const opts=document.querySelectorAll('.think-opt');
+  const track=document.querySelector('.think-track');
+  const slider=document.getElementById('thinkSlider');
+  const desc=document.getElementById('thinkDesc');
+  const descs={off:'Auto-detects when deeper reasoning is needed',low:'Light reasoning for simple analysis',medium:'Balanced depth for most tasks',high:'Maximum reasoning power for complex problems'};
+  const lvl=thinkingLevel||'off';
+  let idx=0;
+  opts.forEach((b,i)=>{const a=b.dataset.lvl===lvl;b.classList.toggle('active',a);if(a)idx=i;});
+  if(track)track.dataset.active=lvl;
+  if(slider)slider.style.left=`calc(${idx*25}% + 3px)`;
+  if(desc)desc.textContent=descs[lvl]||'';
 }
 
 function setThinkingLevel(lvl){
   thinkingLevel=lvl;
   refreshModeMenuUI();
-  showToast(`Thinking: ${lvl==='off'?'off':lvl}`,lvl==='off'?'info':'success');
-  closePlusMenu();
+  const labels={off:'Thinking off',low:'Low reasoning',medium:'Medium reasoning',high:'Max reasoning'};
+  showToast(labels[lvl]||`Thinking: ${lvl}`, lvl==='off'?'info':'success');
 }
 
 document.addEventListener('click',e=>{
@@ -3511,6 +3522,7 @@ async function sendMessage(opts){
   if(!_silent&&!text.startsWith('Continue')){_continueCount=0;_codeRepromptCount=0;}
   if(curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
+  let _isFirstMessage=false;
   if(!curChat){
     try{
       const cr=await apiFetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:_activeFolderView||pendingFolder||''})});
@@ -3518,8 +3530,24 @@ async function sendMessage(opts){
       if(cc.error){showToast('Could not create chat: '+cc.error,'error');return;}
       curChat=cc.id;
       pendingFolder='';
-      document.getElementById('topTitle').textContent=cc.title||'New Chat';
-      refreshChats();
+      _isFirstMessage=true;
+      // Immediately set a temp title from user text so it shows in sidebar
+      const _tempTitle=text.slice(0,40)+(text.length>40?'…':'');
+      document.getElementById('topTitle').textContent=_tempTitle;
+      // Add to sidebar immediately (before backend filters it)
+      allChats.unshift({id:cc.id,title:_tempTitle,updated:new Date().toISOString(),messages:['pending'],folder:cc.folder||''});
+      saveCachedChats(allChats);
+      renderChatList();
+      // Fire-and-forget: generate proper title with lite model
+      apiFetch(`/api/chats/${cc.id}/generate-title`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text.slice(0,400)})}).then(r=>r.json()).then(d=>{
+        if(d.title&&d.title!=='New Chat'){
+          document.getElementById('topTitle').textContent=d.title;
+          const c=allChats.find(c=>c.id===cc.id);
+          if(c)c.title=d.title;
+          saveCachedChats(allChats);
+          renderChatList();
+        }
+      }).catch(()=>{});
     }catch(e){showToast('Failed to create chat: '+e.message,'error');return;}
   }
   const targetChatId=curChat;
