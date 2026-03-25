@@ -2053,11 +2053,115 @@ function toggleResearch(){
   activateTool('research');
 }
 
+async function showResearchPlan(query, contentEl, area, chatId){
+  contentEl.innerHTML=`<div class="ra-plan-loading"><div class="dots"><span></span><span></span><span></span></div><span>Generating research plan...</span></div>`;
+  try{
+    const res=await apiFetch('/api/research-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
+    const plan=await res.json();
+    if(plan.error) throw new Error(plan.error);
+
+    const questions=plan.questions||[];
+    const steps=plan.plan||[];
+    const refined=plan.refined_query||query;
+
+    let html=`<div class="ra-plan-container">`;
+    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><span class="ra-plan-title">Research Plan</span></div>`;
+    html+=`<div class="ra-plan-query-wrap"><label class="ra-plan-label">Research Query</label><textarea class="ra-plan-query" id="_raPlanQuery" rows="2">${esc(refined)}</textarea></div>`;
+
+    if(questions.length){
+      html+=`<div class="ra-plan-questions"><div class="ra-plan-label">⚠️ Clarifying Questions</div><div class="ra-plan-q-hint">Answer these to improve research quality (optional)</div>`;
+      questions.forEach((q,i)=>{
+        html+=`<div class="ra-plan-q-row"><div class="ra-plan-q-text">${esc(q)}</div><input class="ra-plan-q-input" id="_raPlanQ${i}" placeholder="Your answer (optional)..." /></div>`;
+      });
+      html+=`</div>`;
+    }
+
+    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">📋 Research Steps <span class="ra-plan-hint">(drag to reorder, click × to remove, edit titles)</span></div><div class="ra-plan-steps" id="_raPlanSteps">`;
+    steps.forEach((s,i)=>{
+      html+=`<div class="ra-plan-step" draggable="true" data-idx="${i}"><span class="ra-plan-step-drag">⋮⋮</span><span class="ra-plan-step-num">${i+1}</span><input class="ra-plan-step-title" value="${esc(s.title)}" /><span class="ra-plan-step-desc">${esc(s.description||'')}</span><button class="ra-plan-step-rm" onclick="this.parentElement.remove();_raPlanRenum()" title="Remove step">×</button></div>`;
+    });
+    html+=`</div><button class="ra-plan-add-step" onclick="_raPlanAddStep()">+ Add Step</button></div>`;
+
+    html+=`<div class="ra-plan-actions"><button class="ra-plan-btn ra-plan-btn-primary" id="_raPlanStart">🚀 Start Research</button><button class="ra-plan-btn ra-plan-btn-skip" id="_raPlanSkip">⚡ Quick Start (skip planning)</button></div>`;
+    html+=`</div>`;
+    contentEl.innerHTML=html;
+
+    // Drag-to-reorder
+    const stepsEl=document.getElementById('_raPlanSteps');
+    if(stepsEl){
+      let dragEl=null;
+      stepsEl.addEventListener('dragstart',e=>{dragEl=e.target.closest('.ra-plan-step');if(dragEl)dragEl.classList.add('ra-plan-dragging')});
+      stepsEl.addEventListener('dragend',()=>{if(dragEl)dragEl.classList.remove('ra-plan-dragging');dragEl=null;_raPlanRenum()});
+      stepsEl.addEventListener('dragover',e=>{
+        e.preventDefault();
+        const after=_getDragAfterElement(stepsEl,e.clientY);
+        if(dragEl){if(after){stepsEl.insertBefore(dragEl,after)}else{stepsEl.appendChild(dragEl)}}
+      });
+    }
+
+    window._raPlanRenum=()=>{
+      const items=document.querySelectorAll('#_raPlanSteps .ra-plan-step');
+      items.forEach((el,i)=>{const n=el.querySelector('.ra-plan-step-num');if(n)n.textContent=i+1});
+    };
+    window._raPlanAddStep=()=>{
+      const container=document.getElementById('_raPlanSteps');
+      if(!container)return;
+      const idx=container.children.length;
+      const div=document.createElement('div');
+      div.className='ra-plan-step';div.draggable=true;div.dataset.idx=idx;
+      div.innerHTML=`<span class="ra-plan-step-drag">⋮⋮</span><span class="ra-plan-step-num">${idx+1}</span><input class="ra-plan-step-title" value="New Step" /><span class="ra-plan-step-desc">Custom research step</span><button class="ra-plan-step-rm" onclick="this.parentElement.remove();_raPlanRenum()" title="Remove step">×</button>`;
+      container.appendChild(div);_raPlanRenum();
+    };
+
+    function _getDragAfterElement(container,y){
+      const els=[...container.querySelectorAll('.ra-plan-step:not(.ra-plan-dragging)')];
+      return els.reduce((closest,child)=>{
+        const box=child.getBoundingClientRect();
+        const offset=y-box.top-box.height/2;
+        if(offset<0&&offset>closest.offset) return{offset,element:child};
+        return closest;
+      },{offset:Number.NEGATIVE_INFINITY}).element;
+    }
+
+    // Button handlers
+    document.getElementById('_raPlanStart').addEventListener('click',async()=>{
+      const finalQuery=document.getElementById('_raPlanQuery').value.trim()||query;
+      // Append answers to query context
+      let context=finalQuery;
+      questions.forEach((q,i)=>{
+        const inp=document.getElementById('_raPlanQ'+i);
+        if(inp&&inp.value.trim()) context+=`\n\nContext: ${q} — ${inp.value.trim()}`;
+      });
+      contentEl.innerHTML='';
+      await runResearchAgent(context, contentEl, area, chatId);
+    });
+    document.getElementById('_raPlanSkip').addEventListener('click',async()=>{
+      contentEl.innerHTML='';
+      await runResearchAgent(query, contentEl, area, chatId);
+    });
+
+  }catch(e){
+    contentEl.innerHTML=`<div style="color:var(--red);padding:12px">Failed to generate plan: ${esc(e.message||'Unknown error')}. Starting research directly...</div>`;
+    setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},2000);
+  }
+}
+
 async function runResearchAgent(query, contentEl, area, chatId){
   const stepIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
   const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert & Stakeholder Analysis','Data & Comparative Analysis','Synthesis & Insights','Strategic Assessment','Final Intelligence Brief'];
   const totalSteps=8;
   let currentStep=0;
+  // Smart auto-scroll: only auto-scroll if user is near bottom
+  let _raUserScrolledAway=false;
+  const _raScrollThreshold=200;
+  const _raOnScroll=()=>{
+    const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
+    _raUserScrolledAway=dist>_raScrollThreshold;
+  };
+  area.addEventListener('scroll',_raOnScroll,{passive:true});
+  const _raAutoScroll=()=>{if(!_raUserScrolledAway)area.scrollTop=area.scrollHeight;};
+  // AbortController for cancellation
+  const _raAbort=new AbortController();
   const stepTimers={};
   const stepElapsed={};
   const stepWordCounts={};
@@ -2112,7 +2216,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       </div>
       <div class="ra-toast-container" id="_raToasts"></div>
     </div>`;
-  area.scrollTop=area.scrollHeight;
+  _raAutoScroll();
 
   // Live elapsed timer
   const elTimer=setInterval(()=>{
@@ -2222,12 +2326,16 @@ async function runResearchAgent(query, contentEl, area, chatId){
     const response=await apiFetch('/api/research-agent',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chatId,query:query})
+      body:JSON.stringify({chat_id:chatId,query:query}),
+      signal:_raAbort.signal
     });
     if(!response.ok){
       const d=await response.json().catch(()=>({error:'Failed to start research'}));
       throw new Error(d.error||'Research failed');
     }
+
+    // Register abort controller so stop button works
+    setChatRunning(chatId,true,{type:'research',controller:_raAbort});
 
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
@@ -2266,14 +2374,25 @@ async function runResearchAgent(query, contentEl, area, chatId){
                 if(!manualToggles.has(sNum)) sec.classList.add('ra-collapsed');
               });
             }
-            const section=document.createElement('div');
-            section.className='ra-section ra-slide-in';
-            section.id='_raS'+ev.step;
-            section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">▾</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
-            if(outEl) outEl.appendChild(section);
+            // Reuse existing section if retrying (avoid duplicate cards)
+            let section=outEl?outEl.querySelector('#_raS'+ev.step):null;
+            if(section){
+              // Reset existing section for retry
+              section.classList.remove('ra-collapsed');
+              const stEl=section.querySelector('.ra-section-status');
+              if(stEl){stEl.textContent='researching...';stEl.className='ra-section-status ra-running';}
+              const ce=section.querySelector('.ra-step-content');
+              if(ce) ce.innerHTML='';
+            } else {
+              section=document.createElement('div');
+              section.className='ra-section ra-slide-in';
+              section.id='_raS'+ev.step;
+              section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">▾</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
+              if(outEl) outEl.appendChild(section);
+              showToast(`Step ${ev.step}: ${ev.title}`,icon);
+            }
             currentContentEl=section.querySelector('.ra-step-content');
-            showToast(`Step ${ev.step}: ${ev.title}`,icon);
-            area.scrollTop=area.scrollHeight;
+            _raAutoScroll();
           }else if(ev.status==='complete'){
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
@@ -2294,7 +2413,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
               const lb=thEl.querySelector('.ra-thinking-label');
               if(lb) lb.textContent='View thinking';
             }
-            area.scrollTop=area.scrollHeight;
+            _raAutoScroll();
           }else if(ev.status==='failed'){
             failedSteps++;
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
@@ -2319,7 +2438,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           stepContent+=ev.text;
           if(currentContentEl){
             currentContentEl.innerHTML=fmtLive(stepContent);
-            area.scrollTop=area.scrollHeight;
+            _raAutoScroll();
           }
         }else if(ev.type==='agent_sources'){
           for(const src of (ev.sources||[])){
@@ -2378,7 +2497,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</div><div class="ra-dash-stat-lbl">Words</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredFindings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTime}s</div><div class="ra-dash-stat-lbl">Time</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${failedSteps===0?'🟢 High':'🟡 Partial'}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${failedSteps===0?'🟢 High':failedSteps<=2?'🟡 Moderate':failedSteps<=4?'🟠 Limited':'🔴 Low'}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
           </div>`;
           // Step timing chart
           if(durations.length){
@@ -2391,14 +2510,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
           dashboard.innerHTML=dashHtml;
           if(outEl) outEl.insertBefore(dashboard,outEl.querySelector('.ra-summary')||outEl.querySelector('.ra-section'));
-
-          // Follow-up question chips
-          if(followupQuestions.length){
-            const followupEl=document.createElement('div');
-            followupEl.className='ra-followups';
-            followupEl.innerHTML=`<div class="ra-followups-hd">🔮 Continue Researching</div><div class="ra-followups-list">${followupQuestions.map(q=>`<button class="ra-followup-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div>`;
-            if(outEl) outEl.appendChild(followupEl);
-          }
 
           // Search box
           const searchEl=document.createElement('div');
@@ -2419,7 +2530,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             outEl.appendChild(actionBar);
           }
           showToast('Research complete!','✅');
-          area.scrollTop=area.scrollHeight;
+          _raAutoScroll();
         }
       }
     }
@@ -2432,21 +2543,38 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
 // ─── Stock Analysis Helpers ───────────────────────
 function _saParseRating(text){
-  if(!text)return{label:'Neutral',score:50};
+  if(!text)return{label:'Hold',score:50};
+  // Try to extract numeric rating X/100 from the text
+  const numMatch=text.match(/Rating[:\s]*(\d{1,3})\s*\/\s*100/i)||text.match(/(\d{1,3})\s*\/\s*100/);
+  if(numMatch){
+    const n=Math.max(1,Math.min(100,parseInt(numMatch[1])));
+    let label;
+    if(n>=90) label='Strong Buy';
+    else if(n>=75) label='Buy';
+    else if(n>=60) label='Lean Buy';
+    else if(n>=45) label='Hold';
+    else if(n>=30) label='Lean Sell';
+    else if(n>=15) label='Sell';
+    else label='Strong Sell';
+    return{label,score:n};
+  }
+  // Fallback: regex-based
   const t=text.toLowerCase();
-  if(/strong\s*buy|🟢\s*buy|very bullish/i.test(text))return{label:'Strong Buy',score:85};
-  if(/\bbuy\b|bullish|outperform|overweight/i.test(text))return{label:'Buy',score:72};
-  if(/strong\s*sell|🔴\s*sell|very bearish/i.test(text))return{label:'Strong Sell',score:12};
-  if(/\bsell\b|bearish|underperform|underweight/i.test(text))return{label:'Sell',score:28};
-  if(/\bhold\b|neutral|🟡/i.test(text))return{label:'Hold',score:50};
-  return{label:'Neutral',score:50};
+  if(/strong\s*buy|very bullish/i.test(text))return{label:'Strong Buy',score:92};
+  if(/lean\s*buy/i.test(text))return{label:'Lean Buy',score:67};
+  if(/\bbuy\b|bullish|outperform|overweight/i.test(text))return{label:'Buy',score:80};
+  if(/strong\s*sell|very bearish/i.test(text))return{label:'Strong Sell',score:8};
+  if(/lean\s*sell/i.test(text))return{label:'Lean Sell',score:37};
+  if(/\bsell\b|bearish|underperform|underweight/i.test(text))return{label:'Sell',score:22};
+  if(/\bhold\b|neutral/i.test(text))return{label:'Hold',score:50};
+  return{label:'Hold',score:50};
 }
 
 function buildSentimentGauge(rating){
   if(!rating)return'';
   const pct=Math.max(0,Math.min(100,rating.score));
-  const color=pct>=70?'#22c55e':pct>=45?'#eab308':'#ef4444';
-  return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Analyst Sentiment</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${esc(rating.label)}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div></div>`;
+  const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
+  return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Analyst Sentiment</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${esc(rating.label)}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Lean Sell</span><span>Hold</span><span>Lean Buy</span><span>Buy</span><span>Strong Buy</span></div></div><div class="sa-gauge-score" style="text-align:center;margin-top:4px;font-size:13px;color:${color};font-weight:600">${pct}/100</div></div></div>`;
 }
 
 function buildGrowthChart(stockDataArr){
@@ -2665,35 +2793,38 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           // Collapse all sections
           if(outEl) outEl.querySelectorAll('.sa-section').forEach(s=>s.classList.add('sa-collapsed'));
 
-          // Sentiment gauge
+          // Parse rating and build combined overview card
           const rating=_saParseRating(lastStepText);
           const gaugeHtml=buildSentimentGauge(rating);
-          if(gaugeHtml&&outEl){
-            const g=document.createElement('div');
-            g.innerHTML=gaugeHtml;
-            outEl.insertBefore(g.firstElementChild,outEl.querySelector('.sa-section'));
-          }
-
-          // Growth chart
           const chartHtml=buildGrowthChart(stockDataArray);
-          if(chartHtml&&outEl){
-            const c=document.createElement('div');
-            c.innerHTML=chartHtml;
-            const firstSection=outEl.querySelector('.sa-section');
-            outEl.insertBefore(c.firstElementChild,firstSection);
+          const plainLast=(lastStepText||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+          const sentences=plainLast?plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' '):'';
+
+          if(outEl){
+            const overview=document.createElement('div');
+            overview.className='sa-overview-card sa-slide-in';
+            let ovHtml='';
+            if(gaugeHtml) ovHtml+=gaugeHtml;
+            if(chartHtml) ovHtml+=chartHtml;
+            if(sentences) ovHtml+=`<div class="sa-summary"><div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div></div>`;
+            overview.innerHTML=ovHtml;
+            outEl.insertBefore(overview,outEl.querySelector('.sa-section'));
           }
 
-          // Quick summary from final step
-          const plainLast=(lastStepText||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
-          if(plainLast){
-            const sentences=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
-            if(sentences&&outEl){
-              const summary=document.createElement('div');
-              summary.className='sa-summary sa-slide-in';
-              summary.innerHTML=`<div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div>`;
-              const firstSection=outEl.querySelector('.sa-section');
-              outEl.insertBefore(summary,firstSection);
+          // Step performance timing
+          const maxDur=Math.max(...Object.values(stepElapsed),1);
+          if(outEl&&Object.keys(stepElapsed).length){
+            const timingEl=document.createElement('div');
+            timingEl.className='sa-timing-section sa-slide-in';
+            let timHtml=`<div class="sa-timing-hd">⏱️ Step Performance <span style="font-weight:400;opacity:.6">— Total: ${totalTime}s</span></div><div class="sa-timing-chart">`;
+            for(let s=1;s<=totalSteps;s++){
+              const dur=stepElapsed[s]||0;
+              const pct=Math.round((dur/maxDur)*100);
+              timHtml+=`<div class="sa-timing-row"><span class="sa-timing-label">${stepNames[s-1]||'Step '+s}</span><div class="sa-timing-bar-track"><div class="sa-timing-bar-fill" style="width:${pct}%"></div></div><span class="sa-timing-val">${dur.toFixed(1)}s</span></div>`;
             }
+            timHtml+='</div>';
+            timingEl.innerHTML=timHtml;
+            outEl.appendChild(timingEl);
           }
 
           // Disclaimer
@@ -2715,14 +2846,6 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           // Update badge
           const badge=document.getElementById('_saBadge');
           if(badge){badge.classList.add('sa-badge-done');badge.textContent='✅ Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
-
-          // Total time
-          if(outEl){
-            const timeEl=document.createElement('div');
-            timeEl.className='sa-total-time';
-            timeEl.innerHTML=`Completed in <strong>${totalTime}s</strong>`;
-            outEl.appendChild(timeEl);
-          }
 
           chatArea.scrollTop=chatArea.scrollHeight;
         }
@@ -2914,8 +3037,6 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       +`</div>`
       // ── Footer ──
       +`<div class="stock-card-footer">`
-        +`<a href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener" class="stock-yahoo-link">Yahoo Finance ↗</a>`
-        +`<a href="https://www.google.com/finance/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener" class="stock-yahoo-link">Google Finance ↗</a>`
         +earningsHtml
         +`${d.sector?`<span class="stock-sector">${esc(d.sector)}${d.industry?' · '+esc(d.industry):''}</span>`:''}`
       +`</div>`;
@@ -3498,7 +3619,7 @@ async function sendMessage(opts){
       setChatRunning(targetChatId,false);
       setChatRunning(targetChatId,true,{type:'research'});
       try{
-        await runResearchAgent(text, contentEl, area, targetChatId);
+        await showResearchPlan(text, contentEl, area, targetChatId);
         await refreshChats();
       }catch(e){
         contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Research failed.')}</div>`;
@@ -3594,15 +3715,12 @@ async function sendMessage(opts){
       if(ta)ta.remove();
       stopThinkingPhrases();
       thinkPanel=document.createElement('div');
-      thinkPanel.className='live-think-panel ltp-collapsed';
-      thinkPanel.innerHTML='<div class="ltp-header" style="cursor:pointer"><span class="ltp-icon">💭</span><span class="ltp-label">Considering your question</span><span class="ltp-chevron">▾</span><span class="ltp-dots"><span></span><span></span><span></span></span></div><div class="ltp-body" style="max-height:0;padding:0;overflow:hidden;transition:max-height .3s var(--ease-smooth),padding .3s var(--ease-smooth)"><div class="ltp-text"></div></div>';
+      thinkPanel.className='live-think-panel';
+      thinkPanel.innerHTML='<div class="ltp-header" style="cursor:pointer"><span class="ltp-icon">💭</span><span class="ltp-label">Considering your question</span><span class="ltp-chevron">▾</span><span class="ltp-dots"><span></span><span></span><span></span></span></div><div class="ltp-body"><div class="ltp-text"></div></div>';
       const hdr=thinkPanel.querySelector('.ltp-header');
       const body=thinkPanel.querySelector('.ltp-body');
       hdr.onclick=()=>{
-        const collapsed=thinkPanel.classList.contains('ltp-collapsed');
-        thinkPanel.classList.toggle('ltp-collapsed',!collapsed);
-        body.style.maxHeight=collapsed?'50vh':'0';
-        body.style.padding=collapsed?'12px 14px':'0';
+        thinkPanel.classList.toggle('ltp-collapsed');
       };
       contentEl.innerHTML='';
       contentEl.appendChild(thinkPanel);
@@ -3648,6 +3766,7 @@ async function sendMessage(opts){
             if(isThinking&&thinkPanel){
               isThinking=false;
               thinkPanel.classList.add('ltp-done');
+              thinkPanel.classList.add('ltp-collapsed');
               const dotsEl=thinkPanel.querySelector('.ltp-dots');
               if(dotsEl)dotsEl.remove();
               // Update label to final state
@@ -3916,7 +4035,7 @@ async function sendMessage(opts){
               setChatRunning(targetChatId,false);
               setChatRunning(targetChatId,true,{type:'research'});
               try{
-                await runResearchAgent(rq, researchContentEl, chatArea, targetChatId);
+                await showResearchPlan(rq, researchContentEl, chatArea, targetChatId);
                 await refreshChats();
                 setChatRunning(targetChatId,false);
               }catch(e){
@@ -4647,10 +4766,6 @@ function addMsg(role,text,files,extra={}){
           });
           raHtml+=`</div></div>`;
         }
-        // Follow-up chips
-        if(followups.length){
-          raHtml+=`<div class="ra-followups"><div class="ra-followups-hd">🔮 Continue Researching</div><div class="ra-followups-list">${followups.map(q=>`<button class="ra-followup-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div></div>`;
-        }
         raHtml+=`</div>`;
         html=`<div class="lbl">gyro</div>`+raHtml;
       } else {
@@ -5344,11 +5459,31 @@ async function exportChats(){
     const blob=await r.blob();
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
-    a.href=url;a.download='gyro-chats-export.json';
+    a.href=url;a.download='gyro-all-chats-export.json';
     document.body.appendChild(a);a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     showToast(`Exported ${allChats.length} chats.`,'success');
+  }catch(e){showToast('Export failed: '+e.message,'error');}
+}
+
+async function exportCurrentChat(){
+  if(!curChat){showToast('No chat selected.','info');return;}
+  showToast('Exporting chat…','info');
+  try{
+    const r=await apiFetch('/api/chats/export/'+encodeURIComponent(curChat));
+    if(!r.ok){showToast('Export failed.','error');return;}
+    const disp=r.headers.get('Content-Disposition')||'';
+    const fnMatch=disp.match(/filename=(.+)/);
+    const fname=fnMatch?fnMatch[1]:'chat.json';
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=fname;
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Chat exported.','success');
   }catch(e){showToast('Export failed: '+e.message,'error');}
 }
 

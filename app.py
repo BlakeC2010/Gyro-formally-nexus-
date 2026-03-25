@@ -1104,22 +1104,27 @@ STOCK ANALYSIS RULES:
    Bad: [walls of text guessing at numbers before data loads]
    Bad: [asking what kind of analysis they want]
 
-2. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
+2. ALWAYS ANALYZE MULTIPLE STOCKS: When the user asks for stock recommendations, screening, or any query like "find me a good stock", "best tech stock under $X", "what should I invest in", etc., you MUST embed AT LEAST 3-5 stock cards so the agent can compare them. Use your knowledge to pick the most relevant candidates matching the user's criteria.
+   Good: "Let me compare the top candidates. <<<STOCK: SOFI>>> <<<STOCK: PLTR>>> <<<STOCK: NIO>>> <<<STOCK: MARA>>>"
+   Bad: "Here's one stock. <<<STOCK: AAPL>>>" (only one stock when user wanted recommendations)
+   Even for a single specific ticker, consider embedding 1-2 comparable competitors for context.
+
+3. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
    - Show loading cards to the user immediately
    - Fetch real-time data from Yahoo Finance server-side
-   - Automatically launch the Stock Analysis Agent which runs a 4-step deep analysis
-   - The agent handles: Market Overview → Technical Analysis → Fundamental Analysis → Final Verdict
+   - Automatically launch the Stock Analysis Agent which runs an 8-step deep analysis
+   - The agent handles: Market Snapshot → News → Technical → Fundamental → Deep Research → Risk → Valuation → Final Verdict
    So keep your initial message VERY SHORT — just embed the tags and one sentence. The agent does ALL the analysis work.
 
-3. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. The agent will use the real data.
+4. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. The agent will use the real data.
 
-4. For COMPARISON requests, embed both cards. The agent will do a full side-by-side comparison automatically.
+5. For COMPARISON requests, embed all relevant cards. The agent will do a full side-by-side comparison automatically.
 
-5. Do NOT include disclaimers — the agent adds them automatically.
+6. Do NOT include disclaimers — the agent adds them automatically.
 
-6. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly using any [LIVE STOCK DATA] in context.
+7. If the user asks a follow-up about the same stock, don't re-embed the card — just answer their specific question briefly using any [LIVE STOCK DATA] in context.
 
-7. If you already received [LIVE STOCK DATA] in the context, you can reference those numbers directly without re-embedding cards.
+8. If you already received [LIVE STOCK DATA] in the context, you can reference those numbers directly without re-embedding cards.
 
 LOCATION-AWARE RESPONSES:
 When the user has shared their location (shown in [USER LOCATION] section), use it proactively:
@@ -2236,7 +2241,11 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "| Category | " + " | ".join(tickers) + " |\n"
                     "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment — rate each A/B/C/D/F\n\n"
                     "### For each stock:\n"
-                    "**[TICKER]: 🟢 BUY / 🟡 HOLD / 🔴 SELL**\n"
+                    "**[TICKER]: 🟢 BUY / 🟡 HOLD / 🔴 SELL — Rating: [X]/100**\n"
+                    "Give a precise numeric rating from 1-100 where:\n"
+                    "- 90-100: STRONG BUY, 75-89: BUY, 60-74: LEAN BUY, 45-59: HOLD, 30-44: LEAN SELL, 15-29: SELL, 1-14: STRONG SELL\n\n"
+                    "CRITICAL: If the user specified criteria (price range, setup requirements, growth targets, etc.), "
+                    "a stock MUST meet those criteria to receive a BUY rating. If it fails, rate it SELL or HOLD and explain why.\n\n"
                     "- Target entry price range\n"
                     "- 3 bullet **Bull Case** (mix data + news + research)\n"
                     "- 3 bullet **Bear Case** (mix data + news + research)\n"
@@ -2429,8 +2438,21 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals — into your final call.\n\n"
                     "Structure EXACTLY like this:\n\n"
                     "---\n\n"
-                    "## Verdict: 🟢 BUY / 🟡 HOLD / 🔴 SELL\n\n"
-                    "**The Case** (one powerful paragraph — weave together your best data points AND recent news/research findings)\n\n"
+                    "## Verdict: 🟢 BUY / 🟡 HOLD / 🔴 SELL\n"
+                    "## Rating: [X]/100\n\n"
+                    "Give a precise numeric rating from 1-100 where:\n"
+                    "- 90-100: 🟢 STRONG BUY — exceptional opportunity, strong on all fronts\n"
+                    "- 75-89: 🟢 BUY — solid fundamentals, good entry, more upside than downside\n"
+                    "- 60-74: 🟢 LEAN BUY — decent opportunity with some risks, but net positive\n"
+                    "- 45-59: 🟡 HOLD — balanced risk/reward, wait for better entry or catalyst\n"
+                    "- 30-44: 🔴 LEAN SELL — more downside risk than upside, concerning signals\n"
+                    "- 15-29: 🔴 SELL — significant red flags, poor fundamentals or technicals\n"
+                    "- 1-14: 🔴 STRONG SELL — avoid completely, major structural problems\n\n"
+                    "CRITICAL: If the user specified criteria (price range, setup requirements, growth targets, etc.), "
+                    "the stock MUST meet those criteria to receive a BUY rating. If the stock fails the user's stated requirements, "
+                    "it should NOT be rated as BUY regardless of other merits — rate it SELL or HOLD and explain why it fails their criteria.\n\n"
+                    "**The Case** (one powerful paragraph — weave together your best data points AND recent news/research findings. "
+                    "If the stock contradicts the user's stated requirements, lead with that.)\n\n"
                     "### Scorecard\n"
                     "| Category | Grade | Key Reason |\n"
                     "|----------|-------|------------|\n"
@@ -4070,7 +4092,31 @@ def export_chats():
     return app.response_class(
         json.dumps(payload, ensure_ascii=False, default=str),
         mimetype="application/json",
-        headers={"Content-Disposition": "attachment; filename=gyro-chats-export.json"},
+        headers={"Content-Disposition": "attachment; filename=gyro-all-chats-export.json"},
+    )
+
+
+@app.route("/api/chats/export/<chat_id>", methods=["GET"])
+@require_auth_or_guest
+def export_single_chat(chat_id):
+    """Export a single chat as a JSON download."""
+    data, _ = load_chat(chat_id)
+    if not data:
+        return jsonify({"error": "Chat not found"}), 404
+    title = data.get("title", "chat")
+    # Sanitize filename
+    safe_title = re.sub(r'[^\w\s\-]', '', title).strip().replace(' ', '-')[:60] or "chat"
+    payload = {
+        "format": "gyro",
+        "version": 1,
+        "exported": datetime.datetime.now().isoformat(),
+        "chat_count": 1,
+        "chats": [data],
+    }
+    return app.response_class(
+        json.dumps(payload, ensure_ascii=False, default=str),
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename={safe_title}.json"},
     )
 
 
@@ -4888,6 +4934,7 @@ def chat_message_stream(chat_id):
     def generate():
         pieces = []
         thinking_pieces = []
+        _in_openai_think = False
         # ── Mid-stream media detection: detect image/stock/gen tags AS tokens arrive,
         #    start async fetches immediately, and yield result events interleaved with
         #    text deltas so the frontend can render media inline while streaming. ──
@@ -5037,6 +5084,45 @@ def chat_message_stream(chat_id):
                         continue
                     pieces.append(chunk)
                     emit_buffer += chunk
+                    # ── Extract <<<THINKING>>> blocks for OpenAI-style inline thinking ──
+                    _THINK_OPEN = "<<<THINKING>>>"
+                    _THINK_CLOSE = "<<<END_THINKING>>>"
+                    while _THINK_OPEN in emit_buffer or (_in_openai_think and _THINK_CLOSE in emit_buffer):
+                        if not _in_openai_think:
+                            idx = emit_buffer.find(_THINK_OPEN)
+                            if idx < 0:
+                                break
+                            before = emit_buffer[:idx]
+                            if before:
+                                yield event({"type": "delta", "text": before})
+                            emit_buffer = emit_buffer[idx + len(_THINK_OPEN):]
+                            _in_openai_think = True
+                        if _in_openai_think:
+                            close_idx = emit_buffer.find(_THINK_CLOSE)
+                            if close_idx >= 0:
+                                thought_chunk = emit_buffer[:close_idx]
+                                if thought_chunk:
+                                    thinking_pieces.append(thought_chunk)
+                                    yield event({"type": "thinking_delta", "text": thought_chunk})
+                                emit_buffer = emit_buffer[close_idx + len(_THINK_CLOSE):]
+                                _in_openai_think = False
+                            else:
+                                # Still inside thinking block — emit what we have so far as thinking
+                                if emit_buffer:
+                                    thinking_pieces.append(emit_buffer)
+                                    yield event({"type": "thinking_delta", "text": emit_buffer})
+                                emit_buffer = ""
+                                break
+                    if _in_openai_think:
+                        # Buffer is mid-thinking, everything is a thinking delta
+                        if emit_buffer:
+                            thinking_pieces.append(emit_buffer)
+                            yield event({"type": "thinking_delta", "text": emit_buffer})
+                        emit_buffer = ""
+                        # Drain any completed async media fetches
+                        for evt in _drain_completed():
+                            yield event(evt)
+                        continue
                     # Extract complete media tags from the buffer
                     while True:
                         m = _MEDIA_TAG_RE.search(emit_buffer)
@@ -6017,6 +6103,70 @@ def _research_agent_steps(query):
     ]
 
 
+@app.route("/api/research-plan", methods=["POST"])
+@require_auth_or_guest
+def research_plan():
+    """Generate a research plan with clarifying questions before running the agent."""
+    data = request.get_json() or {}
+    query = (data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "No research query provided"}), 400
+
+    settings = load_settings()
+    selected = normalize_selected_model(settings)
+    resolved = resolve_chat_model({"model": selected}, settings)
+    if resolved.get("error"):
+        return jsonify({"error": resolved["error"]}), 403
+
+    provider = resolved.get("provider")
+    api_key = resolved.get("api_key")
+    model = resolved.get("actual_model")
+    base_url = resolved.get("base_url")
+
+    system = (
+        "You are a research planning assistant. Given a research query, generate a concise research plan.\n"
+        "Respond in EXACTLY this JSON format (no markdown, no code fences):\n"
+        "{\n"
+        '  "questions": ["question1", "question2"],\n'
+        '  "plan": [\n'
+        '    {"title": "Step Title", "description": "What this step will do"},\n'
+        '    ...\n'
+        '  ],\n'
+        '  "refined_query": "improved version of the original query"\n'
+        "}\n\n"
+        "RULES:\n"
+        "- If the query is clear and specific, return an empty questions array.\n"
+        "- If the query is vague or ambiguous, include 1-3 short clarifying questions.\n"
+        "- Plan should have 5-8 steps that are specific to the query.\n"
+        "- Each step title should be short (3-6 words).\n"
+        "- Each step description should be 1 sentence explaining the research approach.\n"
+        "- The refined_query should be a clearer, more focused version of the user's query.\n"
+        "- Return ONLY valid JSON, nothing else."
+    )
+    messages = [{"role": "user", "text": f"Create a research plan for: {query}"}]
+
+    try:
+        result = PROVIDERS.get(provider, call_openai)(
+            api_key, model, system, messages, base_url=base_url,
+        )
+        # Parse JSON from response
+        text = result.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'```\s*$', '', text)
+        plan_data = json.loads(text)
+        return jsonify(plan_data)
+    except (json.JSONDecodeError, Exception) as e:
+        # Fallback: return default plan
+        default_steps = _research_agent_steps(query)
+        return jsonify({
+            "questions": [],
+            "plan": [{"title": s["title"], "description": s["prompt"][:100] + "..."} for s in default_steps],
+            "refined_query": query,
+        })
+
+
 @app.route("/api/research-agent", methods=["POST"])
 @require_auth_or_guest
 def research_agent():
@@ -6153,96 +6303,118 @@ def research_agent():
                 "text": f"{prev_section}[YOUR TASK — STEP {i+1}/{len(steps)}: {step['title']}]\n{step['prompt']}",
             }]
 
-            try:
-                step_pieces = []
-                use_web = step.get("web_search", False)
-                use_url_ctx = step.get("url_context", False)
+            use_web = step.get("web_search", False)
+            use_url_ctx = step.get("url_context", False)
 
-                # Build tools list for Google provider
-                if provider == "google" and (use_web or use_url_ctx):
-                    genai, types = _import_google()
-                    tools_list = []
-                    if use_web:
-                        tools_list.append(types.Tool(google_search=types.GoogleSearch()))
-                    if use_url_ctx:
-                        tools_list.append(types.Tool(url_context=types.UrlContext()))
+            # Progressive fallback attempts for resilience:
+            # 1. Thinking + all tools  2. No thinking + all tools
+            # 3. No thinking + web only (no url_context)  4. No thinking + no tools
+            _attempts = []
+            if provider == "google" and (use_web or use_url_ctx):
+                _attempts.append({"thinking": True, "web": use_web, "url_ctx": use_url_ctx, "label": "thinking+tools"})
+                _attempts.append({"thinking": False, "web": use_web, "url_ctx": use_url_ctx, "label": "tools"})
+                if use_url_ctx:
+                    _attempts.append({"thinking": False, "web": use_web, "url_ctx": False, "label": "web-only"})
+                _attempts.append({"thinking": False, "web": False, "url_ctx": False, "label": "no-tools"})
+            elif provider == "google":
+                _attempts.append({"thinking": True, "web": False, "url_ctx": False, "label": "thinking"})
+                _attempts.append({"thinking": False, "web": False, "url_ctx": False, "label": "plain"})
+            else:
+                _attempts.append({"thinking": True, "label": "thinking"})
+                _attempts.append({"thinking": False, "label": "plain"})
 
-                    client = genai.Client(api_key=api_key, http_options={"timeout": 300})
-                    contents = _google_contents_from_messages(messages, types)
+            step_pieces = []
+            step_success = False
+            _last_err = None
 
-                    # Try with thinking first, fall back without on 400 errors
-                    _ra_stream = None
-                    for _ra_attempt in range(2):
-                        try:
-                            _ra_cfg_args = dict(
-                                system_instruction=step["system"],
-                                tools=tools_list,
-                                max_output_tokens=65536,
-                            )
-                            if _ra_attempt == 0:
-                                _ra_cfg_args["thinking_config"] = types.ThinkingConfig(
-                                    thinking_budget=16000, include_thoughts=True
-                                )
-                            cfg = types.GenerateContentConfig(**_ra_cfg_args)
-                            _ra_stream = client.models.generate_content_stream(
-                                model=model,
-                                contents=contents,
-                                config=cfg,
-                            )
-                            # Pull first chunk to verify the stream is valid
-                            _first = next(_ra_stream, None)
-                            break
-                        except Exception as _ra_err:
-                            if _ra_attempt == 0 and "400" in str(_ra_err):
-                                print(f"  [research] Thinking failed ({_ra_err}), retrying without thinking...")
-                                continue
-                            raise
+            for _att_idx, _att in enumerate(_attempts):
+                if _att_idx > 0:
+                    _time.sleep(2)
+                    step_pieces = []  # Reset for retry
+                    print(f"  [research] Step {i+1} attempt {_att_idx+1} ({_att['label']})...")
 
-                    import itertools  # noqa: already imported above
-                    _last_chunk_time = _time.time()
-                    for chunk in itertools.chain([_first] if _first else [], _ra_stream):
-                        _last_chunk_time = _time.time()
-                        try:
-                            for candidate in (chunk.candidates or []):
-                                for part in (candidate.content.parts or []):
-                                    is_thought = getattr(part, "thought", None)
-                                    if is_thought and part.text:
-                                        yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
-                                        continue
-                                    if part.text:
-                                        step_pieces.append(part.text)
-                                        yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
-                        except (AttributeError, TypeError):
-                            text = getattr(chunk, "text", "") or ""
-                            if text:
-                                step_pieces.append(text)
-                                yield evt({"type": "agent_delta", "step": i + 1, "text": text})
-                else:
-                    stream_fn = STREAM_PROVIDERS.get(provider)
-                    if stream_fn:
-                        for chunk in stream_fn(
-                            api_key, model, step["system"], messages,
-                            base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
-                        ):
-                            if isinstance(chunk, dict) and chunk.get("__thinking__"):
-                                yield evt({"type": "agent_thinking", "step": i + 1, "text": chunk.get("text", "")})
-                                continue
-                            step_pieces.append(chunk)
-                            yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
-                    else:
-                        full = PROVIDERS.get(provider, call_openai)(
-                            api_key, model, step["system"], messages,
-                            base_url=base_url, thinking=True, thinking_level="high", web_search=use_web,
+                try:
+                    if provider == "google":
+                        genai, types = _import_google()
+                        _tools = []
+                        if _att.get("web"):
+                            _tools.append(types.Tool(google_search=types.GoogleSearch()))
+                        if _att.get("url_ctx"):
+                            _tools.append(types.Tool(url_context=types.UrlContext()))
+
+                        _client = genai.Client(api_key=api_key, http_options={"timeout": 300})
+                        _contents = _google_contents_from_messages(messages, types)
+                        _cfg_args = dict(
+                            system_instruction=step["system"],
+                            max_output_tokens=65536,
                         )
-                        step_pieces.append(full)
-                        yield evt({"type": "agent_delta", "step": i + 1, "text": full})
+                        if _tools:
+                            _cfg_args["tools"] = _tools
+                        if _att.get("thinking"):
+                            _cfg_args["thinking_config"] = types.ThinkingConfig(
+                                thinking_budget=16000, include_thoughts=True
+                            )
+                        _cfg = types.GenerateContentConfig(**_cfg_args)
+                        _stream = _client.models.generate_content_stream(
+                            model=model, contents=_contents, config=_cfg,
+                        )
+                        # Pull first chunk to verify stream is valid
+                        _first = next(_stream, None)
 
+                        for chunk in itertools.chain([_first] if _first else [], _stream):
+                            try:
+                                for candidate in (chunk.candidates or []):
+                                    for part in (candidate.content.parts or []):
+                                        if getattr(part, "thought", None) and part.text:
+                                            yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
+                                            continue
+                                        if part.text:
+                                            step_pieces.append(part.text)
+                                            yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                            except (AttributeError, TypeError):
+                                text = getattr(chunk, "text", "") or ""
+                                if text:
+                                    step_pieces.append(text)
+                                    yield evt({"type": "agent_delta", "step": i + 1, "text": text})
+                    else:
+                        stream_fn = STREAM_PROVIDERS.get(provider)
+                        if stream_fn:
+                            for chunk in stream_fn(
+                                api_key, model, step["system"], messages,
+                                base_url=base_url, thinking=_att.get("thinking", False),
+                                thinking_level="high", web_search=use_web,
+                            ):
+                                if isinstance(chunk, dict) and chunk.get("__thinking__"):
+                                    yield evt({"type": "agent_thinking", "step": i + 1, "text": chunk.get("text", "")})
+                                    continue
+                                step_pieces.append(chunk)
+                                yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
+                        else:
+                            full = PROVIDERS.get(provider, call_openai)(
+                                api_key, model, step["system"], messages,
+                                base_url=base_url, thinking=_att.get("thinking", False),
+                                thinking_level="high", web_search=use_web,
+                            )
+                            step_pieces.append(full)
+                            yield evt({"type": "agent_delta", "step": i + 1, "text": full})
+
+                    # If we got here with content, success
+                    if "".join(step_pieces).strip():
+                        step_success = True
+                        break
+                    else:
+                        _last_err = Exception("Empty response")
+                        print(f"  [research] Step {i+1} attempt {_att_idx+1} returned empty, trying next...")
+                except Exception as _att_err:
+                    _last_err = _att_err
+                    print(f"  [research] Step {i+1} attempt {_att_idx+1} ({_att['label']}) failed: {str(_att_err)[:100]}")
+                    continue
+
+            if step_success:
                 step_result = "".join(step_pieces)
-                # Strip source blocks from display text but keep for extraction
                 display_result = re.sub(r'<<<SOURCES>>>.*?<<<END_SOURCES>>>', '', step_result, flags=re.DOTALL).strip()
                 all_research.append(f"## {step['title']}\n{display_result}")
 
-                # Extract and emit sources
                 new_sources = _extract_sources(step_result)
                 for src in new_sources:
                     if src["url"] not in seen_urls:
@@ -6253,7 +6425,6 @@ def research_agent():
                                "sources": [s for s in new_sources if s["url"] in seen_urls],
                                "total_sources": len(all_sources)})
 
-                # Extract key findings
                 findings = _extract_key_findings(step_result)
                 if findings:
                     all_findings.extend(findings)
@@ -6267,109 +6438,20 @@ def research_agent():
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
                             "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
                             "word_count": step_word_count, "source_count": len(new_sources)})
-            except Exception as e:
-                # Retry the step once on failure before giving up
-                if not step.get("_retried"):
-                    step["_retried"] = True
-                    print(f"  [research] Step {i+1} failed ({str(e)[:80]}), retrying once...")
-                    yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                                "icon": step.get("icon", "📄"), "status": "running"})
-                    _time.sleep(2)  # Brief pause before retry
-                    try:
-                        step_pieces_retry = []
-                        if provider == "google" and (use_web or use_url_ctx):
-                            genai, types = _import_google()
-                            tools_list = []
-                            if use_web:
-                                tools_list.append(types.Tool(google_search=types.GoogleSearch()))
-                            if use_url_ctx:
-                                tools_list.append(types.Tool(url_context=types.UrlContext()))
-                            client_retry = genai.Client(api_key=api_key, http_options={"timeout": 300})
-                            contents_retry = _google_contents_from_messages(messages, types)
-                            cfg_retry = types.GenerateContentConfig(
-                                system_instruction=step["system"],
-                                tools=tools_list,
-                                max_output_tokens=65536,
-                            )
-                            stream_retry = client_retry.models.generate_content_stream(
-                                model=model, contents=contents_retry, config=cfg_retry,
-                            )
-                            for chunk in stream_retry:
-                                try:
-                                    for candidate in (chunk.candidates or []):
-                                        for part in (candidate.content.parts or []):
-                                            if getattr(part, "thought", None):
-                                                continue
-                                            if part.text:
-                                                step_pieces_retry.append(part.text)
-                                                yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
-                                except (AttributeError, TypeError):
-                                    t2 = getattr(chunk, "text", "") or ""
-                                    if t2:
-                                        step_pieces_retry.append(t2)
-                                        yield evt({"type": "agent_delta", "step": i + 1, "text": t2})
-                        else:
-                            stream_fn = STREAM_PROVIDERS.get(provider)
-                            if stream_fn:
-                                for chunk in stream_fn(api_key, model, step["system"], messages, base_url=base_url, web_search=use_web):
-                                    if isinstance(chunk, dict):
-                                        continue
-                                    step_pieces_retry.append(chunk)
-                                    yield evt({"type": "agent_delta", "step": i + 1, "text": chunk})
-                        retry_result = "".join(step_pieces_retry)
-                        if retry_result.strip():
-                            display_retry = re.sub(r'<<<SOURCES>>>.*?<<<END_SOURCES>>>', '', retry_result, flags=re.DOTALL).strip()
-                            all_research.append(f"## {step['title']}\n{display_retry}")
-                            new_sources = _extract_sources(retry_result)
-                            for src in new_sources:
-                                if src["url"] not in seen_urls:
-                                    seen_urls.add(src["url"])
-                                    all_sources.append(src)
-                            if new_sources:
-                                yield evt({"type": "agent_sources", "step": i + 1, "sources": new_sources, "total_sources": len(all_sources)})
-                            findings = _extract_key_findings(retry_result)
-                            if findings:
-                                all_findings.extend(findings)
-                                yield evt({"type": "agent_findings", "step": i + 1, "findings": findings, "total_findings": len(all_findings)})
-                            step_word_count = len(retry_result.split())
-                            total_word_count += step_word_count
-                            elapsed = round(_time.time() - step_start, 1)
-                            step_durations.append({"step": i + 1, "title": step["title"], "elapsed": elapsed})
-                            yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                                        "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
-                                        "word_count": step_word_count, "source_count": len(new_sources)})
-                            continue  # Skip the failure path below
-                    except Exception as e2:
-                        print(f"  [research] Step {i+1} retry also failed: {str(e2)[:80]}")
+            else:
                 elapsed = round(_time.time() - step_start, 1)
-                all_research.append(f"## {step['title']}\n*Research step failed: {str(e)[:100]}*")
+                err_msg = str(_last_err)[:200] if _last_err else "All attempts failed"
+                all_research.append(f"## {step['title']}\n*Research step failed: {err_msg[:100]}*")
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
                             "icon": step.get("icon", "📄"), "status": "failed",
-                            "error": str(e)[:200], "elapsed": elapsed})
+                            "error": err_msg, "elapsed": elapsed})
 
         full_report = "\n\n".join(all_research)
-        # Generate follow-up research questions from report content
-        followups = []
-        for m in re.finditer(r'(?:open question|further (?:investigation|research)|remains? (?:uncertain|unclear|unknown)|what about)[:\s]*([^\n]{15,100})', full_report, re.IGNORECASE):
-            q = m.group(1).strip().rstrip('.').strip()
-            if '?' not in q:
-                q += '?'
-            if len(q) > 15 and q not in followups:
-                followups.append(q)
-        if len(followups) < 2:
-            # Fallback: generate from "What to Watch" items
-            for m in re.finditer(r'watch[^\n]*\n[^|]*\|\s*([^|]{10,60})\s*\|', full_report, re.IGNORECASE):
-                item = m.group(1).strip()
-                if item and not any(x in item.lower() for x in ['indicator', '---', 'why']):
-                    q = f"What are the latest developments on {item}?"
-                    if q not in followups:
-                        followups.append(q)
-        followups = followups[:4]
 
         yield evt({"type": "agent_done", "report": full_report, "query": query,
                     "sources": all_sources, "total_sources": len(all_sources),
                     "total_words": total_word_count, "step_durations": step_durations,
-                    "findings": all_findings, "followup_questions": followups})
+                    "findings": all_findings})
 
         # Save to chat history
         if chat_id:
@@ -6394,7 +6476,6 @@ def research_agent():
                         "research_agent_findings": all_findings,
                         "research_agent_durations": step_durations,
                         "research_agent_words": total_word_count,
-                        "research_agent_followups": followups,
                     })
                     save_chat(chat)
             except Exception:

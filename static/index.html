@@ -352,8 +352,9 @@
 
     <p class="st">Export &amp; Import Chats</p>
     <p class="hint">Export your chats as JSON, or import chats from Gyro, ChatGPT, Claude, or other AI services.</p>
-    <div class="kr" style="gap:8px">
-      <button onclick="exportChats()" style="display:flex;align-items:center;gap:6px">📤 Export Chats</button>
+    <div class="kr" style="gap:8px;flex-wrap:wrap">
+      <button onclick="exportCurrentChat()" style="display:flex;align-items:center;gap:6px">📤 Export This Chat</button>
+      <button onclick="exportChats()" style="display:flex;align-items:center;gap:6px">📤 Export All Chats</button>
       <button onclick="document.getElementById('importFileInput').click()" style="display:flex;align-items:center;gap:6px">📥 Import Chats</button>
       <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importChats(this)">
     </div>
