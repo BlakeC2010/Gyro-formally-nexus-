@@ -616,7 +616,8 @@ body.light .plogo[data-p="custom"]{filter:invert(1)}
 .think-header:hover{background:var(--bg-hover);transform:translateX(2px)}
 .think-chevron{transition:transform .25s var(--ease-spring);font-size:10px}
 .think-block.expanded .think-chevron{transform:rotate(180deg)}
-.think-content{display:none;padding:10px 14px;font-size:12px;color:var(--text-muted);line-height:1.7;border-left:2px solid var(--border-hover);margin:8px 0 0 16px;white-space:pre-wrap;animation:thinkContentIn .3s var(--ease-out)}
+.think-content{display:none;padding:10px 14px;font-size:12px;color:var(--text-muted);line-height:1.7;border-left:2px solid var(--border-hover);margin:8px 0 0 16px;white-space:pre-wrap;max-height:50vh;overflow-y:auto;animation:thinkContentIn .3s var(--ease-out)}
+.think-content b,.think-content strong{color:var(--text-secondary);font-weight:600}
 @keyframes thinkContentIn{from{opacity:0;max-height:0}to{opacity:1;max-height:500px}}
 .think-block.expanded .think-content{display:block}
 .think-active{
@@ -763,13 +764,14 @@ body.light .chat-area::before{
 .ltp-dots span:nth-child(1){animation-delay:0s}
 .ltp-dots span:nth-child(2){animation-delay:.2s}
 .ltp-dots span:nth-child(3){animation-delay:.4s}
-.ltp-body{padding:12px 14px;max-height:200px;overflow-y:auto;transition:max-height .3s var(--ease-smooth),padding .3s var(--ease-smooth)}
+.ltp-body{padding:12px 14px;max-height:50vh;overflow-y:auto;transition:max-height .3s var(--ease-smooth),padding .3s var(--ease-smooth)}
 .live-think-panel.ltp-collapsed .ltp-body{max-height:0!important;padding:0!important;overflow:hidden}
 .ltp-text{
   font-size:12px;line-height:1.7;color:var(--text-muted);
   font-family:var(--mono);white-space:pre-wrap;
   animation:ltpTextIn .3s ease both;
 }
+.ltp-text b,.ltp-text strong{color:var(--text-secondary);font-weight:600}
 @keyframes ltpTextIn{from{opacity:0}to{opacity:1}}
 .ltp-body::-webkit-scrollbar{width:3px}
 .ltp-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px}
@@ -1398,7 +1400,7 @@ input[type="file"]{display:none}
 }
 .plus-btn:hover{color:var(--text-primary);border-color:var(--border-hover);background:var(--bg-hover)}
 .plus-btn.open{color:var(--accent);border-color:var(--accent-border);background:var(--accent-dim)}
-.plus-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:220px;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 12px 40px rgba(0,0,0,.4);padding:6px 0;display:none;z-index:80;transform-origin:bottom left}
+.plus-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:220px;max-height:min(420px,calc(100vh - 120px));overflow-y:auto;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 12px 40px rgba(0,0,0,.4);padding:6px 0;display:none;z-index:80;transform-origin:bottom left}
 .plus-popup.open{display:block;animation:plusIn .25s var(--ease-spring-snappy)}
 @keyframes plusIn{from{opacity:0;transform:translateY(8px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
 .plus-item{display:flex;align-items:center;gap:10px;padding:9px 14px;font-size:12px;color:var(--text-secondary);cursor:pointer;transition:all .15s var(--ease);border-left:2px solid transparent}
@@ -1729,15 +1731,8 @@ input[type="file"]{display:none}
 /* ══════════════════════════════════════════════════
    TOASTS
    ══════════════════════════════════════════════════ */
-.toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:500}
-.toast{
-  min-width:260px;max-width:360px;padding:14px 18px;border-radius:var(--r-md);
-  border:1px solid var(--border);background:var(--bg-overlay);
-  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-  color:var(--text-primary);box-shadow:var(--shadow-lg);
-  font-size:12px;line-height:1.5;font-weight:500;
-  animation:toastIn .35s var(--ease-spring-snappy);
-}
+.toast-wrap{display:none}
+.toast{display:none}
 @keyframes toastIn{from{opacity:0;transform:translateX(30px) scale(.95)}to{opacity:1;transform:translateX(0) scale(1)}}
 .toast.info{border-color:var(--accent-border)}
 .toast.error{border-color:rgba(248,113,113,.3);color:#ffd7d7}

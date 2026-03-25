@@ -474,18 +474,8 @@ document.addEventListener('DOMContentLoaded',()=>{
 });
 
 function showToast(message,type='info'){
-  const wrap=document.getElementById('toastWrap');
-  if(!wrap)return;
-  const toast=document.createElement('div');
-  toast.className=`toast ${type}`;
-  toast.textContent=message;
-  wrap.appendChild(toast);
-  window.setTimeout(()=>{
-    toast.style.transition='all .35s var(--ease)';
-    toast.style.opacity='0';
-    toast.style.transform='translateX(24px) scale(.95)';
-    setTimeout(()=>toast.remove(),350);
-  },2500);
+  // Disabled — notifications removed
+  return;
 }
 
 function setStatus(message){
@@ -3611,7 +3601,7 @@ async function sendMessage(opts){
       hdr.onclick=()=>{
         const collapsed=thinkPanel.classList.contains('ltp-collapsed');
         thinkPanel.classList.toggle('ltp-collapsed',!collapsed);
-        body.style.maxHeight=collapsed?'200px':'0';
+        body.style.maxHeight=collapsed?'50vh':'0';
         body.style.padding=collapsed?'12px 14px':'0';
       };
       contentEl.innerHTML='';
@@ -3630,14 +3620,18 @@ async function sendMessage(opts){
         if(!line)continue;
         try{
           const data=JSON.parse(line);
-          if(data.type==='thinking_delta'){
+          if(data.type==='heartbeat'){
+            // Keep-alive ping from backend — ignore
+            continue;
+          }else if(data.type==='thinking_delta'){
             if(!isThinking)console.log('[gyro] thinking_delta received — thinking panel activating');
             isThinking=true;
             thinkText+=data.text;
             if(canRender()){
               ensureThinkPanel();
-              thinkTextEl.textContent=thinkText;
-              thinkTextEl.scrollTop=thinkTextEl.scrollHeight;
+              thinkTextEl.innerHTML=_fmtThink(thinkText);
+              const _ltpBody=thinkTextEl.parentElement;
+              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
               // Continuously update the collapsed label with the latest thinking topic
               if(thinkText.length>15){
                 const subj=_extractThinkSubject(thinkText);
@@ -4318,12 +4312,46 @@ async function sendMessage(opts){
       if(canRender())contentEl.innerHTML=`<div style=\"color:var(--red)\">Connection error: ${esc(errDetail)}<br><small>Is the server running? Check your network.</small></div>`;
     }
   }finally{
-    // Only clear running state if this stream is still the active one
-    // (a silent continue may have started a new stream already)
+    // ── Handle stream ending without a done event (connection drop, timeout, etc.) ──
+    if(!_doneReceived&&canRender()){
+      stopThinkingPhrases();
+      // Collapse any still-active thinking panel
+      if(thinkPanel){
+        thinkPanel.classList.add('ltp-done');
+        if(!thinkPanel.classList.contains('ltp-collapsed'))thinkPanel.classList.add('ltp-collapsed');
+        const dotsEl=thinkPanel.querySelector('.ltp-dots');
+        if(dotsEl)dotsEl.remove();
+        const body=thinkPanel.querySelector('.ltp-body');
+        if(body){body.style.maxHeight='0';body.style.padding='0';}
+        const lbl=thinkPanel.querySelector('.ltp-label');
+        if(lbl&&thinkText)lbl.textContent='Thought about '+_extractThinkSubject(thinkText);
+      }
+      // Build whatever content we have
+      let recoveryHTML='';
+      if(thinkText)recoveryHTML+=renderThinkBlock(thinkText);
+      if(fullText){
+        recoveryHTML+=fmt(fullText);
+      }else{
+        recoveryHTML+='<div style="color:var(--text-muted);font-style:italic;padding:8px 0">Response was interrupted. Try sending your message again.</div>';
+      }
+      contentEl.innerHTML=recoveryHTML;
+      contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
+      setStatus('Response interrupted — try again.');
+    }
     const cur=runningStreams.get(targetChatId);
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
     area.removeEventListener('scroll',_onUserScroll);
   }
+}
+
+// Light markdown formatter for thinking text (bold, italic, headers)
+function _fmtThink(raw){
+  let t=esc(raw);
+  // **bold**
+  t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+  // *italic*
+  t=t.replace(/\*([^*]+)\*/g,'<i>$1</i>');
+  return t;
 }
 
 function renderThinkBlock(thinkText){
@@ -4339,7 +4367,7 @@ function renderThinkBlock(thinkText){
   }
   return `<div class="think-block" onclick="this.classList.toggle('expanded')">
     <div class="think-header"><span>💭</span> <span>Thought about ${esc(summary)}</span> <span class="think-chevron">▾</span></div>
-    <div class="think-content">${esc(thinkText)}</div>
+    <div class="think-content">${_fmtThink(thinkText)}</div>
   </div>`;
 }
 

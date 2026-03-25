@@ -3383,7 +3383,8 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
-    if _level:
+    use_thinking = bool(_level)
+    if use_thinking:
         cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=16000, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
         print(f"  [thinking] Google stream: thinking enabled, level={_level}")
@@ -3391,34 +3392,55 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
         cfg["max_output_tokens"] = 65536
     if web_search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-    stream = client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=types.GenerateContentConfig(**cfg),
-    )
-    _thought_count = 0
-    for chunk in stream:
-        # Check for thinking parts in candidates
+
+    # Try streaming; on 400 errors with thinking+tools, retry without thinking
+    for _attempt in range(2):
         try:
-            for candidate in (chunk.candidates or []):
-                for part in (candidate.content.parts or []):
-                    is_thought = getattr(part, "thought", None)
-                    if is_thought and part.text:
-                        _thought_count += 1
-                        if _thought_count == 1:
-                            print(f"  [thinking] Google stream: first thought chunk received")
-                        yield {"__thinking__": True, "text": part.text}
-                        continue
-                    if part.text:
-                        yield part.text
-        except (AttributeError, TypeError) as e:
-            if thinking and _thought_count == 0:
-                print(f"  [thinking] Google stream: exception in part extraction: {e}")
-            text = getattr(chunk, "text", "") or ""
-            if text:
-                yield text
-    if thinking:
-        print(f"  [thinking] Google stream: total thought chunks={_thought_count}")
+            stream = client.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg),
+            )
+            _thought_count = 0
+            _content_count = 0
+            for chunk in stream:
+                try:
+                    for candidate in (chunk.candidates or []):
+                        for part in (candidate.content.parts or []):
+                            is_thought = getattr(part, "thought", None)
+                            if is_thought and part.text:
+                                _thought_count += 1
+                                if _thought_count == 1:
+                                    print(f"  [thinking] Google stream: first thought chunk received")
+                                yield {"__thinking__": True, "text": part.text}
+                                continue
+                            if part.text:
+                                _content_count += 1
+                                yield part.text
+                except (AttributeError, TypeError) as e:
+                    if thinking and _thought_count == 0:
+                        print(f"  [thinking] Google stream: exception in part extraction: {e}")
+                    text = getattr(chunk, "text", "") or ""
+                    if text:
+                        _content_count += 1
+                        yield text
+            if thinking:
+                print(f"  [thinking] Google stream: total thought chunks={_thought_count}, content chunks={_content_count}")
+            # If thinking produced output but content didn't, and we have thinking+tools, retry without thinking
+            if _thought_count > 0 and _content_count == 0 and _attempt == 0 and use_thinking and web_search:
+                print(f"  [thinking] Google stream: thinking produced output but no content — retrying without thinking")
+                cfg.pop("thinking_config", None)
+                use_thinking = False
+                continue
+            return  # success
+        except Exception as e:
+            err_str = str(e)
+            if _attempt == 0 and "400" in err_str and use_thinking:
+                print(f"  [thinking] Google stream: 400 error with thinking ({err_str[:100]}), retrying without thinking")
+                cfg.pop("thinking_config", None)
+                use_thinking = False
+                continue
+            raise
 
 def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
@@ -4755,16 +4777,46 @@ def chat_message_stream(chat_id):
         try:
             stream_fn = STREAM_PROVIDERS.get(resolved["provider"])
             if stream_fn:
-                for chunk in stream_fn(
-                    resolved["api_key"],
-                    resolved["actual_model"],
-                    ctx["sysprompt"],
-                    ctx["api_msgs"],
-                    base_url=resolved["base_url"],
-                    thinking=thinking,
-                    thinking_level=thinking_level,
-                    web_search=web_search,
-                ):
+                # Use a queue + thread so we can emit heartbeat events during
+                # long gaps (e.g. between thinking and content) to prevent
+                # Render's proxy from killing the connection.
+                import queue, threading
+                _SENTINEL = object()
+                _HEARTBEAT_INTERVAL = 15          # seconds
+                _chunk_q = queue.Queue()
+
+                def _stream_worker():
+                    try:
+                        for chunk in stream_fn(
+                            resolved["api_key"],
+                            resolved["actual_model"],
+                            ctx["sysprompt"],
+                            ctx["api_msgs"],
+                            base_url=resolved["base_url"],
+                            thinking=thinking,
+                            thinking_level=thinking_level,
+                            web_search=web_search,
+                        ):
+                            _chunk_q.put(chunk)
+                    except Exception as exc:
+                        _chunk_q.put(exc)
+                    finally:
+                        _chunk_q.put(_SENTINEL)
+
+                _worker = threading.Thread(target=_stream_worker, daemon=True)
+                _worker.start()
+
+                while True:
+                    try:
+                        chunk = _chunk_q.get(timeout=_HEARTBEAT_INTERVAL)
+                    except queue.Empty:
+                        # No data for 15 s — send heartbeat to keep connection alive
+                        yield event({"type": "heartbeat"})
+                        continue
+                    if chunk is _SENTINEL:
+                        break
+                    if isinstance(chunk, Exception):
+                        raise chunk
                     if isinstance(chunk, dict) and chunk.get("__thinking__"):
                         thinking_pieces.append(chunk["text"])
                         if chunk["text"]:
