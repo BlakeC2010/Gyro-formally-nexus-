@@ -21,6 +21,7 @@ serviceAccount.json
 .nexus_data/
 .nexus_history/
 .nexus_session_secret
+_uploads/
 
 # Build artifacts
 dist/

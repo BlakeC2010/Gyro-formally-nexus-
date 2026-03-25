@@ -1,11 +1,27 @@
 ﻿// ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
-let _continueCount=0;const _MAX_CONTINUES=5;
 let _codeRepromptCount=0;const _MAX_CODE_REPROMPTS=3;
 let _nextStreamId=0;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
 let googleInitDone=false,thinkingLevel='off',guestAuthMode='register';
+
+function renderMathInElementSafe(root){
+  if(!root||typeof renderMathInElement!=='function')return;
+  try{
+    renderMathInElement(root,{
+      delimiters:[
+        {left:'$$',right:'$$',display:true},
+        {left:'$',right:'$',display:false},
+        {left:'\\(',right:'\\)',display:false},
+        {left:'\\[',right:'\\]',display:true}
+      ],
+      throwOnError:false
+    });
+  }catch(e){
+    console.debug('KaTeX render skipped:',e?.message||e);
+  }
+}
 let deepResearchDepth='standard';
 let onboardingChecked=false;
 let selectMode=false;
@@ -152,6 +168,9 @@ function stopStreaming(){
   if(run?.controller){
     run.controller.abort();
   }
+  // Force-clear running state immediately so UI updates even if abort is slow
+  setChatRunning(curChat,false);
+  setStatus('Generation cancelled.');
 }
 
 function editMsg(btn){
@@ -159,9 +178,26 @@ function editMsg(btn){
   const text=msgEl.dataset.text||'';
   const input=document.getElementById('msgInput');
   input.value=text;autoResize(input);
-  const next=msgEl.nextElementSibling;
-  if(next&&(next.classList.contains('kairo')||next.classList.contains('msg')))next.remove();
-  msgEl.remove();
+  // Count user messages before this one to determine truncation index
+  const area=document.getElementById('chatArea');
+  const allMsgs=[...area.querySelectorAll('.msg')];
+  const msgIndex=allMsgs.indexOf(msgEl);
+  // Count actual chat messages (user + assistant pairs) up to this point
+  let backendIndex=0;
+  for(let i=0;i<allMsgs.length;i++){
+    if(allMsgs[i]===msgEl)break;
+    if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
+  }
+  // Remove this message and ALL subsequent messages from DOM
+  let toRemove=[];
+  let found=false;
+  for(const el of allMsgs){
+    if(el===msgEl)found=true;
+    if(found)toRemove.push(el);
+  }
+  toRemove.forEach(el=>el.remove());
+  // Store truncation index so next sendMessage includes it
+  window._editTruncateAt=backendIndex;
   input.focus();
 }
 
@@ -471,6 +507,16 @@ document.addEventListener('DOMContentLoaded',()=>{
       _closeDlg();if(_dlgResolve)_dlgResolve(null);
     }
   });
+  // ── Global scroll-to-bottom button ──
+  const _chatArea=document.getElementById('chatArea');
+  const _scrollBtn=document.getElementById('scrollToBottom');
+  if(_chatArea&&_scrollBtn){
+    _chatArea.addEventListener('scroll',()=>{
+      const dist=_chatArea.scrollHeight-_chatArea.scrollTop-_chatArea.clientHeight;
+      if(dist>300)_scrollBtn.classList.add('visible');
+      else _scrollBtn.classList.remove('visible');
+    },{passive:true});
+  }
 });
 
 function showToast(message,type='info'){
@@ -2178,6 +2224,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
   const stepWordCounts={};
   const stepSourceCounts={};
   const manualToggles=new Set();
+  const completedSteps=new Set();
   window._raManualToggles=manualToggles;
   const discoveredSources=[];
   const discoveredFindings=[];
@@ -2201,6 +2248,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         </div>
         <div class="ra-stats-row">
           <span>📚 <strong id="_raSourceCount">0</strong> sources</span>
+          <span>💡 <strong id="_raFindStat">0</strong> findings</span>
           <span>📝 <strong id="_raWordCount">0</strong> words</span>
           <span>⏱️ <strong id="_raElapsed">0s</strong></span>
         </div>
@@ -2286,9 +2334,12 @@ async function runResearchAgent(query, contentEl, area, chatId){
     const stepsEl=document.getElementById('_raSteps');
     if(stepsEl){
       stepsEl.querySelectorAll('.ra-step').forEach((dot,i)=>{
-        dot.className='ra-step'+(i<step?' done':(i===step?' active':''));
+        const stepNum=i+1;
+        const isDone=completedSteps.has(stepNum);
+        const isActive=stepNum===step+1||(stepNum===step&&!isDone);
+        dot.className='ra-step'+(isDone?' done':(isActive?' active':''));
         const inner=dot.querySelector('.ra-step-dot');
-        if(inner) inner.textContent=i<step?'✓':stepIcons[i];
+        if(inner) inner.textContent=isDone?'✓':stepIcons[i];
       });
     }
   };
@@ -2323,6 +2374,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
     if(panel) panel.style.display='';
     const cntEl=document.getElementById('_raFindCount');
     if(cntEl) cntEl.textContent=discoveredFindings.length;
+    const fStatEl=document.getElementById('_raFindStat');
+    if(fStatEl) fStatEl.textContent=discoveredFindings.length;
     const list=document.getElementById('_raFindList');
     if(list){
       const item=document.createElement('div');
@@ -2376,6 +2429,12 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const icon=ev.icon||stepIcons[(ev.step-1)]||'📄';
           if(ev.status==='running'){
             stepTimers[ev.step]=Date.now();
+            if(window._raStepLiveTimer) clearInterval(window._raStepLiveTimer);
+            const _liveStep=ev.step;
+            window._raStepLiveTimer=setInterval(()=>{
+              const tEl=document.getElementById('_raT'+_liveStep);
+              if(tEl){tEl.textContent=((Date.now()-stepTimers[_liveStep])/1000|0)+'s';tEl.classList.add('ra-timer-live');}
+            },500);
             updateProgress(ev.step-1, icon+' '+ev.title+'...');
             stepContent='';
             stepThinking='';
@@ -2405,6 +2464,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
             currentContentEl=section.querySelector('.ra-step-content');
             _raAutoScroll();
           }else if(ev.status==='complete'){
+            if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+            completedSteps.add(ev.step);
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='ra-section-status ra-done';}
@@ -2416,7 +2477,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const wcEl=document.getElementById('_raWordCount');
             if(wcEl) wcEl.textContent=totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords;
             const timerEl=document.getElementById('_raT'+ev.step);
-            if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
+            if(timerEl){timerEl.classList.remove('ra-timer-live');if(elapsed) timerEl.textContent=elapsed+'s';}
             const ce=document.getElementById('_raC'+ev.step);
             if(ce) ce.innerHTML=fmt(stepContent);
             const thEl=document.getElementById('_raThink'+ev.step);
@@ -2426,6 +2487,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             }
             _raAutoScroll();
           }else if(ev.status==='failed'){
+            if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
             failedSteps++;
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✗ failed';statusEl.className='ra-section-status ra-failed';}
@@ -2443,7 +2505,11 @@ async function runResearchAgent(query, contentEl, area, chatId){
           if(thEl){
             thEl.style.display='';
             const thC=document.getElementById('_raThinkC'+ev.step);
-            if(thC) thC.textContent=stepThinking;
+            if(thC){
+              thC.innerHTML=_fmtThink(stepThinking);
+              const _ltpBody=thC.parentElement;
+              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+            }
           }
         }else if(ev.type==='agent_delta'){
           stepContent+=ev.text;
@@ -2453,7 +2519,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
         }else if(ev.type==='agent_sources'){
           for(const src of (ev.sources||[])){
-            if(!discoveredSources.find(s=>s.url===src.url)) addSource(src);
+            if(!discoveredSources.find(s=>s.url.toLowerCase()===src.url.toLowerCase())) addSource(src);
           }
         }else if(ev.type==='agent_findings'){
           for(const f of (ev.findings||[])){
@@ -2461,6 +2527,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
         }else if(ev.type==='agent_done'){
           clearInterval(elTimer);
+          if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
           updateProgress(totalSteps,'Research complete!');
           followupQuestions=ev.followup_questions||[];
           totalWords=ev.total_words||totalWords;
@@ -2499,23 +2566,71 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
 
           // Build completion dashboard
+          const _srcScore=Math.min(discoveredSources.length/25,1)*30;
+          const _stpScore=((totalSteps-failedSteps)/totalSteps)*25;
+          const _wrdScore=Math.min(totalWords/5000,1)*25;
+          const _fndScore=Math.min(discoveredFindings.length/15,1)*20;
+          const qualityScore=Math.round(_srcScore+_stpScore+_wrdScore+_fndScore);
+          const qualityLabel=qualityScore>=85?'Exceptional':qualityScore>=70?'Thorough':qualityScore>=50?'Good':qualityScore>=30?'Basic':'Limited';
+          const qualityColor=qualityScore>=85?'#22c55e':qualityScore>=70?'#8b5cf6':qualityScore>=50?'#eab308':'#ef4444';
+
+          // Source diversity
+          const domainCounts={};
+          discoveredSources.forEach(s=>{try{const d=new URL(s.url).hostname.replace('www.','');domainCounts[d]=(domainCounts[d]||0)+1}catch(e){}});
+          const topDomains=Object.entries(domainCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
+          const maxDomainCount=topDomains.length?topDomains[0][1]:1;
+
+          // SVG quality gauge
+          const _qr=54,_qcx=60,_qcy=60,_qstroke=8;
+          const _qcirc=2*Math.PI*_qr;
+          const _qarcLen=_qcirc*0.75;
+          const _qfilled=_qarcLen*(qualityScore/100);
+          const _qdashArr=`${_qfilled} ${_qarcLen-_qfilled}`;
+
           const dashboard=document.createElement('div');
           dashboard.className='ra-dashboard ra-slide-in';
-          let dashHtml=`<div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Intelligence Brief Complete</span></div>`;
+          let dashHtml=`<div class="ra-complete-banner"><div class="ra-complete-banner-title">🔬 Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${totalSteps-failedSteps} steps completed · ${discoveredSources.length} sources · ${totalWords.toLocaleString()} words · ${totalTime}s</div></div>`;
           dashHtml+=`<div class="ra-dash-stats">
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalSteps-failedSteps}/${totalSteps}</div><div class="ra-dash-stat-lbl">Steps</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredSources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</div><div class="ra-dash-stat-lbl">Words</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredFindings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTime}s</div><div class="ra-dash-stat-lbl">Time</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${failedSteps===0?'🟢 High':failedSteps<=2?'🟡 Moderate':failedSteps<=4?'🟠 Limited':'🔴 Low'}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val" style="color:${qualityColor}">${qualityScore}</div><div class="ra-dash-stat-lbl">Quality</div></div>
           </div>`;
+          // Quality gauge section
+          dashHtml+=`<div class="ra-quality-section"><div class="ra-quality-hd">📊 Research Quality Score</div><div class="ra-quality-body"><div class="ra-quality-gauge"><svg viewBox="0 0 120 120" width="110" height="110"><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="var(--border)" stroke-width="${_qstroke}" stroke-dasharray="${_qarcLen} ${_qcirc-_qarcLen}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round"/><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="${qualityColor}" stroke-width="${_qstroke}" stroke-dasharray="${_qdashArr}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round" class="ra-quality-gauge-fill"/><text x="${_qcx}" y="${_qcy-4}" text-anchor="middle" fill="${qualityColor}" font-size="24" font-weight="800" font-family="var(--mono)">${qualityScore}</text><text x="${_qcx}" y="${_qcy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div style="text-align:center;margin-top:4px;font-size:11px;font-weight:700;color:${qualityColor}">${qualityLabel}</div></div><div class="ra-quality-breakdown">`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">📚 Sources</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_srcScore/30*100)}%;background:#8b5cf6"></div></div><span class="ra-quality-item-val">${discoveredSources.length}/25</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">✅ Coverage</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_stpScore/25*100)}%;background:#22c55e"></div></div><span class="ra-quality-item-val">${totalSteps-failedSteps}/${totalSteps}</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">📝 Depth</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_wrdScore/25*100)}%;background:#3b82f6"></div></div><span class="ra-quality-item-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">💡 Findings</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_fndScore/20*100)}%;background:#f59e0b"></div></div><span class="ra-quality-item-val">${discoveredFindings.length}/15</span></div>`;
+          dashHtml+=`</div></div></div>`;
+          // Source diversity
+          if(topDomains.length>0){
+            dashHtml+=`<div class="ra-diversity-section"><div class="ra-diversity-hd">🌐 Source Diversity</div><div class="ra-diversity-grid">`;
+            topDomains.forEach(([domain,count])=>{
+              const pct=Math.round((count/maxDomainCount)*100);
+              dashHtml+=`<div class="ra-diversity-row"><img class="ra-diversity-favicon" src="https://www.google.com/s2/favicons?domain=${esc(domain)}&sz=32" alt="" onerror="this.style.display='none'"><span class="ra-diversity-domain">${esc(domain)}</span><div class="ra-diversity-bar-track"><div class="ra-diversity-bar-fill" style="width:${pct}%"></div></div><span class="ra-diversity-count">${count}</span></div>`;
+            });
+            dashHtml+=`</div></div>`;
+          }
+          // Top findings preview
+          if(discoveredFindings.length){
+            dashHtml+=`<div class="ra-dash-findings"><div class="ra-dash-findings-hd">💡 Key Findings <span style="font-weight:400;color:var(--text-muted)">(${discoveredFindings.length})</span></div>`;
+            discoveredFindings.slice(0,5).forEach(f=>{
+              const fIcon=stepIcons[(f.step||1)-1]||'📄';
+              const fText=f.text||'';
+              dashHtml+=`<div class="ra-dash-finding-mini"><span class="ra-dash-finding-icon">${fIcon}</span><span class="ra-dash-finding-text">${esc(fText.length>120?fText.slice(0,120)+'…':fText)}</span></div>`;
+            });
+            dashHtml+=`</div>`;
+          }
           // Step timing chart
           if(durations.length){
             dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">⏱️ Step Performance</div><div class="ra-timing-chart">`;
             durations.forEach(d=>{
               const pct=Math.round((d.elapsed/maxDur)*100);
-              dashHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
+              const sIcon=stepIcons[(d.step||1)-1]||'📄';
+              dashHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${sIcon} ${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
             });
             dashHtml+=`</div></div>`;
           }
@@ -2530,7 +2645,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
           // Action bar
           const actionBar=document.createElement('div');
           actionBar.className='ra-actions';
-          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-researching...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){var b=event.target;b.textContent='✓ Copied!';setTimeout(function(){b.textContent='📋 Copy Report'},1500)})})(this)">📋 Copy Report</button>`;
+          window._raCopyReport=function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){})};
+          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-researching...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='✓ Copied!';setTimeout(function(){btn.textContent='📋 Copy Report'},1500)})(this)">📋 Copy Report</button>`;
 
           // Update badge
           const badge=document.getElementById('_raBadge');
@@ -2585,23 +2701,35 @@ function buildSentimentGauge(rating){
   if(!rating)return'';
   const pct=Math.max(0,Math.min(100,rating.score));
   const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
-  return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Analyst Sentiment</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${esc(rating.label)}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Lean Sell</span><span>Hold</span><span>Lean Buy</span><span>Buy</span><span>Strong Buy</span></div></div><div class="sa-gauge-score" style="text-align:center;margin-top:4px;font-size:13px;color:${color};font-weight:600">${pct}/100</div></div></div>`;
+  const bgGrad=pct>=75?'linear-gradient(135deg,rgba(34,197,94,.08),rgba(34,197,94,.02))':pct>=45?'linear-gradient(135deg,rgba(234,179,8,.08),rgba(234,179,8,.02))':'linear-gradient(135deg,rgba(239,68,68,.08),rgba(239,68,68,.02))';
+  // SVG arc gauge
+  const r=54,cx=60,cy=60,stroke=8;
+  const circ=2*Math.PI*r;
+  const arcLen=circ*0.75; // 270 degrees
+  const filled=arcLen*(pct/100);
+  const dashArr=`${filled} ${arcLen-filled}`;
+  return`<div class="sa-extras"><div class="sa-gauge-wrap" style="background:${bgGrad}"><div class="sa-gauge-title">📊 Overall Sentiment</div><div class="sa-gauge-arc"><svg viewBox="0 0 120 120" width="120" height="120"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-dasharray="${arcLen} ${circ-arcLen}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${dashArr}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round" class="sa-gauge-arc-fill"/><text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="24" font-weight="800" font-family="var(--mono)">${pct}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div class="sa-gauge-verdict" style="color:${color}">${esc(rating.label)}</div></div><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`; 
 }
 
 function buildGrowthChart(stockDataArr){
   if(!stockDataArr||!stockDataArr.length)return'';
-  let html='<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Growth Metrics</div>';
+  let html='<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Key Metrics Comparison</div>';
   for(const sd of stockDataArr){
     const ticker=sd.ticker||'?';
+    const h=sd.health||{};
+    const p=sd.perf||{};
     html+=`<div class="sa-growth-ticker"><div class="sa-growth-ticker-label">${esc(ticker)}</div>`;
     const metrics=[
-      {label:'Revenue Growth',key:'revenueGrowth'},
-      {label:'Earnings Growth',key:'earningsGrowth'},
+      {label:'Revenue Growth',key:'revenueGrowth',src:h},
+      {label:'Earnings Growth',key:'earningsGrowth',src:h},
+      {label:'Profit Margin',key:'profitMargin',src:h},
+      {label:'ROE',key:'returnOnEquity',src:h},
+      {label:'YTD Performance',key:'ytd',src:p,isRaw:true},
     ];
     for(const m of metrics){
-      const raw=sd[m.key];
+      const raw=m.src[m.key];
       if(raw==null||raw===undefined)continue;
-      const val=typeof raw==='number'?raw*100:parseFloat(raw);
+      const val=m.isRaw?(typeof raw==='number'?raw:parseFloat(raw)):(typeof raw==='number'?raw*100:parseFloat(raw));
       if(isNaN(val))continue;
       const clamped=Math.max(-100,Math.min(100,val));
       const barPct=Math.abs(clamped)/2;
@@ -2617,13 +2745,14 @@ function buildGrowthChart(stockDataArr){
 
 // ─── Stock Analysis Agent ─────────────────────────
 async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId){
-  const stepIcons=['📊','📰','📉','💰','🔬','⚠️','🎯','🏆'];
-  const stepNames=['Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Final Verdict'];
-  const totalSteps=8;
+  const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠️','🎯','🔎','🏆'];
+  const stepNames=['Stock Screening','Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Winner Deep Dive','Final Verdict'];
+  const totalSteps=10;
   let currentStep=0;
   const stepTimers={};
   const stepElapsed={};
   const manualToggles=new Set();
+  const completedSteps=new Set();
   window._saManualToggles=manualToggles;
   let startTime=Date.now();
 
@@ -2652,10 +2781,22 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
   chatArea.scrollTop=chatArea.scrollHeight;
 
   const elTimer=setInterval(()=>{
-    const el=document.getElementById('_saMsg');
-    if(el&&currentStep>0){
+    // Live elapsed timer per active step
+    for(const[s,st] of Object.entries(stepTimers)){
+      if(!completedSteps.has(+s)){
+        const dur=((Date.now()-st)/1000).toFixed(1);
+        const tEl=document.getElementById('_saT'+s);
+        if(tEl) tEl.textContent=dur+'s';
+      }
+    }
+    // Update total elapsed
+    const totalEl=document.getElementById('_saMsg');
+    if(totalEl&&currentStep>0){
       const t=((Date.now()-startTime)/1000|0);
-      // keep activity message current
+      const mins=Math.floor(t/60);
+      const secs=t%60;
+      const timeStr=mins>0?mins+'m '+secs+'s':t+'s';
+      totalEl.textContent=stepNames[currentStep]?stepIcons[currentStep]+' '+stepNames[currentStep]+'... ('+timeStr+')':'Working... ('+timeStr+')';
     }
   },1000);
 
@@ -2688,9 +2829,12 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     const stepsEl=document.getElementById('_saSteps');
     if(stepsEl){
       stepsEl.querySelectorAll('.sa-step').forEach((dot,i)=>{
-        dot.className='sa-step'+(i<step?' done':(i===step?' active':''));
+        const stepNum=i+1;
+        const isDone=completedSteps.has(stepNum);
+        const isActive=stepNum===step+1||(stepNum===step&&!isDone);
+        dot.className='sa-step'+(isDone?' done':(isActive?' active':''));
         const inner=dot.querySelector('.sa-step-dot');
-        if(inner) inner.textContent=i<step?'✓':stepIcons[i];
+        if(inner) inner.textContent=isDone?'✓':stepIcons[i];
       });
     }
   };
@@ -2751,6 +2895,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             currentContentEl=section.querySelector('.sa-step-content');
             chatArea.scrollTop=chatArea.scrollHeight;
           }else if(ev.status==='complete'){
+            completedSteps.add(ev.step);
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
@@ -2785,7 +2930,11 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(thEl){
             thEl.style.display='';
             const thC=document.getElementById('_saThinkC'+ev.step);
-            if(thC) thC.textContent=stepThinking;
+            if(thC){
+              thC.innerHTML=_fmtThink(stepThinking);
+              const _ltpBody=thC.parentElement;
+              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+            }
           }
         }else if(ev.type==='agent_delta'){
           stepContent+=ev.text;
@@ -2815,6 +2964,24 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const overview=document.createElement('div');
             overview.className='sa-overview-card sa-slide-in';
             let ovHtml='';
+
+            // Mini stock cards summary
+            if(stockDataArray&&stockDataArray.length){
+              ovHtml+='<div class="sa-mini-cards">';
+              for(const sd of stockDataArray){
+                if(sd.error)continue;
+                const up=(sd.change||0)>=0;
+                const arrow=up?'▲':'▼';
+                const cls=up?'stock-up':'stock-down';
+                const hs=sd.health&&sd.health.score;
+                const hColor=hs!=null?(hs>=65?'#22c55e':hs>=40?'#eab308':'#ef4444'):'var(--text-muted)';
+                const vLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[sd.verdict||'hold']||'HOLD';
+                const vCls={buy:'sa-mini-buy',hold:'sa-mini-hold',sell:'sa-mini-sell'}[sd.verdict||'hold']||'sa-mini-hold';
+                ovHtml+=`<div class="sa-mini-card ${vCls}"><div class="sa-mini-card-head"><span class="sa-mini-ticker">${esc(sd.ticker||'?')}</span><span class="sa-mini-verdict">${vLabel}</span></div><div class="sa-mini-price">$${(sd.price||0).toFixed(2)} <span class="${cls}">${arrow} ${Math.abs(sd.changePct||0).toFixed(2)}%</span></div>${hs!=null?`<div class="sa-mini-health"><span>Health Score</span><span style="color:${hColor};font-weight:700">${hs}/100</span></div>`:''}</div>`;
+              }
+              ovHtml+='</div>';
+            }
+
             if(gaugeHtml) ovHtml+=gaugeHtml;
             if(chartHtml) ovHtml+=chartHtml;
             if(sentences) ovHtml+=`<div class="sa-summary"><div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div></div>`;
@@ -2966,6 +3133,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
 
     // ── Technical indicators ──
     const p=d.perf||{};
+    const tc=d.technicals||{};
     const techItems=[];
     if(p.sma50!=null)techItems.push(`<span class="stock-tech-item">SMA50: <b class="${d.price>=p.sma50?'stock-up':'stock-down'}">$${p.sma50.toFixed(2)}</b></span>`);
     if(p.sma200!=null)techItems.push(`<span class="stock-tech-item">SMA200: <b class="${d.price>=p.sma200?'stock-up':'stock-down'}">$${p.sma200.toFixed(2)}</b></span>`);
@@ -2974,7 +3142,23 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       const rsiLabel=p.rsi>70?'Overbought':p.rsi<30?'Oversold':'Neutral';
       techItems.push(`<span class="stock-tech-item">RSI(14): <b class="${rsiCls}">${p.rsi} (${rsiLabel})</b></span>`);
     }
-    let techHtml=techItems.length?`<div class="stock-tech-row">${techItems.join('')}</div>`:'';
+    if(tc.macd!=null){
+      const macdUp=tc.macd_histogram>0;
+      techItems.push(`<span class="stock-tech-item">MACD: <b class="${macdUp?'stock-up':'stock-down'}">${tc.macd.toFixed(2)}</b> <small style="opacity:.7">(${macdUp?'▲ bullish':'▼ bearish'})</small></span>`);
+    }
+    if(tc.bb_pctb!=null){
+      const bbCls=tc.bb_pctb>0.8?'stock-down':tc.bb_pctb<0.2?'stock-up':'stock-neutral';
+      const bbLabel=tc.bb_pctb>0.8?'Near upper':tc.bb_pctb<0.2?'Near lower':'Mid-band';
+      techItems.push(`<span class="stock-tech-item">BB %B: <b class="${bbCls}">${(tc.bb_pctb*100).toFixed(0)}% (${bbLabel})</b></span>`);
+    }
+    if(tc.atr_pct!=null){
+      techItems.push(`<span class="stock-tech-item">ATR%: <b>${tc.atr_pct.toFixed(1)}%</b> <small style="opacity:.7">(${tc.atr_pct>3?'High':'Normal'} vol)</small></span>`);
+    }
+    if(tc.stoch_rsi!=null){
+      const srCls=tc.stoch_rsi>80?'stock-down':tc.stoch_rsi<20?'stock-up':'stock-neutral';
+      techItems.push(`<span class="stock-tech-item">StochRSI: <b class="${srCls}">${tc.stoch_rsi.toFixed(0)}</b></span>`);
+    }
+    let techHtml=techItems.length?`<div class="stock-tech-section"><span class="stock-section-title">Technical Indicators</span><div class="stock-tech-row">${techItems.join('')}</div></div>`:'';
 
     // ── 52-week position ──
     let pos52Html='';
@@ -3003,13 +3187,24 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     // ── Analyst targets ──
     let targetHtml='';
     if(d.targetPrice){
-      const tParts=[`Target: <b>$${d.targetPrice.toFixed(2)}</b>`];
-      if(d.targetLow!=null) tParts.push(`Low: $${d.targetLow.toFixed(2)}`);
-      if(d.targetHigh!=null) tParts.push(`High: $${d.targetHigh.toFixed(2)}`);
       const upside=((d.targetPrice-d.price)/d.price*100).toFixed(1);
       const uCls=upside>=0?'stock-up':'stock-down';
-      tParts.push(`<span class="${uCls}">(${upside>=0?'+':''}${upside}% upside)</span>`);
-      targetHtml=`<div class="stock-analyst-target">${tParts.join(' · ')}</div>`;
+      const barMin=d.targetLow||d.price*0.8;
+      const barMax=d.targetHigh||d.price*1.2;
+      const range=barMax-barMin||1;
+      const pricePct=Math.max(0,Math.min(100,((d.price-barMin)/range)*100));
+      const meanPct=Math.max(0,Math.min(100,((d.targetPrice-barMin)/range)*100));
+      targetHtml=`<div class="stock-target-section"><span class="stock-section-title">Analyst Price Targets${d.numAnalysts?' ('+d.numAnalysts+' analysts)':''}</span>`
+        +`<div class="stock-target-bar-wrap">`
+          +`<span class="stock-target-lo">$${barMin.toFixed(0)}</span>`
+          +`<div class="stock-target-track">`
+            +`<div class="stock-target-current" style="left:${pricePct}%"><div class="stock-target-dot stock-target-dot-current"></div><span class="stock-target-price-label">$${d.price.toFixed(2)}</span></div>`
+            +`<div class="stock-target-mean" style="left:${meanPct}%"><div class="stock-target-dot stock-target-dot-mean"></div><span class="stock-target-price-label" style="color:var(--accent)">$${d.targetPrice.toFixed(2)}</span></div>`
+          +`</div>`
+          +`<span class="stock-target-hi">$${barMax.toFixed(0)}</span>`
+        +`</div>`
+        +`<div class="stock-target-upside ${uCls}">${upside>=0?'+':''}${upside}% upside to mean target</div>`
+      +`</div>`;
     }
 
     // ── Earnings ──
@@ -3050,6 +3245,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       +`<div class="stock-card-footer">`
         +earningsHtml
         +`${d.sector?`<span class="stock-sector">${esc(d.sector)}${d.industry?' · '+esc(d.industry):''}</span>`:''}`
+        +`<a class="stock-yahoo-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener">Yahoo Finance ↗</a>`
       +`</div>`;
   }catch(e){
     if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ Failed to load stock data for ${esc(ticker)}</div>`;
@@ -3249,39 +3445,12 @@ function submitAllChoices(btn){
   sendQ(parts.join('\n'));
 }
 
-function _detectTruncation(text){
-  if(!text||text.length<200)return false;
-  const t=text.trim();
-  // Unclosed code blocks (odd number of ```)
-  const fenceCount=(t.match(/```/g)||[]).length;
-  if(fenceCount%2!==0)return true;
-  // Unclosed special tags
-  const openTags=['<<<CODE_EXECUTE','<<<FILE_CREATE','<<<FILE_UPDATE','<<<CHOICES>>>'];
-  const closeTags=['<<<END_CODE>>>','<<<END_FILE>>>','<<<END_FILE>>>','<<<END_CHOICES>>>'];
-  for(let i=0;i<openTags.length;i++){
-    const opens=(t.match(new RegExp(openTags[i].replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length;
-    const closes=(t.match(new RegExp(closeTags[i].replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length;
-    if(opens>closes)return true;
-  }
-  // Ends with obvious mid-sentence indicators
-  const lastLine=t.split('\n').pop().trim();
-  if(lastLine&&/[,;:\-–—]$/.test(lastLine))return true;
-  // Ends mid-word or mid-sentence (no sentence-ending punctuation)
-  if(lastLine&&lastLine.length>20&&!/[.!?)\]"'…]$/.test(lastLine))return true;
-  // Numbered list that seems incomplete (ends with a number item, likely more coming)
-  const lines=t.split('\n').filter(l=>l.trim());
-  const lastThree=lines.slice(-3);
-  const numberedCount=lastThree.filter(l=>/^\s*\d+[.)]\s/.test(l)).length;
-  if(numberedCount>=2)return true;
-  // Sentences like "Stand by." or "Here's" or "I'll now" that promise more content
-  if(/(?:stand by|here (?:is|are|comes)|i(?:'ll| will| am going to) (?:now|next)|let me|coming up|let's (?:start|continue|move|look)|first,|next,)[.\s]*$/i.test(lastLine))return true;
-  return false;
-}
-
 function stripMetaBlocks(text){
   return (text||'')
     .replace(/<<<THINKING>>>[\s\S]*?(<<<END_THINKING>>>|$)/g,'')
     .replace(/<<<THINKING[\s\S]*$/g,'')
+    .replace(/<<<\/?END_THINKING\/?>>>/g,'')
+    .replace(/<<<\/?THINKING\/?>>>/g,'')
     .replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?(<<<END_CHOICES>>>|$)/g,'')
     .replace(/<<<IMAGE_SEARCH:\s*.+?>>>/g,'')
     .replace(/%%%IMAGE_SEARCH:\s*.+?(?:>>>|%%%)/g,'')
@@ -3346,10 +3515,16 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;STOCK:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/%%%STOCKBLOCK:\d+%%%/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
-  // Completed CODE_EXECUTE blocks — hide raw tags, show placeholder
-  html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Executing code...</div>');
-  // Unclosed CODE_EXECUTE block (still streaming)
-  html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*\w+&gt;&gt;&gt;[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">⚙️</span> Writing code to execute...</div>');
+  // Completed CODE_EXECUTE blocks — show code + executing indicator
+  html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
+    const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
+    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙️</span> '+esc(langLabel)+' — Running...</div><pre class="stream-code-exec-body"><code>'+code+'</code></pre><div class="stream-code-exec-status"><div class="dots"><span></span><span></span><span></span></div> Executing...</div></div>';
+  });
+  // Unclosed CODE_EXECUTE block (still streaming) — show the code being written
+  html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*)$/,(_,lang,code)=>{
+    const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
+    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙️</span> Writing '+esc(langLabel)+' code...</div><pre class="stream-code-exec-body"><code>'+code+'</code><span class="stream-cursor"></span></pre></div>';
+  });
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){
     html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating mind map...</div>');
@@ -3515,15 +3690,16 @@ async function openArtifact(id){
 async function sendMessage(opts){
   const _silent=opts&&opts.silent;
   const _noThinking=opts&&opts.noThinking;
+  // Allow background reprompt/continue to target a specific chat
+  const _targetChat=opts&&opts.targetChat;
   const input=document.getElementById('msgInput');
   const text=(opts&&opts.message)?opts.message:input.value.trim();
   if(!text&&!pendingFiles.length&&!pendingReplies.length)return;
-  // Reset continue counter when user sends a new (non-continue) message
-  if(!_silent&&!text.startsWith('Continue')){_continueCount=0;_codeRepromptCount=0;}
-  if(curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
+  if(!_silent){_codeRepromptCount=0;}
+  if(!_targetChat&&curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
   let _isFirstMessage=false;
-  if(!curChat){
+  if(!_targetChat&&!curChat){
     try{
       const cr=await apiFetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:_activeFolderView||pendingFolder||''})});
       const cc=await cr.json();
@@ -3550,9 +3726,12 @@ async function sendMessage(opts){
       }).catch(()=>{});
     }catch(e){showToast('Failed to create chat: '+e.message,'error');return;}
   }
-  const targetChatId=curChat;
+  const targetChatId=_targetChat||curChat;
 
-  const w=document.querySelector('#chatArea .welcome');
+  // For background reprompt/continue targeting a different chat, skip all DOM work
+  const _isBackground=!!(_targetChat&&_targetChat!==curChat);
+
+  const w=!_isBackground&&document.querySelector('#chatArea .welcome');
   if(w){
     // Choreographed exit: widgets shrink first, then hero fades
     const widgets=w.querySelectorAll('.wl-widget');
@@ -3628,9 +3807,14 @@ async function sendMessage(opts){
 
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
-  msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
-  area.appendChild(msgDiv);_autoScroll();
-  startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
+  if(_silent){
+    // Silent/auto-reprompt: minimal indicator, no "Thinking..." animation
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
+  }else{
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
+  }
+  if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
+  if(!_silent)startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
   let _renderScheduled=false;
@@ -3671,8 +3855,12 @@ async function sendMessage(opts){
       messageToSend=canvasPrefix+messageToSend;
     }
 
+    const _truncateAt=window._editTruncateAt;
+    delete window._editTruncateAt;
+    const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
+    if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:messageToSend,raw_text:text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_continue:!!(opts&&opts.isContinue),user_location:getUserLocation(),reminders:_getPendingReminders()}),signal:controller.signal});
+      body:JSON.stringify(_bodyObj),signal:controller.signal});
 
     const ct=response.headers.get('content-type')||'';
     if(ct.includes('application/json')){
@@ -3708,7 +3896,6 @@ async function sendMessage(opts){
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
     let buffer='',fullText='',thinkText='',isThinking=false;
-    let _pendingContinueAfterOps=false;
     let _genFailures=[];
     // ── Mid-stream media loading state ──
     let _mediaLoadingCount=0;     // How many media items are currently loading
@@ -3825,6 +4012,7 @@ async function sendMessage(opts){
                   targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
                 }else{
                   targetEl.innerHTML=fmtLive(fullText);
+                  renderMathInElementSafe(targetEl);
                 }
                 _autoScroll();
               });
@@ -3843,11 +4031,14 @@ async function sendMessage(opts){
                 if(_doneReceived||!canRender())return;
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 targetEl.innerHTML=fmtLive(fullText);
+                renderMathInElementSafe(targetEl);
                 _autoScroll();
               });
             }
           }else if(data.type==='done'){
             _doneReceived=true;
+            // Immediately mark chat as not running so UI updates (stop button → send button)
+            {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse live thinking panel if present
             if(thinkPanel){
               thinkPanel.classList.add('ltp-done');
@@ -3866,17 +4057,20 @@ async function sendMessage(opts){
             await new Promise(r=>setTimeout(r,150));
             let finalHTML='';
             let displayReply=data.reply||'';
-            // If we already showed thinking live, use it for the think block
+            // Extract thinking from reply if not already streamed live
+            let _replyThinkText='';
+            if(!thinkText){
+              const thinkMatch=displayReply.match(/<<<THINKING>>>([\s\S]*?)<<<END_THINKING>>>/);
+              if(thinkMatch) _replyThinkText=thinkMatch[1].trim();
+            }
+            // Always strip thinking tags from display reply
+            displayReply=displayReply.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'').replace(/<<<\/?THINKING\/?>>>/g,'').replace(/<<<\/?END_THINKING\/?>>>/g,'').trim();
+            // Render think block from live stream or from reply
             if(thinkText){
               finalHTML+=renderThinkBlock(thinkText);
-            } else if(displayReply.includes('<<<THINKING>>>')&&displayReply.includes('<<<END_THINKING>>>')){
-              const parts=displayReply.split('<<<END_THINKING>>>');
-              const thinkPart=parts[0].replace('<<<THINKING>>>','').trim();
-              displayReply=parts.slice(1).join('<<<END_THINKING>>>').trim();
-              finalHTML+=renderThinkBlock(thinkPart);
+            } else if(_replyThinkText){
+              finalHTML+=renderThinkBlock(_replyThinkText);
             }
-            // Strip thinking tags from reply if still present
-            displayReply=displayReply.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'').replace(/<<<\/?THINKING\/?>>>/g,'').trim();
             // Parse all choice blocks (supports multiple sequential questions)
             const choiceBlockRe=/(?:<<<QUESTION:(.*?)>>>\n)?<<<CHOICES(?:\|multi)?>>>\n([\s\S]*?)<<<END_CHOICES>>>/g;
             let choiceBlockMatch;
@@ -3886,20 +4080,8 @@ async function sendMessage(opts){
               choiceBlocks.push({question:(choiceBlockMatch[1]||'').trim(),choices:choiceBlockMatch[2].trim().split('\n').filter(c=>c.trim()),multi:isMulti});
             }
             displayReply=displayReply.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
-            // Detect <<<CONTINUE>>> tag — AI wants to chain another message
-            let shouldContinue=false;
-            // Check backend flag (reliable — detected before clean_response strips tags)
-            if(data.should_continue){
-              shouldContinue=true;
-            }
-            // Fallback: check raw accumulated stream text
-            if(!shouldContinue&&fullText&&fullText.includes('<<<CONTINUE>>>')){
-              shouldContinue=true;
-            }
-            if(displayReply.includes('<<<CONTINUE>>>')){
-              shouldContinue=true;
-              displayReply=displayReply.replace(/<<<CONTINUE>>>/g,'').trim();
-            }
+            // Strip any continuation markers from visible output
+            displayReply=displayReply.replace(/<<<CONTINUE>>>/g,'').trim();
             if(devRawMode){
               // In dev raw mode, show the full unprocessed AI response with all tags
               finalHTML+='<pre class="dev-raw-log">'+esc(fullText||data.reply||displayReply)+'</pre>';
@@ -4077,6 +4259,7 @@ async function sendMessage(opts){
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
               contentEl.innerHTML=finalHTML;
+              renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               // Animate content in smoothly
               contentEl.style.opacity='0';
@@ -4134,7 +4317,6 @@ async function sendMessage(opts){
             // so it can respond accurately (present files on success, debug on failure)
             if(data.code_auto_reprompt&&_codeRepromptCount<_MAX_CODE_REPROMPTS){
               _codeRepromptCount++;
-              shouldContinue=false; // code reprompt takes priority over auto-continue
               const summary=data.code_execution_summary||'Code execution completed.';
               let repromptMsg;
               if(data.code_all_success){
@@ -4143,60 +4325,15 @@ async function sendMessage(opts){
                 repromptMsg=`[SYSTEM] Code execution FAILED. Results:\n${summary}\n\nThe code you wrote failed to execute. Do NOT claim it was successful. Analyze the error, explain what went wrong to the user, and provide a corrected version of the code using <<<CODE_EXECUTE: python>>>...<<<END_CODE>>> tags.`;
               }
               setStatus(data.code_all_success?'Code executed — presenting results...':'Code failed — retrying...');
+              const _repromptChatId=targetChatId;
               setTimeout(()=>{
-                const inp=document.getElementById('msgInput');
-                inp.value=repromptMsg;
-                sendMessage({silent:true,noThinking:data.code_all_success});
+                sendMessage({silent:true,noThinking:data.code_all_success,message:repromptMsg,targetChat:_repromptChatId});
               },800);
             }
-            // Auto-continue if AI signaled <<<CONTINUE>>> or if the response was truncated
-            // NEVER auto-continue when choice blocks are present — user needs to answer first
-            // Skip auto-continue if code reprompt is handling the follow-up
-            const _codeReprompting=data.code_auto_reprompt&&_codeRepromptCount<=_MAX_CODE_REPROMPTS;
-            if(choiceBlocks.length||_codeReprompting){
-              shouldContinue=false;
-            }
-            // If gen ops are pending, defer continue decision until gen_ops_complete event
-            if(data.continue_after_ops&&!_codeReprompting){
-              // Don't continue yet — wait for gen_ops_complete event
-              _pendingContinueAfterOps=true;
-              shouldContinue=false;
-              setStatus('Generating content...');
-            }
-            if(!shouldContinue&&!choiceBlocks.length&&!_pendingContinueAfterOps){
-              shouldContinue=_detectTruncation(displayReply);
-            }
-            if(shouldContinue&&_continueCount<_MAX_CONTINUES){
-              _continueCount++;
-              setStatus(`Continuing... (${_continueCount})`);
-              setTimeout(()=>{
-                sendMessage({silent:true,noThinking:true,isContinue:true,message:'Continue where you left off. Pick up exactly where you stopped.'});
-              },600);
-            }else if(!_pendingContinueAfterOps&&!_codeReprompting){
-              _continueCount=0;
-              setStatus('Done. Ask a follow-up or start something new.');
-            }
+            setStatus('Done. Ask a follow-up or start something new.');
             // If user navigated away and back, reload the chat so they see the response
             if(curChat===targetChatId&&!msgDiv.isConnected){
               openChat(targetChatId);
-            }
-          }else if(data.type==='suggested_question'){
-            // Streamed follow-up question — appears one at a time after done
-            if(canRender()&&!devRawMode){
-              let wrap=contentEl.querySelector('.sq-wrap');
-              if(!wrap){
-                wrap=document.createElement('div');
-                wrap.className='sq-wrap';
-                wrap.innerHTML='<div class="sq-label">💬 Follow up</div><div class="sq-list"></div>';
-                contentEl.appendChild(wrap);
-              }
-              const list=wrap.querySelector('.sq-list');
-              const chip=document.createElement('button');
-              chip.className='sq-chip sq-chip-in';
-              chip.textContent=data.question;
-              chip.onclick=()=>{const inp=document.getElementById('msgInput');if(inp){inp.value=data.question;sendMessage()}};
-              list.appendChild(chip);
-              _autoScroll();
             }
           }else if(data.type==='error'){
             if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">${esc(data.error)}</div>`;
@@ -4364,8 +4501,6 @@ async function sendMessage(opts){
             // Stock agent: run multi-step analysis instead of simple reprompt
             if(data.stock_reprompt&&!_genFailures.length){
               setChatRunning(targetChatId,false);
-              _continueCount=0;
-              _pendingContinueAfterOps=false;
               setStatus('Running stock analysis agent...');
               // Collect the fetched stock data objects for the agent
               const agentStockData=[];
@@ -4406,9 +4541,7 @@ async function sendMessage(opts){
               }else{
                 // Fallback: simple reprompt if we couldn't collect stock data objects
                 try{
-                  const inp=document.getElementById('msgInput');
-                  inp.value=`[SYSTEM] Stock data has been loaded. Here is the live data from Yahoo Finance for the stocks you just displayed:\n\n${data.stock_reprompt}\n\nNow analyze this data for the user. Reference the ACTUAL numbers shown above. The stock cards are already visible to the user — do NOT re-embed <<<STOCK>>> tags. Instead, provide a thorough analysis based on the real data. Include the mandatory disclaimer.`;
-                  sendMessage({silent:true,noThinking:true});
+                  sendMessage({silent:true,noThinking:true,message:`[SYSTEM] Stock data has been loaded. Here is the live data from Yahoo Finance for the stocks you just displayed:\n\n${data.stock_reprompt}\n\nNow analyze this data for the user. Reference the ACTUAL numbers shown above. The stock cards are already visible to the user — do NOT re-embed <<<STOCK>>> tags. Instead, provide a thorough analysis based on the real data. Include the mandatory disclaimer.`,targetChat:targetChatId});
                 }catch(_){}
               }
               return; // skip the normal gen_ops_complete handling below
@@ -4420,27 +4553,10 @@ async function sendMessage(opts){
                 return `Image search failed for "${f.query}"`;
               });
               setChatRunning(targetChatId,false);
-              _continueCount=0;
-              _pendingContinueAfterOps=false;
               setStatus('Some operations failed.');
               try{
-                const inp=document.getElementById('msgInput');
-                inp.value=`[SYSTEM] The following operations failed:\n${failMsgs.join('\n')}\n\nPlease acknowledge the failures to the user. Do NOT retry automatically. Let them know what happened and suggest they try again if they want.`;
-                sendMessage({silent:true,noThinking:true});
+                sendMessage({silent:true,noThinking:true,message:`[SYSTEM] The following operations failed:\n${failMsgs.join('\n')}\n\nPlease acknowledge the failures to the user. Do NOT retry automatically. Let them know what happened and suggest they try again if they want.`,targetChat:targetChatId});
               }catch(_){}
-            }else if(_pendingContinueAfterOps){
-              // All ops succeeded — now safe to continue
-              _pendingContinueAfterOps=false;
-              if(_continueCount<_MAX_CONTINUES){
-                _continueCount++;
-                setStatus(`Continuing... (${_continueCount})`);
-                setTimeout(()=>{
-                  sendMessage({silent:true,noThinking:true,isContinue:true,message:'Continue where you left off. Pick up exactly where you stopped.'});
-                },600);
-              }else{
-                _continueCount=0;
-                setStatus('Done. Ask a follow-up or start something new.');
-              }
             }else{
               // No pending continue, just mark done
               setStatus('Done. Ask a follow-up or start something new.');
@@ -4543,6 +4659,8 @@ function addMsg(role,text,files,extra={}){
     displayText=parts.slice(1).join('<<<END_THINKING>>>').trim();
     html+=renderThinkBlock(thinkPart);
   }
+  // Strip any remaining thinking tags
+  displayText=displayText.replace(/<<<\/?THINKING\/?>>>/g,'').replace(/<<<\/?END_THINKING\/?>>>/g,'').trim();
   // Parse all choice blocks (supports multiple sequential questions)
   const choiceBlockRe2=/(?:<<<QUESTION:(.*?)>>>\n)?<<<CHOICES(?:\|multi)?>>>\n([\s\S]*?)<<<END_CHOICES>>>/g;
   let cbm2;
@@ -4607,13 +4725,14 @@ function addMsg(role,text,files,extra={}){
     for(const ir of extra.image_results){
       imgMap[ir.index]=renderImageBlock(ir);
     }
+    // Check for placeholders BEFORE replacing so we know if inline placement worked
+    const hadPlaceholders=/%%%IMGBLOCK:\d+%%%/.test(html);
     html=html.replace(/<p>\s*%%%IMGBLOCK:(\d+)%%%\s*<\/p>|%%%IMGBLOCK:(\d+)%%%/g,(match,idx1,idx2)=>{
       const idx=parseInt(idx1||idx2,10);
       return imgMap[idx]||'';
     });
-    // If placeholders were already stripped (clean_response removed tags), append images at end
-    const hasPlaceholders=/%%%IMGBLOCK:\d+%%%/.test(html);
-    if(!hasPlaceholders){
+    // Only append at end if there were NO placeholders to replace
+    if(!hadPlaceholders){
       for(const ir of extra.image_results){
         html+=renderImageBlock(ir);
       }
@@ -4801,14 +4920,10 @@ function addMsg(role,text,files,extra={}){
         html+=fmt(displayText);
       }
     }
-    // Suggested follow-up questions (from history)
-    if(extra.suggested_questions?.length){
-      html+=`<div class="sq-wrap"><div class="sq-label">💬 Follow up</div><div class="sq-list">${extra.suggested_questions.map(q=>`<button class="sq-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div></div>`;
-    }
     html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
   }
   div.dataset.text=text||'';
-  div.innerHTML=html;area.appendChild(div);area.scrollTop=area.scrollHeight;
+  div.innerHTML=html;renderMathInElementSafe(div);area.appendChild(div);area.scrollTop=area.scrollHeight;
 }
 
 function addThinking(){
@@ -5088,6 +5203,26 @@ function fmt(text){
   if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
   t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
+  // Timeline blocks: ```timeline\ndate | title | description\n```
+  t=t.replace(/```timeline\n([\s\S]*?)```/g,(_,c)=>{
+    const raw=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').trim();
+    const lines=raw.split('\n').filter(l=>l.trim());
+    let html='<div class="timeline">';
+    for(const line of lines){
+      const parts=line.split('|').map(p=>p.trim());
+      if(parts.length>=2){
+        const date=parts[0];
+        const title=parts[1];
+        const desc=parts[2]||'';
+        html+=`<div class="timeline-item"><div class="timeline-date">${date}</div><div class="timeline-title">${title}</div>${desc?`<div class="timeline-desc">${desc}</div>`:''}</div>`;
+      } else if(parts[0]){
+        html+=`<div class="timeline-item"><div class="timeline-title">${parts[0]}</div></div>`;
+      }
+    }
+    html+='</div>';
+    blocks.push(html);
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
   t=t.replace(/```mermaid\n([\s\S]*?)```/g,(_,c)=>{
     let restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').trim();
     // Sanitize mindmap source to fix common syntax issues

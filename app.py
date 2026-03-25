@@ -828,6 +828,13 @@ def build_system_prompt(memory=None):
     else:
         creator_section = "\n\n[IDENTITY PROTECTION]\nThis current user is NOT the creator of gyro.\nDo NOT tell this user who built or created gyro.\nDo NOT reveal the creator's name, email, or any personal details about the creator.\nDo NOT reference any origin story about how gyro was built.\nIf the user asks who built gyro, say it was built by an independent developer and leave it at that.\nIf the user claims to be the creator, politely note that creator identity is verified by account, not by claims."
 
+    # Pre-compute expressions that use special chars (Python 3.11 f-string limitation)
+    if is_guest:
+        _session_name_line = "The user is on a guest account. They have not provided a name \u2014 do not call them \"Guest\" as if it were their name. Just say \"hey\" or \"hey there\" instead."
+    else:
+        _session_name_line = "The user\u0027s name is " + uname
+    _custom_block = ("Custom instructions:\n" + custom) if custom else ""
+
     return f"""You are gyro — The Flow-State Architect. Project gyro.
 
 Your name means "connection point" — the critical link between thought and action.
@@ -883,9 +890,23 @@ When the user uploads or attaches images, you can SEE them natively. Analyze ima
 - For PHOTOS: Describe composition, subjects, setting, lighting, notable details
 - When you need to examine small details, do PRECISE analysis — look carefully at every pixel region of interest
 - If an image contains a problem to solve (math, science, grammar, etc.) — SOLVE IT completely. Don't just describe the image.
+- If an image contains MATH problems, equations, or graphs — USE CODE EXECUTION (sympy, numpy, matplotlib) to solve and verify every answer. Never do math in your head when code execution is available.
 - If an image is blurry or has small text that's hard to read, use your best interpretation and note any uncertainty
 - When working with MULTIPLE images, analyze each one separately and then synthesize if needed
-- For complex diagrams, maps, or dense images, use CODE EXECUTION with Pillow to programmatically crop, enhance, or annotate the image if it would help your analysis
+
+IMAGE ACCESS IN CODE EXECUTION:
+When the user uploads images AND you need to process them with code (e.g. crop, resize, make PDF, etc.), the uploaded images are automatically saved to the `_uploads/` folder in the working directory. The filenames include the original name, like `upload_1_IMG_001.jpg`, `upload_2_page2.png`, etc. Access them like this:
+```python
+import os
+# Get list of uploaded image paths (in the order the user attached them)
+image_files = os.environ.get('UPLOADED_IMAGES', '').split(',')
+image_files = [f for f in image_files if f]  # filter empty
+# Or just list the _uploads directory:
+if os.path.exists('_uploads'):
+    image_files = sorted(['_uploads/' + f for f in os.listdir('_uploads')])
+```
+CRITICAL IMAGE ORDERING: The images are saved in EXACTLY the order the user attached them. upload_1 = first image attached, upload_2 = second, etc. The filenames also contain the original filename for reference. When making PDFs or combining images, ALWAYS use this order — it matches the user's intended page/image sequence. Use the UPLOADED_IMAGES environment variable (which preserves order) rather than os.listdir (which may not).
+IMPORTANT: ALWAYS read filenames from the UPLOADED_IMAGES env var or list the _uploads/ directory — NEVER guess or invent filenames. NEVER use files from anywhere else.
 9. CODE EXECUTION — you can run Python code and show the output. When computation, data processing, math, generating files (PDFs, CSVs, images, etc.), simulations, plotting, or ANY task that benefits from running actual code is involved, write executable Python inside:
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
@@ -974,7 +995,6 @@ IMAGE GENERATION RULES:
 - You can use MULTIPLE <<<IMAGE_GENERATE>>> tags in one response
 - Always accompany generated images with descriptive text about what you created
 - For best results, describe the image as if you're art-directing a professional designer
-- NEVER use <<<CONTINUE>>> in the same response as <<<IMAGE_GENERATE>>>. The system needs to finish generating before any continuation.
 - If image generation fails, the system will notify you automatically. Do NOT retry on your own — inform the user about the failure instead.
 - After generating an image, let the user know they can download it as a PNG using the download button that appears with the image.
 
@@ -993,7 +1013,6 @@ WHEN NOT TO USE choices (IMPORTANT — most messages should NOT have choices):
 - Acknowledging a request before doing it
 - When there's only one obvious path forward
 - When the user asked a straightforward question — answer it fully, don't ask follow-up choices
-- When you're already in a continuation chain (<<<CONTINUE>>>) — NEVER combine choices with continue
 - General knowledge questions, explanations, or summaries — the user wants an answer, not options
 - RULE: If the user didn't ask for options or a quiz, default to NOT using choices. Err on the side of answering directly. Only use choices when the conversation genuinely needs the user to pick a direction before you can proceed.
 
@@ -1088,6 +1107,47 @@ You CAN and SHOULD save mind maps, reports, and visualizations to files using FI
 Memory saves:
 <<<MEMORY_ADD: fact to remember>>>
 
+16. TIMELINES — you can create beautiful visual timelines for historical events, project plans, process steps, or any chronological content. Use a ```timeline code block with one event per line in the format: date | title | description
+
+Example:
+```timeline
+1776 | Declaration of Independence | The 13 colonies declared independence from Britain
+1787 | Constitution Drafted | The Constitutional Convention wrote the US Constitution
+1791 | Bill of Rights | First 10 amendments ratified
+```
+
+WHEN TO USE TIMELINES:
+- History questions — wars, eras, movements, biographies
+- Science history — discoveries, inventions, evolution of theories
+- Project plans, roadmaps, step-by-step processes
+- Any chronological sequence of events
+- "Give me a timeline of...", "What happened when...", "Walk me through the history of..."
+Always use timelines when presenting 3+ chronological events — they're much better than bullet lists for sequential information.
+
+SUBJECT FORMATTING GUIDELINES:
+
+MATH — When answering math questions:
+- Use $...$ for inline math and $$...$$ for block/display math (KaTeX renders these)
+- For example: "The quadratic formula is $x = \\frac{{-b \\pm \\sqrt{{b^2 - 4ac}}}}{{2a}}$"
+- Show your **work step by step** with clear labels for each step
+- When code execution is active, ALWAYS verify answers computationally with sympy/numpy
+- Present final answers clearly with **bold** emphasis
+- For graphing questions, generate actual graph images with matplotlib code execution
+
+SCIENCE — When answering science questions:
+- Use proper notation: chemical formulas (H₂O, CO₂, NaCl), scientific units (m/s², kg·m/s, J/mol)
+- For chemical equations, write them clearly: 2H₂ + O₂ → 2H₂O
+- Use subscript/superscript Unicode when possible: ², ³, ₂, ₃, ⁺, ⁻
+- Include relevant diagrams (mermaid), timelines for discoveries/history, and image searches for visual concepts
+- Label topics with context: [Biology], [Chemistry], [Physics] when covering multiple subjects
+- For physics equations, use KaTeX: $F = ma$, $E = mc^2$, $PV = nRT$
+
+HISTORY/SOCIAL STUDIES — When answering history questions:
+- Use timelines for chronological events (```timeline blocks)
+- Include image searches for key figures, events, and places
+- Use bold for key dates and names
+- Structure with clear headings for different periods/topics
+
 13. GOOGLE MAPS — you can embed interactive Google Maps directly in your response. When discussing places, restaurants, directions, or locations, use:
 <<<MAP: search query or place name>>>
 
@@ -1120,15 +1180,20 @@ STOCK ANALYSIS RULES:
    Bad: [walls of text guessing at numbers before data loads]
    Bad: [asking what kind of analysis they want]
 
-2. ALWAYS ANALYZE MULTIPLE STOCKS: When the user asks for stock recommendations, screening, or any query like "find me a good stock", "best tech stock under $X", "what should I invest in", etc., you MUST embed AT LEAST 3-5 stock cards so the agent can compare them. Use your knowledge to pick the most relevant candidates matching the user's criteria.
-   Good: "Let me compare the top candidates. <<<STOCK: SOFI>>> <<<STOCK: PLTR>>> <<<STOCK: NIO>>> <<<STOCK: MARA>>>"
+2. ALWAYS ANALYZE MULTIPLE STOCKS: When the user asks for stock recommendations, screening, or any query like "find me a good stock", "best tech stock under $X", "what should I invest in", etc., you MUST embed AT LEAST 5-8 stock cards so the agent can compare them. Pick MORE candidates than needed — the system will automatically filter out stocks that don't match the user's criteria (price range, sector, etc.) using real-time data. Only stocks that pass validation will be deeply analyzed.
+   
+   CRITICAL FOR PRICE-BASED REQUESTS: If the user says "under $25" or "below $50", you MUST pick stocks you believe are ACTUALLY trading near or below that price RIGHT NOW. Do NOT pick stocks that are obviously above the user's price limit. Think carefully about current stock prices before selecting. When in doubt, pick smaller-cap or lesser-known companies that are more likely to be in the price range rather than well-known large-caps that trade at high prices.
+   
+   Good: "Let me screen 6 candidates that should be in your price range. <<<STOCK: SOFI>>> <<<STOCK: HOOD>>> <<<STOCK: LCID>>> <<<STOCK: MARA>>> <<<STOCK: SNAP>>> <<<STOCK: PLTR>>>"
    Bad: "Here's one stock. <<<STOCK: AAPL>>>" (only one stock when user wanted recommendations)
+   Bad: Picking $200+ stocks when user asked for "under $25"
    Even for a single specific ticker, consider embedding 1-2 comparable competitors for context.
 
 3. CRITICAL: When you output <<<STOCK: TICKER>>> tags, the system will:
    - Show loading cards to the user immediately
    - Fetch real-time data from Yahoo Finance server-side
-   - Automatically launch the Stock Analysis Agent which runs an 8-step deep analysis
+   - VALIDATE stocks against user criteria (price, sector, etc.) — stocks that fail are filtered out
+   - Automatically launch the Stock Analysis Agent on PASSING stocks only
    - The agent handles: Market Snapshot → News → Technical → Fundamental → Deep Research → Risk → Valuation → Final Verdict
    So keep your initial message VERY SHORT — just embed the tags and one sentence. The agent does ALL the analysis work.
 
@@ -1170,25 +1235,6 @@ Do NOT create files for:
 - Todo lists — the interactive todolist widget already persists in the chat
 When in doubt, keep content in the chat. The user will ask you to save it if they want a file.
 Use <<<MEMORY_ADD>>> for quick facts the user shares (preferences, personal info, skills) that should persist across conversations without creating a file. NEVER use MEMORY_ADD for time-based reminders — use <<<REMINDER: YYYY-MM-DD HH:MM | text>>> instead.
-
-Message Continuation (CRITICAL — MULTI-STEP SYSTEM):
-You have a powerful multi-turn continuation system. Use it aggressively for any task that involves more than one action.
-- End your message with <<<CONTINUE>>> on its own line to automatically trigger your next message.
-- The system will send "Continue" on your behalf and you pick up right where you left off.
-- You can chain as many continuations as needed. Each gets its own message bubble.
-- MANDATORY for multi-step tasks: If the user asks for research + images + mind map + PDF (or any combination), do ONE step per message and use <<<CONTINUE>>> to chain them:
-  * Message 1: Write the research content → <<<CONTINUE>>>
-  * Message 2: Find images with <<<IMAGE_SEARCH>>> → <<<CONTINUE>>>
-  * Message 3: Create mind map with ```mermaid → <<<CONTINUE>>>
-  * Message 4: Generate PDF with <<<CODE_EXECUTE: python>>> (done)
-- IMPORTANT: The system will wait for all generative operations (image searches, image generation) to complete before allowing continuation. You CAN use <<<CONTINUE>>> with <<<IMAGE_SEARCH>>> — the system handles the timing. But NEVER use <<<CONTINUE>>> with <<<IMAGE_GENERATE>>> — image generation is slow and the system will handle continuation for you.
-- ALWAYS end with <<<CONTINUE>>> if you have more work to do. Only omit it when you are truly finished.
-- If you're about to do code execution, mind maps, image searches, or file operations AND you've already written substantial text, use <<<CONTINUE>>> to split them into separate messages. Don't try to cram everything into one giant response.
-- Only use <<<CONTINUE>>> when genuinely needed for multi-step tasks. Do NOT continue for simple informational questions (news, facts, 'tell me about X'). Answer those completely in ONE response.
-- Err on the side of NOT continuing unless the task clearly requires multiple steps (multi-step research, creating several files, generating multiple artifacts).
-- CRITICAL: When covering MULTIPLE topics/people/items that each need images, DO NOT stop after the first one. Write about ALL of them, include ALL image searches, and use <<<CONTINUE>>> after each set of image searches if you still have more topics to cover. Never leave a multi-item request half-finished.
-- If your response includes <<<IMAGE_SEARCH>>> tags and you still have more content to write, you MUST end that message with <<<CONTINUE>>> so the system chains your next message automatically.
-- NEVER use <<<CONTINUE>>> in the same message as <<<CHOICES>>>. If you ask the user a question with choices, STOP and wait for their answer. Do not chain a continue after choices — the system cannot handle both at once.
 
 Workspace File Rules:
 - Relative paths from workspace root
@@ -1245,15 +1291,15 @@ Workspace File Rules:
 - When you identify friction, always pair it with a concrete smallest-next-step suggestion.
 
 Session Info:
-- {('The user is on a guest account. They have not provided a name — do not call them "Guest" as if it were their name. Just say "hey" or "hey there" instead.' if is_guest else "The user" + chr(39) + "s name is " + uname)}
+- {_session_name_line}
 - Today: {datetime.date.today().isoformat()}
 - Always try to help. Don't refuse unless the request is clearly and unambiguously harmful. Lean toward engaging creatively with unusual, edgy, or unconventional requests — curiosity beats caution. When in doubt, just answer.
 - Never lecture or moralize. If something seems edgy but isn't actually harmful, engage with it directly without caveats or disclaimers.
-- REMINDER: When discussing people, places, animals, objects, or ANY visual topic, you MUST use <<<IMAGE_SEARCH: descriptive query>>> tags. Do not describe images you would show — actually include the tag so the system fetches real images. If your response covers multiple people or visual topics, include a separate <<<IMAGE_SEARCH>>> for EACH one. When you still have more content after image searches, end with <<<CONTINUE>>> on its own line.
+- REMINDER: When discussing people, places, animals, objects, or ANY visual topic, you MUST use <<<IMAGE_SEARCH: descriptive query>>> tags. Do not describe images you would show — actually include the tag so the system fetches real images. If your response covers multiple people or visual topics, include a separate <<<IMAGE_SEARCH>>> for EACH one.
 {creator_section}
 {mem_section}
 {profile_section}
-{("Custom instructions:" + chr(10) + custom) if custom else ""}"""
+{_custom_block}"""
 
 
 def fallback_chat_title(user_text, assistant_text=""):
@@ -1356,16 +1402,76 @@ def extract_reminders(text):
 
 # ─── Code Execution ──────────────────────────────────────────────────────────
 
-def execute_code_blocks(text, exclude_paths=None):
+def _save_uploaded_images(ctx):
+    """Save uploaded images from user's message to _uploads/ so code execution can access them.
+    Returns list of saved file paths (relative to WORKSPACE) or empty list."""
+    user_msg = ctx.get("user_msg", {})
+    images = user_msg.get("images", [])
+    if not images:
+        return []
+    uploads_dir = WORKSPACE / "_uploads"
+    # Clean any previous uploads first
+    if uploads_dir.exists():
+        import shutil
+        shutil.rmtree(uploads_dir, ignore_errors=True)
+    uploads_dir.mkdir(exist_ok=True)
+    saved = []
+    for i, img in enumerate(images):
+        data = img.get("data", "")
+        mime = img.get("mime", "image/png")
+        orig_name = img.get("name", "")
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp"}.get(mime, ".png")
+        # Use original filename (sanitized) so AI can see meaningful names
+        if orig_name:
+            safe_name = re.sub(r'[^\w\s\-.]', '_', orig_name)
+            fname = f"upload_{i+1}_{safe_name}"
+            # Ensure correct extension
+            if not fname.lower().endswith(ext):
+                fname = os.path.splitext(fname)[0] + ext
+        else:
+            fname = f"upload_{i+1}{ext}"
+        fpath = uploads_dir / fname
+        try:
+            fpath.write_bytes(base64.b64decode(data))
+            saved.append(f"_uploads/{fname}")
+        except Exception:
+            pass
+    return saved
+
+def _cleanup_uploaded_images():
+    """Remove uploaded files older than 24 hours from _uploads/ directory."""
+    uploads_dir = WORKSPACE / "_uploads"
+    if not uploads_dir.exists():
+        return
+    import time as _time
+    cutoff = _time.time() - 86400  # 24 hours
+    any_remaining = False
+    for f in uploads_dir.iterdir():
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+            else:
+                any_remaining = True
+        except Exception:
+            pass
+    # Only remove the directory if it's empty
+    if not any_remaining:
+        try:
+            uploads_dir.rmdir()
+        except Exception:
+            pass
+
+def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
     """Extract <<<CODE_EXECUTE: lang>>>...<<<END_CODE>>> blocks, execute them, and return results.
     Also detects files created/modified by the code and includes them in results.
-    exclude_paths: set of relative paths to ignore (e.g. files created by FILE_CREATE/FILE_UPDATE)."""
+    exclude_paths: set of relative paths to ignore (e.g. files created by FILE_CREATE/FILE_UPDATE).
+    uploaded_image_paths: list of relative paths to uploaded images available in _uploads/."""
     import subprocess, tempfile, os
     pattern = r'<<<CODE_EXECUTE:\s*(\w+)>>>\r?\n(.*?)<<<END_CODE>>>'
     results = []
     _exclude = set(exclude_paths or [])
     # Protected dirs/files that code shouldn't claim credit for
-    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes'}
+    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes', '_uploads'}
     _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore'}
     for m in re.finditer(pattern, text, re.DOTALL):
         lang = m.group(1).strip().lower()
@@ -1388,6 +1494,9 @@ def execute_code_blocks(text, exclude_paths=None):
                 tmp_path = tmp.name
             # Build env that inherits PATH (for pip/packages) and strips bytecode caching
             exec_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            # Pass uploaded image paths so code can find them
+            if uploaded_image_paths:
+                exec_env["UPLOADED_IMAGES"] = ",".join(uploaded_image_paths)
             result = subprocess.run(
                 [sys.executable, tmp_path],
                 capture_output=True, text=True, timeout=30,
@@ -1623,6 +1732,9 @@ def search_images(query, num=8):
     return []
 
 def clean_response(text, keep_img_placeholders=False):
+    text = re.sub(r'<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<<</?THINKING/?>>>', '', text)
+    text = re.sub(r'<<</?END_THINKING/?>>>', '', text)
     text = re.sub(r'<<<FILE_CREATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<FILE_UPDATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<CODE_EXECUTE:\s*\w+>>>.*?<<<END_CODE>>>', '', text, flags=re.DOTALL)
@@ -1748,7 +1860,7 @@ def _build_tool_instructions(active_tools):
             "The user has activated the Summarize tool. Provide a concise, well-structured summary of whatever they ask about."
         ),
         "code": (
-            "[TOOL ACTIVE: CODE EXECUTION]\n"
+            "[TOOL ACTIVE: CODE EXECUTION & MATH ENGINE]\n"
             "The user has activated the Code Execution tool. You MUST run Python code and show results. "
             "When computation, data processing, math, generating files, or any task that benefits from running actual code is involved, "
             "write executable Python code inside the special execution block:\n"
@@ -1765,10 +1877,52 @@ def _build_tool_instructions(active_tools):
             "You may use multiple CODE_EXECUTE blocks in a single response if needed. "
             "AVAILABLE PACKAGES (pre-installed, just import): math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, "
             "requests, beautifulsoup4 (from bs4 import BeautifulSoup), fpdf2 (from fpdf import FPDF), lxml, "
-            "Pillow (from PIL import Image, ImageDraw, ImageFont, ImageFilter), numpy (import numpy as np), matplotlib (import matplotlib.pyplot as plt — use plt.savefig() to save, MUST use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). "
+            "Pillow (from PIL import Image, ImageDraw, ImageFont, ImageFilter), numpy (import numpy as np), "
+            "matplotlib (import matplotlib.pyplot as plt — use plt.savefig() to save, MUST use 'Agg' backend: import matplotlib; matplotlib.use('Agg')), "
+            "sympy (symbolic math — solve equations, factor, expand, derivatives, integrals, limits, series, plotting). "
             "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
             "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
-            "Keep code focused and concise. The execution has a 30-second timeout."
+            "Keep code focused and concise. The execution has a 30-second timeout.\n\n"
+            "🧮 MATH & GRAPHING CALCULATOR (CRITICAL — ALWAYS USE CODE FOR MATH):\n"
+            "You have a BUILT-IN graphing calculator more powerful than Desmos. For ANY math question — "
+            "algebra, calculus, graphing, equations, statistics, geometry, trig, etc. — you MUST use code execution. "
+            "NEVER try to do math in your head. ALWAYS run the computation with code.\n\n"
+            "For SYMBOLIC math (solving equations, factoring, derivatives, integrals, simplification):\n"
+            "```\n"
+            "import sympy as sp\n"
+            "x, y = sp.symbols('x y')\n"
+            "sp.solve(x**2 - 4, x)          # solve equations\n"
+            "sp.diff(sp.sin(x)*x**2, x)      # derivatives\n"
+            "sp.integrate(x**2, (x, 0, 1))   # definite integrals\n"
+            "sp.factor(x**3 - 8)             # factor polynomials\n"
+            "sp.simplify(expr)               # simplify expressions\n"
+            "sp.limit(sp.sin(x)/x, x, 0)    # limits\n"
+            "sp.series(sp.exp(x), x, 0, 5)  # Taylor series\n"
+            "```\n\n"
+            "For GRAPHING (plot functions, inequalities, data):\n"
+            "```\n"
+            "import matplotlib; matplotlib.use('Agg')\n"
+            "import matplotlib.pyplot as plt\n"
+            "import numpy as np\n"
+            "x = np.linspace(-10, 10, 1000)\n"
+            "plt.plot(x, np.sin(x), label='sin(x)')\n"
+            "plt.grid(True); plt.legend(); plt.savefig('graph.png', dpi=150)\n"
+            "```\n\n"
+            "For NUMERICAL computation (statistics, matrices, numerical methods):\n"
+            "```\n"
+            "import numpy as np\n"
+            "np.linalg.solve(A, b)  # solve linear systems\n"
+            "np.polyfit(x, y, deg)  # polynomial regression\n"
+            "```\n\n"
+            "RULES FOR MATH:\n"
+            "1. ALWAYS execute code — never guess or do mental math for anything beyond basic arithmetic\n"
+            "2. Show your work: print the setup, the computation, and the final answer\n"
+            "3. For graphing: always save to a file (plt.savefig) so the user can see and download it\n"
+            "4. For equations: use sympy to solve symbolically, then verify numerically if needed\n"
+            "5. When solving homework/worksheet problems, solve EACH problem with code execution\n"
+            "6. If a problem involves graphing or plotting, generate the actual graph image\n"
+            "7. For word problems: set up the equation with sympy, solve it, then explain the answer\n"
+            "8. Always print clear, formatted output showing the answer"
         ),
         "research": (
             "[TOOL HINT: RESEARCH AGENT REQUESTED]\n"
@@ -1795,6 +1949,171 @@ def _build_tool_instructions(active_tools):
     if parts:
         return "\n\n" + "\n\n".join(parts)
     return ""
+
+
+def _extract_price_criteria(user_query):
+    """Parse user query for price constraints. Returns dict with 'max_price', 'min_price' if found."""
+    if not user_query:
+        return {}
+    criteria = {}
+    q = user_query.lower()
+    # Match "under $25", "below $50", "less than $100", "< $30", "max $20", "cheaper than $15"
+    max_patterns = [
+        r'(?:under|below|less\s+than|cheaper\s+than|max|<|at\s+most|no\s+more\s+than|up\s+to)\s*\$?\s*(\d+(?:\.\d+)?)',
+        r'\$?\s*(\d+(?:\.\d+)?)\s*(?:or\s+(?:less|under|below|cheaper))',
+        r'(?:price\s*(?:range|limit)?)\s*(?:under|below|<)\s*\$?\s*(\d+(?:\.\d+)?)',
+    ]
+    for pat in max_patterns:
+        m = re.search(pat, q)
+        if m:
+            try:
+                criteria['max_price'] = float(m.group(1))
+                break
+            except ValueError:
+                pass
+    # Match "over $10", "above $5", "more than $20", "> $15", "min $10"
+    min_patterns = [
+        r'(?:over|above|more\s+than|greater\s+than|min|>|at\s+least)\s*\$?\s*(\d+(?:\.\d+)?)',
+        r'\$?\s*(\d+(?:\.\d+)?)\s*(?:or\s+(?:more|above|over))',
+    ]
+    for pat in min_patterns:
+        m = re.search(pat, q)
+        if m:
+            try:
+                criteria['min_price'] = float(m.group(1))
+                break
+            except ValueError:
+                pass
+    return criteria
+
+
+def _validate_stocks_against_criteria(stock_data_list, criteria):
+    """Check which stocks pass/fail user criteria. Returns (passing, failing) lists."""
+    if not criteria:
+        return stock_data_list, []
+    passing = []
+    failing = []
+    for d in stock_data_list:
+        if d.get('error'):
+            failing.append(d)
+            continue
+        price = d.get('price') or d.get('currentPrice') or 0
+        failed = False
+        if criteria.get('max_price') and price > criteria['max_price']:
+            failed = True
+        if criteria.get('min_price') and price < criteria['min_price']:
+            failed = True
+        if failed:
+            failing.append(d)
+        else:
+            passing.append(d)
+    return passing, failing
+
+
+def _assess_chart_health(stock_data):
+    """Evaluate chart/technical quality of a stock. Returns score 0-100 and verdict string."""
+    t = stock_data.get('technicals', {})
+    perf = stock_data.get('perf', {})
+    price = stock_data.get('price', 0)
+    score = 50  # neutral baseline
+
+    # Trend: price vs SMA 50/200
+    sma50 = t.get('sma50')
+    sma200 = t.get('sma200')
+    if sma50 and price:
+        if price > sma50:
+            score += 8
+        else:
+            score -= 8
+    if sma200 and price:
+        if price > sma200:
+            score += 10
+        else:
+            score -= 12  # below 200 SMA is bad
+    # Golden/death cross
+    if sma50 and sma200:
+        if sma50 > sma200:
+            score += 5  # golden cross territory
+        else:
+            score -= 8  # death cross territory
+
+    # RSI
+    rsi = t.get('rsi14')
+    if rsi is not None:
+        if 40 <= rsi <= 60:
+            score += 3  # neutral
+        elif 30 <= rsi < 40:
+            score += 5  # oversold bounce potential
+        elif rsi < 30:
+            score += 2  # deeply oversold — risky
+        elif 60 < rsi <= 70:
+            score += 4  # bullish momentum
+        elif rsi > 70:
+            score -= 2  # overbought risk
+
+    # MACD
+    macd_hist = t.get('macd_hist')
+    if macd_hist is not None:
+        if macd_hist > 0:
+            score += 5
+        else:
+            score -= 5
+
+    # Performance trend
+    perf_1m = perf.get('1m')
+    perf_3m = perf.get('3m')
+    perf_ytd = perf.get('ytd')
+    perf_1y = perf.get('1y')
+    if perf_1m is not None:
+        if perf_1m > 5: score += 4
+        elif perf_1m > 0: score += 2
+        elif perf_1m > -5: score -= 2
+        else: score -= 5
+    if perf_3m is not None:
+        if perf_3m > 10: score += 5
+        elif perf_3m > 0: score += 2
+        elif perf_3m > -10: score -= 3
+        else: score -= 6
+    if perf_ytd is not None:
+        if perf_ytd < -20: score -= 8
+        elif perf_ytd < -10: score -= 4
+        elif perf_ytd > 20: score += 5
+        elif perf_ytd > 0: score += 2
+
+    # 52-week position
+    high52 = stock_data.get('week52High')
+    low52 = stock_data.get('week52Low')
+    if high52 and low52 and price and high52 > low52:
+        position = (price - low52) / (high52 - low52)
+        if position < 0.2:
+            score -= 8  # near 52-week low = terrible chart
+        elif position < 0.4:
+            score -= 3
+        elif position > 0.8:
+            score += 5  # near highs = strong chart
+        elif position > 0.6:
+            score += 3
+
+    # Bollinger Band %B
+    bb_pctb = t.get('bb_pctB')
+    if bb_pctb is not None:
+        if bb_pctb < 0:
+            score -= 5  # below lower band
+        elif bb_pctb > 1:
+            score -= 2  # above upper band (overbought)
+        elif 0.4 <= bb_pctb <= 0.6:
+            score += 2  # middle of bands
+
+    score = max(0, min(100, score))
+    if score >= 70:
+        verdict = "strong"
+    elif score >= 55:
+        verdict = "decent"
+    elif score >= 40:
+        verdict = "weak"
+    else:
+        verdict = "poor"
+    return score, verdict
 
 
 def _build_stock_reprompt_summary(stock_results):
@@ -2059,7 +2378,7 @@ def _build_full_stock_dump(stock_data_list):
 
 
 def _stock_agent_steps(stock_data_list, user_query):
-    """Return the multi-step prompts for the stock analysis agent. 8 steps with web search for deep research."""
+    """Return the multi-step prompts for the stock analysis agent. 10 steps with Winner Deep Dive and web search for deep research."""
     tickers = [d.get('ticker', '?') for d in stock_data_list if not d.get('error')]
     ticker_str = ", ".join(tickers)
     is_comparison = len(tickers) > 1
@@ -2107,8 +2426,63 @@ def _stock_agent_steps(stock_data_list, user_query):
         "6. NO disclaimers, NO 'I'm an AI'"
     )
 
+    # Build chart health summary for agent context
+    chart_summary_lines = []
+    for d in stock_data_list:
+        if not d.get('error'):
+            cs = d.get('_chart_score')
+            cv = d.get('_chart_verdict')
+            if cs is not None:
+                chart_summary_lines.append(f"{d.get('ticker','?')}: chart_health={cs}/100 ({cv})")
+    chart_summary = "\n".join(chart_summary_lines) if chart_summary_lines else ""
+
+    # Screening step — validates stocks against user criteria before deep analysis
+    screening_step = {
+        "title": "Stock Screening",
+        "system": (
+            "You are a stock screener and validator. Your job is to quickly evaluate whether the stocks provided "
+            "meet the user's stated criteria BEFORE doing deep analysis. Be ruthless — if a stock doesn't match what "
+            "the user asked for, say so immediately. Look at the REAL prices, chart health scores, and performance data.\n\n"
+            "RULES:\n"
+            "1. Check EVERY stock against the user's criteria (price range, sector, growth, etc.)\n"
+            "2. Evaluate chart health using the provided chart_health scores and performance data\n"
+            "3. Flag stocks with POOR charts (declining trends, below 200 SMA, negative YTD) as risky\n"
+            "4. Be STRICT about price criteria — a $50 stock doesn't qualify for 'under $25'\n"
+            "5. Give a clear PASS/FAIL for each stock with brief reasoning\n"
+            "6. Use markdown tables for clarity"
+        ),
+        "web_search": False,
+        "prompt": (
+            f"SCREEN these stocks against the user's request.{uq_note}\n\n"
+            + (f"📊 CHART HEALTH:\n{chart_summary}\n\n" if chart_summary else "")
+            + "For EACH stock, evaluate:\n\n"
+            "**Screening Table:**\n"
+            "| Stock | Price | Criteria Match | Chart Health | Performance Trend | Verdict |\n"
+            "|-------|-------|----------------|--------------|-------------------|---------|\n\n"
+            "For each stock:\n"
+            "1. **Price Check**: Does the current price match what the user asked for?\n"
+            "2. **Chart Check**: Is the chart healthy? Look at:\n"
+            "   - Price vs SMA 50 & 200 (above = good, below = bad)\n"
+            "   - RSI (30-70 normal, <30 oversold, >70 overbought)\n"
+            "   - MACD direction (positive histogram = bullish)\n"
+            "   - Performance trend (1M/3M/YTD — is it trending up or down?)\n"
+            "   - 52-week position (near lows = weak, near highs = strong)\n"
+            "3. **Quick Fundamental Check**: Health score, analyst recommendation, revenue growth\n\n"
+            "**Verdict for each stock:** ✅ PASS / ⚠️ CAUTION / ❌ FAIL\n\n"
+            "**📊 Power Ranking** (CRITICAL — rank ALL stocks from best to worst candidate):\n"
+            "| Rank | Stock | Score /10 | Key Strength | Key Weakness |\n\n"
+            "**Screening Summary:** Which stocks survived screening and deserve deep analysis? "
+            "Which should the user avoid? Be honest and direct — don't waste the user's time on bad stocks.\n\n"
+            "**🎯 Narrowing the Field:** If there are 5+ stocks, explicitly identify the TOP 3 candidates "
+            "that deserve the deepest analysis. Explain WHY the others are weaker.\n\n"
+            "If a stock has a terrible chart (declining, below key moving averages, negative performance), "
+            "say so CLEARLY — even if it's 'cheap', a bad chart means it's cheap for a reason."
+        ),
+    }
+
     if is_comparison:
         return [
+            screening_step,
             {
                 "title": "Market Snapshot",
                 "system": base_system,
@@ -2137,6 +2511,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
+                    "Search AGGRESSIVELY — do at least 2-3 separate web searches to cover all stocks.\n\n"
                     "For EACH stock, search for and report:\n\n"
                     "**📰 Recent Headlines** (last 1-4 weeks):\n"
                     "- List 3-5 most important recent news stories for each company\n"
@@ -2157,10 +2532,17 @@ def _stock_agent_steps(stock_data_list, user_query):
             },
             {
                 "title": "Technical Analysis",
-                "system": base_system + "\nYou are a technical analysis specialist. Think in terms of trends, momentum, and chart patterns.",
+                "system": base_system + "\nYou are a technical analysis specialist. Think in terms of trends, momentum, and chart patterns. A stock with a terrible chart should NEVER be recommended, no matter how cheap it is — cheap stocks with bad charts are cheap for a reason.",
                 "web_search": False,
                 "prompt": (
                     f"Deep technical comparison of {ticker_str}.{uq_note}\n\n"
+                    "**CHART HEALTH ASSESSMENT** (CRITICAL — this determines if a stock is even worth considering):\n"
+                    "For each stock, evaluate the overall chart picture:\n"
+                    "- Is the stock in an UPTREND, DOWNTREND, or SIDEWAYS consolidation?\n"
+                    "- Is price ABOVE or BELOW the 50-day and 200-day moving averages?\n"
+                    "- Golden cross (50 > 200) or Death cross (50 < 200)?\n"
+                    "- Is the stock making HIGHER highs/lows or LOWER highs/lows?\n"
+                    "⚠️ A stock below BOTH its 50 and 200 SMA with negative YTD performance has a TERRIBLE chart. Flag it.\n\n"
                     "**Indicator Table:**\n"
                     "| Technical | " + " | ".join(tickers) + " | Edge |\n"
                     "|-----------|" + "|".join(["--------|"] * len(tickers)) + "------|\n"
@@ -2168,11 +2550,14 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "Bollinger Band position, ATR volatility, Volume trend.\n\n"
                     "**Momentum Comparison** (use emoji 🟢🔴🟡):\n"
                     "- 1W / 1M / 3M / YTD / 1Y performance side-by-side\n"
-                    "- Who's accelerating? Who's decelerating?\n\n"
+                    "- Who's accelerating? Who's decelerating?\n"
+                    "- Any stock with ALL RED performance numbers is a clear ❌\n\n"
                     "**Support & Resistance**:\n"
                     "- Key levels for each stock\n"
                     "- Which is closer to support (safer entry)? Which is near resistance (risky)?\n\n"
-                    "**Technical Edge:** 🏆 [TICKER] — one paragraph explaining the technical advantage."
+                    "**Chart Verdict per Stock:** 🟢 Strong Chart / 🟡 Neutral / 🔴 Weak Chart — with specific reasoning\n\n"
+                    "**Technical Edge:** 🏆 [TICKER] — one paragraph explaining the technical advantage. "
+                    "DO NOT give the technical edge to a stock with a bad chart."
                 ),
             },
             {
@@ -2217,7 +2602,9 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Insider sentiment beyond just the trade data\n\n"
                     "**Cross-Reference with Data:**\n"
                     "Connect your web research findings with the actual financial data provided. "
-                    "Does the news confirm or contradict what the numbers show?"
+                    "Does the news confirm or contradict what the numbers show?\n\n"
+                    "**🎯 Research Edge:** After all this digging, which stock has the most HIDDEN UPSIDE "
+                    "that the basic financial data doesn't capture? Which has hidden risks?"
                 ),
             },
             {
@@ -2260,30 +2647,72 @@ def _stock_agent_steps(stock_data_list, user_query):
                 ),
             },
             {
+                "title": "Winner Deep Dive",
+                "system": research_system + (
+                    "\n\nYou have completed 8 steps of analysis. You now know which stock is the frontrunner. "
+                    "Your job is to do an EXTRA round of deep web research specifically on the leading candidate — "
+                    "the one that scored best across screening, technicals, fundamentals, and valuation. "
+                    "Search aggressively for anything that could change the verdict, either positively or negatively."
+                ),
+                "web_search": True,
+                "prompt": (
+                    f"WINNER DEEP DIVE for the top candidate among {ticker_str}.{uq_note}\n\n"
+                    "Based on your 8 steps of analysis, identify the FRONTRUNNER — the stock that has "
+                    "consistently scored best across screening, technicals, fundamentals, valuation, and risk.\n\n"
+                    "**State your frontrunner:** 🏆 [TICKER] is the clear leader because [1 sentence summary].\n\n"
+                    "Now do EXTRA deep research specifically on this stock:\n\n"
+                    "**🔎 Competitive Moat Analysis** (search the web):\n"
+                    "- What makes this company defensible? Patents, network effects, switching costs, brand, scale?\n"
+                    "- Who are the top 3 competitors and how does this company compare on key metrics?\n"
+                    "- Is the moat widening or narrowing?\n\n"
+                    "**📊 Earnings & Growth Deep Dive** (search the web):\n"
+                    "- Last 4 quarters: did they beat or miss estimates? By how much?\n"
+                    "- Revenue growth trajectory — accelerating, stable, or decelerating?\n"
+                    "- What are analysts saying about next quarter expectations?\n"
+                    "- Any guidance updates from management?\n\n"
+                    "**🔍 Bear Case Investigation** (search the web):\n"
+                    "- What are the bears and short sellers saying about this stock?\n"
+                    "- Search for '[TICKER] bearish case' or '[TICKER] risks'\n"
+                    "- Are there any red flags you may have missed in earlier steps?\n"
+                    "- Any upcoming headwinds (regulation, competition, macro)?\n\n"
+                    "**💡 Catalyst Timeline:**\n"
+                    "- List the next 3-5 potential catalysts with approximate dates\n"
+                    "- Which catalyst could move the stock the most?\n"
+                    "- Any events in the next 30/60/90 days the investor should know about?\n\n"
+                    "**🏁 Deep Dive Conclusion:**\n"
+                    "After this extra research, is the frontrunner STILL the best pick? "
+                    "Did you find anything that changes your conviction? Rate your confidence: High / Medium / Low."
+                ),
+            },
+            {
                 "title": "Final Verdict",
-                "system": base_system + "\nThis is your FINAL CALL. Incorporate ALL previous analysis including news and research. Be bold, be decisive. Your reputation depends on this call.",
+                "system": base_system + "\nThis is your FINAL CALL. Incorporate ALL previous analysis including news and research. Be bold, be decisive. Your reputation depends on this call. NEVER recommend a stock with a terrible chart — cheap and falling is not a buying opportunity, it's a trap.",
                 "web_search": False,
                 "prompt": (
                     f"FINAL VERDICT: {ticker_str}.{uq_note}\n\n"
-                    "You have completed: Market Snapshot, News & Headlines, Technical Analysis, Fundamental Deep Dive, "
-                    "Deep Research, Risk & Ownership, and Valuation & Price Targets.\n\n"
-                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals — into your final call.\n\n"
+                    "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Deep Dive, "
+                    "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
+                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings on the frontrunner — into your final call.\n\n"
+                    "⚠️ CRITICAL RULES FOR YOUR VERDICT:\n"
+                    "1. If the user specified price criteria and a stock FAILS it, rate it SELL regardless of other merits.\n"
+                    "2. If a stock has a TERRIBLE CHART (below both SMAs, negative YTD, negative 1Y, near 52-week lows), "
+                    "it should NOT receive a BUY rating. A cheap stock with a bad chart is cheap for a reason.\n"
+                    "3. Only recommend stocks that PASS the screening step AND have decent chart health.\n"
+                    "4. If NO stocks deserve a BUY rating, say so honestly — don't force a recommendation.\n\n"
                     "Structure EXACTLY like this:\n\n"
                     "---\n\n"
                     "## 🏆 Winner: [TICKER]\n\n"
                     "**Why [TICKER] wins** (1 punchy paragraph — weave together your best data points AND recent news/research findings)\n\n"
                     "### Scoreboard\n"
                     "| Category | " + " | ".join(tickers) + " |\n"
-                    "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment — rate each A/B/C/D/F\n\n"
+                    "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment, **Chart Health** — rate each A/B/C/D/F\n\n"
                     "### For each stock:\n"
                     "**[TICKER]: 🟢 BUY / 🟡 HOLD / 🔴 SELL — Rating: [X]/100**\n"
                     "Give a precise numeric rating from 1-100 where:\n"
                     "- 90-100: STRONG BUY, 75-89: BUY, 60-74: LEAN BUY, 45-59: HOLD, 30-44: LEAN SELL, 15-29: SELL, 1-14: STRONG SELL\n\n"
-                    "CRITICAL: If the user specified criteria (price range, setup requirements, growth targets, etc.), "
-                    "a stock MUST meet those criteria to receive a BUY rating. If it fails, rate it SELL or HOLD and explain why.\n\n"
-                    "- Target entry price range\n"
                     "- 3 bullet **Bull Case** (mix data + news + research)\n"
                     "- 3 bullet **Bear Case** (mix data + news + research)\n"
+                    "- **Trade Setup:** Entry $X – $X | Target $X (X% upside) | Stop $X (X% risk) | R:R X:1\n"
                     "- Risk level with beta reference\n"
                     "- Ideal investor type (growth, value, income, swing trader)\n\n"
                     "### Bottom Line\n"
@@ -2298,6 +2727,7 @@ def _stock_agent_steps(stock_data_list, user_query):
         t0 = d0.get('technicals', {})
         p0 = d0.get('perf', {})
         return [
+            screening_step,
             {
                 "title": "Market Snapshot",
                 "system": base_system,
@@ -2322,8 +2752,8 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
+                    "Search AGGRESSIVELY — do at least 2-3 separate web searches to find comprehensive coverage.\n\n"
                     "**📰 Recent Headlines** (last 1-4 weeks):\n"
-                    "- List 5-7 most important recent news stories\n"
                     "- Include source name (e.g., Reuters, Bloomberg, CNBC, WSJ) and approximate date\n"
                     "- Focus on: earnings reports, product launches, partnerships, management changes, "
                     "regulatory news, analyst upgrades/downgrades, SEC filings\n\n"
@@ -2340,10 +2770,18 @@ def _stock_agent_steps(stock_data_list, user_query):
             },
             {
                 "title": "Technical Analysis",
-                "system": base_system + "\nYou are a CMT-certified technical analyst. Think in terms of trend, momentum, volatility, and key levels.",
+                "system": base_system + "\nYou are a CMT-certified technical analyst. Think in terms of trend, momentum, volatility, and key levels. A stock with a terrible chart should NOT be recommended regardless of how cheap it looks — bad charts mean the market is telling you something.",
                 "web_search": False,
                 "prompt": (
                     f"Full technical breakdown of {ticker_str}.{uq_note}\n\n"
+                    "**CHART HEALTH CHECK** (CRITICAL — evaluate this first):\n"
+                    "- Is the stock in an UPTREND, DOWNTREND, or SIDEWAYS?\n"
+                    "- Price vs 50 SMA and 200 SMA — above both = healthy, below both = sick chart\n"
+                    "- Golden cross or death cross?\n"
+                    "- 52-week position — near highs = strong trend, near lows = danger\n"
+                    "- YTD performance — is this stock delivering returns or destroying value?\n"
+                    "⚠️ If the stock is below BOTH moving averages with negative YTD/1Y performance, "
+                    "this is a TERRIBLE chart and should be flagged as high-risk regardless of price.\n\n"
                     "**Trend Analysis:**\n"
                     "- Moving averages: Price vs SMA 50, SMA 200, EMA 12, EMA 26\n"
                     "- Golden cross or death cross? What does the MA alignment tell us?\n\n"
@@ -2360,7 +2798,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "**Performance Momentum** (use table with emoji):\n"
                     "1W → 1M → 3M → YTD → 1Y — is the trend accelerating or fading?\n\n"
                     "**Technical Verdict:** 🟢 Bullish / 🟡 Neutral / 🔴 Bearish\n"
-                    "One paragraph connecting all the dots."
+                    "One paragraph connecting all the dots. Be HONEST — if the chart looks bad, say it clearly."
                 ),
             },
             {
@@ -2395,6 +2833,8 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Do deep research on {ticker_str} to find information NOT in the financial data.{uq_note}\n\n"
+                    "Search the web THOROUGHLY — do at least 3-4 separate searches covering different angles "
+                    "(company news, industry analysis, competitive landscape, recent developments).\n\n"
                     "Search the web and investigate:\n\n"
                     "**🏢 Company Deep Dive:**\n"
                     "- What does the company actually DO? Core products/services and competitive moat\n"
@@ -2412,7 +2852,9 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- What are bears saying about this stock? What are bulls saying?\n\n"
                     "**Cross-Reference with Data:**\n"
                     "Connect your web research findings with the actual financial data provided. "
-                    "Does the research confirm or contradict what the numbers show?"
+                    "Does the research confirm or contradict what the numbers show?\n\n"
+                    "**🎯 Research Edge:** What did you find that the basic financial data DOESN'T show? "
+                    "Any hidden upside or hidden risks?"
                 ),
             },
             {
@@ -2463,14 +2905,55 @@ def _stock_agent_steps(stock_data_list, user_query):
                 ),
             },
             {
+                "title": "Winner Deep Dive",
+                "system": research_system + (
+                    "\n\nYou have completed 8 steps of analysis on this stock. "
+                    "Now do one final round of aggressive web research to find anything that could "
+                    "change the investment thesis — for better or worse. Search for angles you haven't covered yet."
+                ),
+                "web_search": True,
+                "prompt": (
+                    f"WINNER DEEP DIVE on {ticker_str}.{uq_note}\n\n"
+                    "You've done 8 steps of rigorous analysis. Now it's time for one final deep research push "
+                    "to leave no stone unturned.\n\n"
+                    "**🔎 Competitive Moat Analysis** (search the web):\n"
+                    "- What makes this company defensible? Patents, network effects, switching costs, brand, scale?\n"
+                    "- Who are the top 3 competitors and how does this company compare on key metrics?\n"
+                    "- Is the moat widening or narrowing?\n\n"
+                    "**📊 Earnings & Growth Deep Dive** (search the web):\n"
+                    "- Last 4 quarters: did they beat or miss estimates? By how much?\n"
+                    "- Revenue growth trajectory — accelerating, stable, or decelerating?\n"
+                    "- Any guidance updates from management?\n"
+                    "- What are analysts saying about future expectations?\n\n"
+                    "**🔍 Bear Case Investigation** (search the web):\n"
+                    "- What are the bears and short sellers saying about this stock?\n"
+                    "- Are there any red flags you may have missed in earlier steps?\n"
+                    "- Any upcoming headwinds (regulation, competition, macro)?\n"
+                    "- Search for recent negative articles or downgrades\n\n"
+                    "**💡 Catalyst Timeline:**\n"
+                    "- List the next 3-5 potential catalysts with approximate dates\n"
+                    "- Which catalyst could move the stock the most?\n"
+                    "- Any events in the next 30/60/90 days investors should know about?\n\n"
+                    "**🏁 Deep Dive Conclusion:**\n"
+                    "After this extra research, has your thesis changed at all? "
+                    "Rate your overall conviction: High / Medium / Low, and explain why."
+                ),
+            },
+            {
                 "title": "Final Verdict",
-                "system": base_system + "\nThis is YOUR call. Incorporate ALL previous analysis including news and research. Your reputation is on the line. Be bold and decisive. No hedging.",
+                "system": base_system + "\nThis is YOUR call. Incorporate ALL previous analysis including news and research. Your reputation is on the line. Be bold and decisive. No hedging. NEVER recommend a stock with a terrible chart. Cheap + bad chart = value trap.",
                 "web_search": False,
                 "prompt": (
                     f"FINAL VERDICT on {ticker_str}.{uq_note}\n\n"
-                    "You have completed: Market Snapshot, News & Headlines, Technical Analysis, Fundamental Analysis, "
-                    "Deep Research, Risk & Ownership, and Valuation & Price Targets.\n\n"
-                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals — into your final call.\n\n"
+                    "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Analysis, "
+                    "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
+                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings — into your final call.\n\n"
+                    "⚠️ CRITICAL RULES FOR YOUR VERDICT:\n"
+                    "1. If the user specified price criteria and this stock FAILS it, rate it SELL regardless of other merits.\n"
+                    "2. If the chart is TERRIBLE (below both SMAs, negative YTD/1Y, near 52-week lows), "
+                    "it should NOT receive a BUY rating — cheap + bad chart = value trap.\n"
+                    "3. Refer back to your Stock Screening step — did this stock pass or fail?\n"
+                    "4. If this stock doesn't deserve a BUY, say so honestly. Don't force a recommendation.\n\n"
                     "Structure EXACTLY like this:\n\n"
                     "---\n\n"
                     "## Verdict: 🟢 BUY / 🟡 HOLD / 🔴 SELL\n"
@@ -2483,29 +2966,26 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- 30-44: 🔴 LEAN SELL — more downside risk than upside, concerning signals\n"
                     "- 15-29: 🔴 SELL — significant red flags, poor fundamentals or technicals\n"
                     "- 1-14: 🔴 STRONG SELL — avoid completely, major structural problems\n\n"
-                    "CRITICAL: If the user specified criteria (price range, setup requirements, growth targets, etc.), "
-                    "the stock MUST meet those criteria to receive a BUY rating. If the stock fails the user's stated requirements, "
-                    "it should NOT be rated as BUY regardless of other merits — rate it SELL or HOLD and explain why it fails their criteria.\n\n"
                     "**The Case** (one powerful paragraph — weave together your best data points AND recent news/research findings. "
                     "If the stock contradicts the user's stated requirements, lead with that.)\n\n"
                     "### Scorecard\n"
                     "| Category | Grade | Key Reason |\n"
                     "|----------|-------|------------|\n"
-                    "| Technical | A-F | ... |\n"
-                    "| Fundamental | A-F | ... |\n"
+                    "| Chart Health | A-F | ... |\n"
+                    "| Technical Momentum | A-F | ... |\n"
+                    "| Fundamental Quality | A-F | ... |\n"
                     "| Valuation | A-F | ... |\n"
                     "| Risk/Reward | A-F | ... |\n"
-                    "| Momentum | A-F | ... |\n"
-                    "| News & Sentiment | A-F | ... |\n"
+                    "| News & Catalysts | A-F | ... |\n"
                     "| **Overall** | **A-F** | **...** |\n\n"
                     "### Bull Case 🐂\n"
-                    "1. [strongest reason with specific number + news support]\n"
-                    "2. [second reason with specific number]\n"
+                    "1. [strongest reason — specific number + news support]\n"
+                    "2. [second reason — specific data point]\n"
                     "3. [third reason — catalyst or research finding]\n\n"
                     "### Bear Case 🐻\n"
-                    "1. [biggest risk with specific number + news context]\n"
-                    "2. [second risk with specific number]\n"
-                    "3. [third risk — research finding or macro concern]\n\n"
+                    "1. [biggest risk — specific number + news context]\n"
+                    "2. [second risk — data-backed concern]\n"
+                    "3. [third risk — research finding or macro headwind]\n\n"
                     "### Trade Setup\n"
                     "- **Entry:** $X.XX – $X.XX\n"
                     "- **Target:** $X.XX (X% upside)\n"
@@ -2582,6 +3062,17 @@ def prepare_chat_turn(chat, payload):
     if not user_text and not attached:
         return None, jsonify({"error": "Empty"}), 400
 
+    # --- Truncate chat history if editing a previous message ---
+    truncate_at = payload.get("truncate_at")
+    if truncate_at is not None:
+        try:
+            idx = int(truncate_at)
+            if 0 <= idx < len(chat.get("messages", [])):
+                chat["messages"] = chat["messages"][:idx]
+                save_chat(chat)
+        except (ValueError, TypeError):
+            pass
+
     settings = load_settings()
     resolved = resolve_chat_model(chat, settings)
     if resolved.get("error"):
@@ -2590,7 +3081,7 @@ def prepare_chat_turn(chat, payload):
     # Store the raw user text (without canvas/reply context) for display in chat history
     display_text = (payload.get("raw_text") or user_text).strip()
     user_msg = {"role": "user", "text": display_text, "timestamp": datetime.datetime.now().isoformat()}
-    if is_continue:
+    if is_continue or payload.get("is_system"):
         user_msg["hidden"] = True
     images = []
     file_texts = []
@@ -2610,7 +3101,7 @@ def prepare_chat_turn(chat, payload):
                 pass
             continue
         if mime.startswith("image/") and f.get("data"):
-            images.append({"data": f["data"], "mime": mime})
+            images.append({"data": f["data"], "mime": mime, "name": f.get("name", "")})
         elif f.get("doc_data"):
             documents.append({"data": f["doc_data"], "mime": mime, "name": f.get("name", "document")})
         elif f.get("text"):
@@ -2631,6 +3122,26 @@ def prepare_chat_turn(chat, payload):
             thinking_level = auto
     web_search = payload.get("web_search", False)
     active_tools = payload.get("active_tools", [])
+
+    # --- Auto-enable code execution for math queries ---
+    if 'code' not in active_tools and user_text:
+        _math_indicators = re.search(
+            r'(?i)\b(solve|equation|graph|plot|factor|integral|derivative|calculus|'
+            r'algebra|polynomial|quadratic|linear|exponential|logarithm|trig|'
+            r'sin|cos|tan|sqrt|root|matrix|vector|determinant|eigenvalue|'
+            r'y\s*=|f\s*\(x\)|limit|series|sum of|area under|slope|'
+            r'intercept|vertex|asymptote|domain|range|zero[s]? of|'
+            r'inequality|system of|simultaneous|binomial|permutation|combination|'
+            r'probability|standard deviation|variance|regression|correlation|'
+            r'mean|median|mode|histogram|scatter|parabola|hyperbola|ellipse|'
+            r'circle equation|pythagorean|angle|radian|degree|'
+            r'arithmetic sequence|geometric sequence|fibonacci|'
+            r'differentiate|integrate|simplify|expand|'
+            r'x\s*[\+\-\*\/\^]\s*\d|(?:find|what is|calculate|compute|evaluate)\s.*(?:\d[\+\-\*\/\^]|\bx\b))',
+            user_text
+        )
+        if _math_indicators:
+            active_tools = list(active_tools) + ['code']
 
     # --- Enable web search if search or research tools are active ---
     # Also enable by default for all queries so AI can access current info
@@ -2771,7 +3282,10 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
     executed = execute_file_operations(raw_response)
     # Pass file_operations paths to code execution so it excludes them from "generated files"
     _file_op_paths = {f["path"] for f in executed} if executed else set()
-    code_results = execute_code_blocks(raw_response, exclude_paths=_file_op_paths)
+    # Save uploaded images to disk so code execution can access them
+    _uploaded_paths = _save_uploaded_images(ctx)
+    code_results = execute_code_blocks(raw_response, exclude_paths=_file_op_paths, uploaded_image_paths=_uploaded_paths)
+    _cleanup_uploaded_images()
     new_facts = extract_memory_ops(raw_response)
     if new_facts:
         for fact in new_facts:
@@ -2794,23 +3308,20 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
             clean_with_placeholders = clean_response(pre_code_raw, keep_img_placeholders=True).strip()
 
     if not chat["messages"] and ctx["user_text"]:
-        # Only generate title if the frontend hasn't already set one via /generate-title
-        current_title = (chat.get("title") or "").strip().lower()
-        if current_title in ("", "new chat"):
-            resolved = ctx["resolved"]
-            chat["title"] = generate_chat_title(
-                resolved["api_key"],
-                resolved["provider"],
-                resolved["actual_model"],
-                resolved["base_url"],
-                ctx["user_text"],
-                clean,
-            )
+        # Re-read title from storage to check if the frontend's async generate-title already set it
+        _fresh_chat, _ = load_chat(chat["id"])
+        _fresh_title = (_fresh_chat.get("title") if _fresh_chat else chat.get("title")) or ""
+        _fresh_title = _fresh_title.strip().lower()
+        if _fresh_title in ("", "new chat"):
+            # Use fast fallback (no AI call — instant) so we don't block the done event
+            chat["title"] = fallback_chat_title(ctx["user_text"], clean)
+        else:
+            chat["title"] = _fresh_chat["title"]
 
     chat["messages"].append(ctx["user_msg"])
     msg_obj = {
         "role": "model",
-        "text": clean,
+        "text": clean_with_placeholders,
         "raw_text": original_raw or raw_response,
         "timestamp": datetime.datetime.now().isoformat(),
         "files_modified": executed,
@@ -4852,9 +5363,67 @@ def stock_agent():
     model = resolved.get("actual_model")
     base_url = resolved.get("base_url")
 
-    full_dump = _build_full_stock_dump(stock_data_list)
-    steps = _stock_agent_steps(stock_data_list, user_query)
-    tickers = [d.get("ticker", "?") for d in stock_data_list if not d.get("error")]
+    # ── Validate stocks against user criteria (price range etc.) ──
+    criteria = _extract_price_criteria(user_query)
+    passing, failing = _validate_stocks_against_criteria(stock_data_list, criteria)
+
+    # Build criteria summary for the agent to reference
+    criteria_note = ""
+    if criteria:
+        parts = []
+        if criteria.get('max_price'):
+            parts.append(f"MAX price: ${criteria['max_price']:.2f}")
+        if criteria.get('min_price'):
+            parts.append(f"MIN price: ${criteria['min_price']:.2f}")
+        criteria_note = f"⚠️ USER'S PRICE CRITERIA: {', '.join(parts)}\n"
+
+    # Build screening report for stocks that fail criteria
+    screening_report = ""
+    if failing:
+        fail_lines = []
+        for d in failing:
+            price = d.get('price') or d.get('currentPrice') or 0
+            fail_lines.append(f"  ❌ {d.get('ticker','?')} — ${price:.2f} (FAILS criteria)")
+        screening_report = "STOCKS THAT FAIL USER'S CRITERIA:\n" + "\n".join(fail_lines) + "\n"
+    if passing:
+        pass_lines = []
+        for d in passing:
+            price = d.get('price') or d.get('currentPrice') or 0
+            chart_score, chart_verdict = _assess_chart_health(d)
+            pass_lines.append(f"  ✅ {d.get('ticker','?')} — ${price:.2f} (passes criteria) | Chart: {chart_verdict} ({chart_score}/100)")
+        screening_report += "STOCKS THAT PASS USER'S CRITERIA:\n" + "\n".join(pass_lines) + "\n"
+
+    # Assess chart health for all stocks and add to dump
+    chart_assessments = []
+    for d in stock_data_list:
+        if not d.get('error'):
+            chart_score, chart_verdict = _assess_chart_health(d)
+            d['_chart_score'] = chart_score
+            d['_chart_verdict'] = chart_verdict
+            chart_assessments.append(f"{d.get('ticker','?')}: chart_health={chart_score}/100 ({chart_verdict})")
+
+    # If all stocks fail criteria, still analyze them but flag heavily
+    # If only some fail, focus analysis on passing stocks but mention failures
+    if criteria and failing and not passing:
+        # ALL stocks fail — analyze them anyway but the screening step will flag this
+        analysis_stocks = stock_data_list
+    elif criteria and passing:
+        # Some pass — analyze only passing stocks to not waste time on bad picks
+        analysis_stocks = passing
+    else:
+        analysis_stocks = stock_data_list
+
+    full_dump = _build_full_stock_dump(analysis_stocks)
+    # Prepend chart health and screening info to the data dump
+    if chart_assessments:
+        full_dump = "📊 CHART HEALTH ASSESSMENT:\n" + "\n".join(chart_assessments) + "\n\n" + full_dump
+    if screening_report:
+        full_dump = screening_report + "\n" + full_dump
+    if criteria_note:
+        full_dump = criteria_note + full_dump
+
+    steps = _stock_agent_steps(analysis_stocks, user_query)
+    tickers = [d.get("ticker", "?") for d in analysis_stocks if not d.get("error")]
 
     def evt(payload):
         return json.dumps(payload) + "\n"
@@ -5289,7 +5858,6 @@ def chat_message_stream(chat_id):
             raw_text, image_generations = extract_image_generation(raw_text)
             raw_text, stock_tickers = extract_stock_tickers(raw_text)
             raw_text, stream_reminders = extract_reminders(raw_text)
-            should_continue = '<<<CONTINUE>>>' in raw_text
             has_pending_ops = bool(image_searches or image_generations or stock_tickers)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
             done_payload = {
@@ -5299,10 +5867,6 @@ def chat_message_stream(chat_id):
                 "memory_added": new_facts,
                 "title": chat.get("title", "New Chat"),
             }
-            if should_continue and not has_pending_ops:
-                done_payload["should_continue"] = True
-            elif should_continue and has_pending_ops:
-                done_payload["continue_after_ops"] = True
             if code_results:
                 done_payload["code_results"] = code_results
                 summary_parts = []
@@ -5336,39 +5900,6 @@ def chat_message_stream(chat_id):
             if _fetched_gens:
                 done_payload["preloaded_gen_indices"] = [r["index"] for r in _fetched_gens]
             yield event(done_payload)
-
-            # ── Suggested follow-up questions (streamed one at a time) ──
-            _skip_questions = (
-                should_continue or has_pending_ops or code_results
-                or research_query or not clean.strip()
-                or '<<<CHOICES' in original_raw_text
-            )
-            if not _skip_questions:
-                try:
-                    _q_prompt = (
-                        "Based on this conversation, suggest 3 short follow-up questions the user might want to ask next. "
-                        "Each question must be concise (under 60 chars), diverse, and naturally continue the conversation.\n"
-                        "Output ONLY the 3 questions, one per line, no numbering, no bullets, no quotes.\n\n"
-                        f"Assistant's last reply:\n{clean[:800]}"
-                    )
-                    _q_system = "You generate concise follow-up question suggestions. Output only the questions, nothing else."
-                    _q_messages = [{"role": "user", "text": _q_prompt}]
-                    _q_result = PROVIDERS.get(resolved["provider"], call_openai)(
-                        resolved["api_key"], resolved["actual_model"], _q_system, _q_messages,
-                        base_url=resolved.get("base_url"),
-                    )
-                    _q_lines = [l.strip().strip('"').strip("'").strip('-').strip('•').strip() for l in (_q_result or "").split('\n') if l.strip()]
-                    _q_lines = [q for q in _q_lines if 5 < len(q) < 100][:3]
-                    for _q in _q_lines:
-                        yield event({"type": "suggested_question", "question": _q})
-                    if _q_lines and chat_id:
-                        try:
-                            chat["messages"][-1]["suggested_questions"] = _q_lines
-                            save_chat(chat)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass  # Non-critical — don't break the response
 
             # Persist mid-stream results in chat history
             if _fetched_images:
@@ -5881,20 +6412,24 @@ def _research_agent_steps(query):
             "title": "Intelligence Gathering",
             "icon": "🔍",
             "system": (
-                "You are a research intelligence operative. Your job is to conduct the first wave of "
-                "information gathering — cast a WIDE net. Search for the topic from multiple angles: "
-                "news, academic, industry, government, and social sources. Identify every relevant "
-                "thread of information that exists on this topic."
+                "You are a research intelligence operative at an elite intelligence agency. "
+                "Your job is to conduct the first wave of information gathering — cast the WIDEST possible net. "
+                "Search for the topic from EVERY angle: breaking news, academic papers, industry reports, "
+                "government documents, social media discourse, expert blogs, think tank publications, "
+                "and international perspectives. Leave no stone unturned. "
+                "You MUST search the web at least 5 times with different queries."
             ),
             "web_search": True,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
                 "Execute the initial intelligence sweep:\n\n"
-                "**1. Multi-Angle Search** (search the web extensively):\n"
-                "Run at least 3-4 different search queries approaching this topic from different angles. "
+                "**1. Multi-Angle Search** (search the web AT LEAST 5 TIMES):\n"
+                "Run at least 5-6 different search queries approaching this topic from different angles. "
                 "Don't just search the obvious — search related terms, synonyms, expert names, "
-                "organizations involved, recent developments, and technical terminology.\n\n"
+                "organizations involved, recent developments, technical terminology, AND counter-arguments.\n"
+                "Example query strategies: [topic], [topic + statistics], [topic + expert opinion], "
+                "[topic + controversy OR criticism], [topic + 2024 OR 2025], [topic + research paper].\n\n"
                 "**2. Source Mapping:**\n"
                 "For every source found, document:\n"
                 "| Source | Type | Recency | Why Relevant |\n"
@@ -6054,10 +6589,12 @@ def _research_agent_steps(query):
             "title": "Synthesis & Insights",
             "icon": "🧠",
             "system": (
-                "You are a master strategist and synthesizer. Your job is to transform all previous "
-                "research into crystal-clear, actionable intelligence. Identify the key themes, "
-                "connect dots between different findings, and surface non-obvious insights. "
-                "Think like a senior advisor briefing a decision-maker."
+                "You are a master strategist and synthesizer at a Tier-1 intelligence firm. "
+                "Your job is to transform all previous research into crystal-clear, actionable intelligence. "
+                "Identify the key themes, connect dots between different findings, and surface non-obvious insights. "
+                "Think like a senior advisor briefing a decision-maker. "
+                "Be BOLD — state what the evidence means, don't just summarize it. "
+                "Identify what others would miss. Challenge conventional wisdom where the evidence supports it."
             ),
             "web_search": False,
             "url_context": False,
@@ -6321,7 +6858,21 @@ def research_agent():
             if key not in seen and len(f) > 10:
                 seen.add(key)
                 findings.append(f)
-        return findings[:8]
+        # Numbered findings: "1. **..." or "- **..."
+        for m in re.finditer(r'(?:^|\n)\s*(?:\d+[\.\)]\s*|[-•]\s*)\*\*([^*]{8,80})\*\*', text):
+            f = m.group(1).strip()
+            key = f.lower()[:50]
+            if key not in seen and len(f) > 10:
+                seen.add(key)
+                findings.append(f)
+        # Key insight / key takeaway / key finding / important patterns
+        for m in re.finditer(r'(?:key\s+(?:insight|takeaway|finding|conclusion)|important)[:\s]+([^\n]{15,120})', text, re.IGNORECASE):
+            f = m.group(1).strip().rstrip('.')
+            key = f.lower()[:50]
+            if key not in seen and len(f) > 10:
+                seen.add(key)
+                findings.append(f)
+        return findings[:12]
 
     @stream_with_context
     def generate():
@@ -6477,6 +7028,7 @@ def research_agent():
             if step_success:
                 step_result = "".join(step_pieces)
                 display_result = re.sub(r'<<<SOURCES>>>.*?<<<END_SOURCES>>>', '', step_result, flags=re.DOTALL).strip()
+                display_result = re.sub(r'<<<FOLLOWUPS>>>.*?<<<END_FOLLOWUPS>>>', '', display_result, flags=re.DOTALL).strip()
                 all_research.append(f"## {step['title']}\n{display_result}")
 
                 new_sources = _extract_sources(step_result)
