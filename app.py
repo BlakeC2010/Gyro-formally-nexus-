@@ -4922,6 +4922,39 @@ def chat_message_stream(chat_id):
                 done_payload["preloaded_gen_indices"] = [r["index"] for r in _fetched_gens]
             yield event(done_payload)
 
+            # ── Suggested follow-up questions (streamed one at a time) ──
+            _skip_questions = (
+                should_continue or has_pending_ops or code_results
+                or research_query or not clean.strip()
+                or '<<<CHOICES' in original_raw_text
+            )
+            if not _skip_questions:
+                try:
+                    _q_prompt = (
+                        "Based on this conversation, suggest 3 short follow-up questions the user might want to ask next. "
+                        "Each question must be concise (under 60 chars), diverse, and naturally continue the conversation.\n"
+                        "Output ONLY the 3 questions, one per line, no numbering, no bullets, no quotes.\n\n"
+                        f"Assistant's last reply:\n{clean[:800]}"
+                    )
+                    _q_system = "You generate concise follow-up question suggestions. Output only the questions, nothing else."
+                    _q_messages = [{"role": "user", "text": _q_prompt}]
+                    _q_result = PROVIDERS.get(resolved["provider"], call_openai)(
+                        resolved["api_key"], resolved["actual_model"], _q_system, _q_messages,
+                        base_url=resolved.get("base_url"),
+                    )
+                    _q_lines = [l.strip().strip('"').strip("'").strip('-').strip('•').strip() for l in (_q_result or "").split('\n') if l.strip()]
+                    _q_lines = [q for q in _q_lines if 5 < len(q) < 100][:3]
+                    for _q in _q_lines:
+                        yield event({"type": "suggested_question", "question": _q})
+                    if _q_lines and chat_id:
+                        try:
+                            chat["messages"][-1]["suggested_questions"] = _q_lines
+                            save_chat(chat)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass  # Non-critical — don't break the response
+
             # Persist mid-stream results in chat history
             if _fetched_images:
                 chat["messages"][-1]["image_results"] = _fetched_images
@@ -5814,6 +5847,7 @@ def research_agent():
     @stream_with_context
     def generate():
         import time as _time
+        import itertools
         all_research = []
         all_sources = []
         all_findings = []
@@ -5868,18 +5902,37 @@ def research_agent():
 
                     client = genai.Client(api_key=api_key)
                     contents = _google_contents_from_messages(messages, types)
-                    cfg = types.GenerateContentConfig(
-                        system_instruction=step["system"],
-                        tools=tools_list,
-                        thinking_config=types.ThinkingConfig(thinking_budget=32000, include_thoughts=True),
-                        max_output_tokens=65536,
-                    )
-                    stream = client.models.generate_content_stream(
-                        model=model,
-                        contents=contents,
-                        config=cfg,
-                    )
-                    for chunk in stream:
+
+                    # Try with thinking first, fall back without on 400 errors
+                    _ra_stream = None
+                    for _ra_attempt in range(2):
+                        try:
+                            _ra_cfg_args = dict(
+                                system_instruction=step["system"],
+                                tools=tools_list,
+                                max_output_tokens=65536,
+                            )
+                            if _ra_attempt == 0:
+                                _ra_cfg_args["thinking_config"] = types.ThinkingConfig(
+                                    thinking_budget=16000, include_thoughts=True
+                                )
+                            cfg = types.GenerateContentConfig(**_ra_cfg_args)
+                            _ra_stream = client.models.generate_content_stream(
+                                model=model,
+                                contents=contents,
+                                config=cfg,
+                            )
+                            # Pull first chunk to verify the stream is valid
+                            _first = next(_ra_stream, None)
+                            break
+                        except Exception as _ra_err:
+                            if _ra_attempt == 0 and "400" in str(_ra_err):
+                                print(f"  [research] Thinking failed ({_ra_err}), retrying without thinking...")
+                                continue
+                            raise
+
+                    import itertools  # noqa: already imported above
+                    for chunk in itertools.chain([_first] if _first else [], _ra_stream):
                         try:
                             for candidate in (chunk.candidates or []):
                                 for part in (candidate.content.parts or []):

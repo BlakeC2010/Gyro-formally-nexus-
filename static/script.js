@@ -2440,6 +2440,311 @@ async function runResearchAgent(query, contentEl, area, chatId){
   }
 }
 
+// ─── Stock Analysis Helpers ───────────────────────
+function _saParseRating(text){
+  if(!text)return{label:'Neutral',score:50};
+  const t=text.toLowerCase();
+  if(/strong\s*buy|🟢\s*buy|very bullish/i.test(text))return{label:'Strong Buy',score:85};
+  if(/\bbuy\b|bullish|outperform|overweight/i.test(text))return{label:'Buy',score:72};
+  if(/strong\s*sell|🔴\s*sell|very bearish/i.test(text))return{label:'Strong Sell',score:12};
+  if(/\bsell\b|bearish|underperform|underweight/i.test(text))return{label:'Sell',score:28};
+  if(/\bhold\b|neutral|🟡/i.test(text))return{label:'Hold',score:50};
+  return{label:'Neutral',score:50};
+}
+
+function buildSentimentGauge(rating){
+  if(!rating)return'';
+  const pct=Math.max(0,Math.min(100,rating.score));
+  const color=pct>=70?'#22c55e':pct>=45?'#eab308':'#ef4444';
+  return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Analyst Sentiment</div><div class="sa-gauge"><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div><div class="sa-gauge-marker-label" style="color:${color}">${esc(rating.label)}</div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div></div>`;
+}
+
+function buildGrowthChart(stockDataArr){
+  if(!stockDataArr||!stockDataArr.length)return'';
+  let html='<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Growth Metrics</div>';
+  for(const sd of stockDataArr){
+    const ticker=sd.ticker||'?';
+    html+=`<div class="sa-growth-ticker"><div class="sa-growth-ticker-label">${esc(ticker)}</div>`;
+    const metrics=[
+      {label:'Revenue Growth',key:'revenueGrowth'},
+      {label:'Earnings Growth',key:'earningsGrowth'},
+    ];
+    for(const m of metrics){
+      const raw=sd[m.key];
+      if(raw==null||raw===undefined)continue;
+      const val=typeof raw==='number'?raw*100:parseFloat(raw);
+      if(isNaN(val))continue;
+      const clamped=Math.max(-100,Math.min(100,val));
+      const barPct=Math.abs(clamped)/2;
+      const color=val>=0?'#22c55e':'#ef4444';
+      const sign=val>=0?'+':'';
+      html+=`<div class="sa-growth-row"><span class="sa-growth-label">${m.label}</span><div class="sa-growth-bar-track"><div class="sa-growth-bar-fill" style="width:${barPct}%;background:${color}"></div></div><span class="sa-growth-value" style="color:${color}">${sign}${val.toFixed(1)}%</span></div>`;
+    }
+    html+='</div>';
+  }
+  html+='</div>';
+  return html;
+}
+
+// ─── Stock Analysis Agent ─────────────────────────
+async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId){
+  const stepIcons=['📊','📰','📉','💰','🔬','⚠️','🎯','🏆'];
+  const stepNames=['Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Final Verdict'];
+  const totalSteps=8;
+  let currentStep=0;
+  const stepTimers={};
+  const stepElapsed={};
+  const manualToggles=new Set();
+  window._saManualToggles=manualToggles;
+  let startTime=Date.now();
+
+  const stepsHtml=stepNames.map((name,i)=>`<div class="sa-step" data-sa="${i}"><div class="sa-step-dot" onclick="saScrollToStep(${i+1})">${stepIcons[i]}</div><div class="sa-step-label">${name}</div></div>`).join('');
+
+  const tickers=stockDataArray.map(d=>d.ticker||'?').filter(t=>t!=='?');
+  const tickerStr=tickers.join(', ');
+
+  contentEl.innerHTML=`
+    <div class="sa-container">
+      <div class="sa-badge" id="_saBadge">📊 Stock Analysis — In Progress${tickerStr?' — '+esc(tickerStr):''}</div>
+      <div class="sa-progress">
+        <div class="sa-header">
+          <span class="sa-title">${esc(userQuery||'Stock Analysis')}</span>
+          <span class="sa-pct" id="_saPct">0%</span>
+        </div>
+        <div class="sa-bar-track"><div class="sa-bar-fill" id="_saBar" style="width:0%"></div></div>
+        <div class="sa-steps" id="_saSteps">
+          <div class="sa-steps-line"><div class="sa-steps-line-fill" id="_saLine" style="width:0%"></div></div>
+          ${stepsHtml}
+        </div>
+        <div class="sa-activity" id="_saActivity"><span class="sa-activity-dot"></span><span id="_saMsg">Initializing stock analysis...</span></div>
+      </div>
+      <div class="sa-output" id="_saOut"></div>
+    </div>`;
+  chatArea.scrollTop=chatArea.scrollHeight;
+
+  const elTimer=setInterval(()=>{
+    const el=document.getElementById('_saMsg');
+    if(el&&currentStep>0){
+      const t=((Date.now()-startTime)/1000|0);
+      // keep activity message current
+    }
+  },1000);
+
+  window.saScrollToStep=function(stepNum){
+    const section=document.getElementById('_saS'+stepNum);
+    if(!section)return;
+    const outEl=document.getElementById('_saOut');
+    if(outEl){
+      outEl.querySelectorAll('.sa-section').forEach(sec=>{
+        const sNum=parseInt(sec.id.replace('_saS',''));
+        if(sNum===stepNum) sec.classList.remove('sa-collapsed');
+        else sec.classList.add('sa-collapsed');
+        manualToggles.add(sNum);
+      });
+    }
+    section.scrollIntoView({behavior:'smooth',block:'nearest'});
+  };
+
+  const updateProgress=(step,msg)=>{
+    currentStep=step;
+    const pct=Math.round((step/totalSteps)*100);
+    const barEl=document.getElementById('_saBar');
+    const lineEl=document.getElementById('_saLine');
+    const msgEl=document.getElementById('_saMsg');
+    const pctEl=document.getElementById('_saPct');
+    if(barEl) barEl.style.width=pct+'%';
+    if(pctEl) pctEl.textContent=pct+'%';
+    if(lineEl) lineEl.style.width=Math.min((step/(totalSteps-1))*100,100)+'%';
+    if(msgEl) msgEl.textContent=msg||'Working...';
+    const stepsEl=document.getElementById('_saSteps');
+    if(stepsEl){
+      stepsEl.querySelectorAll('.sa-step').forEach((dot,i)=>{
+        dot.className='sa-step'+(i<step?' done':(i===step?' active':''));
+        const inner=dot.querySelector('.sa-step-dot');
+        if(inner) inner.textContent=i<step?'✓':stepIcons[i];
+      });
+    }
+  };
+
+  try{
+    const response=await apiFetch('/api/stock-agent',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:chatId,stock_data:stockDataArray,query:userQuery})
+    });
+    if(!response.ok){
+      const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
+      throw new Error(d.error||'Stock analysis failed');
+    }
+
+    const reader=response.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    const outEl=document.getElementById('_saOut');
+    let currentContentEl=null;
+    let stepContent='';
+    let stepThinking='';
+    let failedSteps=0;
+    let lastStepText='';
+
+    while(true){
+      const{done,value}=await reader.read();
+      if(done) break;
+      buffer+=decoder.decode(value,{stream:true});
+      let nl;
+      while((nl=buffer.indexOf('\n'))>=0){
+        const line=buffer.slice(0,nl).trim();
+        buffer=buffer.slice(nl+1);
+        if(!line) continue;
+        let ev;
+        try{ev=JSON.parse(line)}catch(e){continue}
+
+        if(ev.type==='agent_start'){
+          updateProgress(0,'Starting stock analysis for: '+(ev.tickers||[]).join(', '));
+        }else if(ev.type==='agent_step'){
+          const icon=stepIcons[(ev.step-1)]||'📄';
+          if(ev.status==='running'){
+            stepTimers[ev.step]=Date.now();
+            updateProgress(ev.step-1, icon+' '+ev.title+'...');
+            stepContent='';
+            stepThinking='';
+            if(outEl){
+              outEl.querySelectorAll('.sa-section').forEach(sec=>{
+                const sNum=parseInt(sec.id.replace('_saS',''));
+                if(!manualToggles.has(sNum)) sec.classList.add('sa-collapsed');
+              });
+            }
+            const section=document.createElement('div');
+            section.className='sa-section sa-slide-in';
+            section.id='_saS'+ev.step;
+            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
+            if(outEl) outEl.appendChild(section);
+            currentContentEl=section.querySelector('.sa-step-content');
+            chatArea.scrollTop=chatArea.scrollHeight;
+          }else if(ev.status==='complete'){
+            updateProgress(ev.step, '✓ '+ev.title+' complete');
+            const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
+            if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
+            const elapsed=ev.elapsed||(stepTimers[ev.step]?((Date.now()-stepTimers[ev.step])/1000).toFixed(1):null);
+            stepElapsed[ev.step]=parseFloat(elapsed)||0;
+            const timerEl=document.getElementById('_saT'+ev.step);
+            if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_saC'+ev.step);
+            if(ce) ce.innerHTML=fmt(stepContent);
+            lastStepText=stepContent;
+            const thEl=document.getElementById('_saThink'+ev.step);
+            if(thEl&&stepThinking){
+              const lb=thEl.querySelector('.sa-thinking-label');
+              if(lb) lb.textContent='View thinking';
+            }
+            chatArea.scrollTop=chatArea.scrollHeight;
+          }else if(ev.status==='failed'){
+            failedSteps++;
+            const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
+            if(statusEl){statusEl.textContent='✗ failed';statusEl.className='sa-section-status sa-failed';}
+            const elapsed=ev.elapsed||(stepTimers[ev.step]?((Date.now()-stepTimers[ev.step])/1000).toFixed(1):null);
+            stepElapsed[ev.step]=parseFloat(elapsed)||0;
+            const timerEl=document.getElementById('_saT'+ev.step);
+            if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
+            const ce=document.getElementById('_saC'+ev.step);
+            if(ce&&ev.error) ce.innerHTML=`<div class="sa-step-error">⚠️ Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, '⚠️ '+ev.title+' failed — continuing...');
+          }
+        }else if(ev.type==='agent_thinking'){
+          stepThinking+=(ev.text||'');
+          const thEl=document.getElementById('_saThink'+ev.step);
+          if(thEl){
+            thEl.style.display='';
+            const thC=document.getElementById('_saThinkC'+ev.step);
+            if(thC) thC.textContent=stepThinking;
+          }
+        }else if(ev.type==='agent_delta'){
+          stepContent+=ev.text;
+          if(currentContentEl){
+            currentContentEl.innerHTML=fmtLive(stepContent);
+            chatArea.scrollTop=chatArea.scrollHeight;
+          }
+        }else if(ev.type==='agent_done'){
+          clearInterval(elTimer);
+          updateProgress(totalSteps,'Stock analysis complete!');
+          const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+
+          const actEl=document.getElementById('_saActivity');
+          if(actEl) actEl.innerHTML=`<span style="color:#22c55e">✅</span> Analysis complete in <strong>${totalTime}s</strong>`;
+
+          // Collapse all sections
+          if(outEl) outEl.querySelectorAll('.sa-section').forEach(s=>s.classList.add('sa-collapsed'));
+
+          // Sentiment gauge
+          const rating=_saParseRating(lastStepText);
+          const gaugeHtml=buildSentimentGauge(rating);
+          if(gaugeHtml&&outEl){
+            const g=document.createElement('div');
+            g.innerHTML=gaugeHtml;
+            outEl.insertBefore(g.firstElementChild,outEl.querySelector('.sa-section'));
+          }
+
+          // Growth chart
+          const chartHtml=buildGrowthChart(stockDataArray);
+          if(chartHtml&&outEl){
+            const c=document.createElement('div');
+            c.innerHTML=chartHtml;
+            const firstSection=outEl.querySelector('.sa-section');
+            outEl.insertBefore(c.firstElementChild,firstSection);
+          }
+
+          // Quick summary from final step
+          const plainLast=(lastStepText||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+          if(plainLast){
+            const sentences=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
+            if(sentences&&outEl){
+              const summary=document.createElement('div');
+              summary.className='sa-summary sa-slide-in';
+              summary.innerHTML=`<div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div>`;
+              const firstSection=outEl.querySelector('.sa-section');
+              outEl.insertBefore(summary,firstSection);
+            }
+          }
+
+          // Disclaimer
+          if(outEl){
+            const disc=document.createElement('div');
+            disc.className='stock-disclaimer sa-disclaimer';
+            disc.innerHTML='⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.';
+            outEl.appendChild(disc);
+          }
+
+          // Reanalyze + actions
+          if(outEl){
+            const actions=document.createElement('div');
+            actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
+            actions.innerHTML=`<button class="sa-reanalyze" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-analyzing...';var c=btn.closest('.sa-container')||btn.parentElement.parentElement;var contentEl=c.parentElement;contentEl.innerHTML='';runStockAgent(${JSON.stringify(stockDataArray).replace(/</g,'\\u003c')},${JSON.stringify(userQuery).replace(/</g,'\\u003c')},contentEl,contentEl.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/</g,'\\u003c')})})(this)">🔄 Re-analyze</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.remove('sa-collapsed')})})(this)">📖 Expand All</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.add('sa-collapsed')})})(this)">📁 Collapse All</button>`;
+            outEl.appendChild(actions);
+          }
+
+          // Update badge
+          const badge=document.getElementById('_saBadge');
+          if(badge){badge.classList.add('sa-badge-done');badge.textContent='✅ Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
+
+          // Total time
+          if(outEl){
+            const timeEl=document.createElement('div');
+            timeEl.className='sa-total-time';
+            timeEl.innerHTML=`Completed in <strong>${totalTime}s</strong>`;
+            outEl.appendChild(timeEl);
+          }
+
+          chatArea.scrollTop=chatArea.scrollHeight;
+        }
+      }
+    }
+  }catch(e){
+    clearInterval(elTimer);
+    contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Stock analysis failed: ${esc(e.message||'Unknown error')}</div>`;
+    setStatus('Stock analysis failed.');
+  }
+}
+
 // ─── Messaging ────────────────────────────────────
 function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}}
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
@@ -3197,6 +3502,22 @@ async function sendMessage(opts){
     activeTools.clear();
     renderToolBadges();
 
+    // ── Direct research agent launch when user explicitly activated the tool ──
+    if(toolsForMsg.includes('research')){
+      contentEl.innerHTML='';
+      setChatRunning(targetChatId,false);
+      setChatRunning(targetChatId,true,{type:'research'});
+      try{
+        await runResearchAgent(text, contentEl, area, targetChatId);
+        await refreshChats();
+      }catch(e){
+        contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Research failed.')}</div>`;
+        setStatus('Research failed.');
+      }
+      setChatRunning(targetChatId,false);
+      return;
+    }
+
     // If canvas is open, include canvas context for select-to-edit
     let messageToSend=replyPrefix?replyPrefix+text:text;
     const cCtx=getCanvasContext();
@@ -3258,11 +3579,23 @@ async function sendMessage(opts){
     // Create a live thinking panel (collapsed by default — click to expand)
     let thinkPanel=null;
     let thinkTextEl=null;
-    let _thinkSubjectSet=false;
+    let _lastThinkLabel='';
     function _extractThinkSubject(text){
-      const first=(text||'').split('\n').find(l=>l.trim())||'';
+      // Extract the latest meaningful topic from the thinking text
+      const lines=(text||'').split('\n').filter(l=>l.trim());
+      // Walk backwards to find the latest line that looks like a topic/action
+      for(let i=lines.length-1;i>=Math.max(0,lines.length-8);i--){
+        let line=lines[i].replace(/^[-•*#>\s]+/,'').trim();
+        if(line.length<5)continue;
+        // Skip lines that are just punctuation or code
+        if(/^[\W]+$/.test(line))continue;
+        if(line.length>60)line=line.slice(0,60)+'…';
+        return line;
+      }
+      // Fallback to first line
+      const first=lines[0]||'';
       const clean=first.replace(/^[-•*#>\s]+/,'').trim();
-      if(clean.length>50)return clean.slice(0,50)+'…';
+      if(clean.length>60)return clean.slice(0,60)+'…';
       return clean||'your question';
     }
     function ensureThinkPanel(){
@@ -3305,12 +3638,14 @@ async function sendMessage(opts){
               ensureThinkPanel();
               thinkTextEl.textContent=thinkText;
               thinkTextEl.scrollTop=thinkTextEl.scrollHeight;
-              // Update the subject label once we have enough text
-              if(!_thinkSubjectSet&&thinkText.length>15){
+              // Continuously update the collapsed label with the latest thinking topic
+              if(thinkText.length>15){
                 const subj=_extractThinkSubject(thinkText);
-                const lbl=thinkPanel.querySelector('.ltp-label');
-                if(lbl)lbl.textContent='Considering '+subj;
-                _thinkSubjectSet=true;
+                if(subj!==_lastThinkLabel){
+                  _lastThinkLabel=subj;
+                  const lbl=thinkPanel.querySelector('.ltp-label');
+                  if(lbl)lbl.textContent=subj;
+                }
               }
               _autoScroll();
             }
@@ -3321,6 +3656,12 @@ async function sendMessage(opts){
               thinkPanel.classList.add('ltp-done');
               const dotsEl=thinkPanel.querySelector('.ltp-dots');
               if(dotsEl)dotsEl.remove();
+              // Update label to final state
+              const lbl=thinkPanel.querySelector('.ltp-label');
+              if(lbl){
+                const subj=_extractThinkSubject(thinkText);
+                lbl.textContent='Thought about '+subj;
+              }
               // Add response area below
               const responseDiv=document.createElement('div');
               responseDiv.className='stream-response-area';
@@ -3335,7 +3676,7 @@ async function sendMessage(opts){
               _renderScheduled=true;
               requestAnimationFrame(()=>{
                 _renderScheduled=false;
-                if(!canRender())return;
+                if(_doneReceived||!canRender())return;
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 const ta=contentEl.querySelector('.think-active');
                 if(ta){ta.remove();stopThinkingPhrases();}
@@ -3358,7 +3699,7 @@ async function sendMessage(opts){
               _renderScheduled=true;
               requestAnimationFrame(()=>{
                 _renderScheduled=false;
-                if(!canRender())return;
+                if(_doneReceived||!canRender())return;
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 targetEl.innerHTML=fmtLive(fullText);
                 _autoScroll();
@@ -3595,6 +3936,7 @@ async function sendMessage(opts){
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
               contentEl.innerHTML=finalHTML;
+              contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               // Animate content in smoothly
               contentEl.style.opacity='0';
               contentEl.style.filter='blur(4px)';
@@ -3697,6 +4039,24 @@ async function sendMessage(opts){
             if(curChat===targetChatId&&!msgDiv.isConnected){
               openChat(targetChatId);
             }
+          }else if(data.type==='suggested_question'){
+            // Streamed follow-up question — appears one at a time after done
+            if(canRender()&&!devRawMode){
+              let wrap=contentEl.querySelector('.sq-wrap');
+              if(!wrap){
+                wrap=document.createElement('div');
+                wrap.className='sq-wrap';
+                wrap.innerHTML='<div class="sq-label">💬 Follow up</div><div class="sq-list"></div>';
+                contentEl.appendChild(wrap);
+              }
+              const list=wrap.querySelector('.sq-list');
+              const chip=document.createElement('button');
+              chip.className='sq-chip sq-chip-in';
+              chip.textContent=data.question;
+              chip.onclick=()=>{const inp=document.getElementById('msgInput');if(inp){inp.value=data.question;sendMessage()}};
+              list.appendChild(chip);
+              _autoScroll();
+            }
           }else if(data.type==='error'){
             if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">${esc(data.error)}</div>`;
           }else if(data.type==='image_result'){
@@ -3709,7 +4069,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3734,7 +4094,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3757,7 +4117,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3798,7 +4158,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3821,7 +4181,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3845,7 +4205,7 @@ async function sendMessage(opts){
                 _renderScheduled=true;
                 requestAnimationFrame(()=>{
                   _renderScheduled=false;
-                  if(!canRender())return;
+                  if(_doneReceived||!canRender())return;
                   const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                   targetEl.innerHTML=fmtLive(fullText);
                   _autoScroll();
@@ -3968,9 +4328,17 @@ async function sendMessage(opts){
 
 function renderThinkBlock(thinkText){
   const lines=thinkText.split('\n').filter(l=>l.trim());
-  const summary=lines[0]?lines[0].replace(/^[-•*#>\s]+/,'').slice(0,50):'your question';
+  // Use last meaningful line as the summary topic
+  let summary='your question';
+  for(let i=lines.length-1;i>=0;i--){
+    let line=lines[i].replace(/^[-•*#>\s]+/,'').trim();
+    if(line.length>=5&&!/^[\W]+$/.test(line)){
+      summary=line.length>60?line.slice(0,60)+'…':line;
+      break;
+    }
+  }
   return `<div class="think-block" onclick="this.classList.toggle('expanded')">
-    <div class="think-header"><span>💭</span> <span>Considered ${esc(summary)}</span> <span class="think-chevron">▾</span></div>
+    <div class="think-header"><span>💭</span> <span>Thought about ${esc(summary)}</span> <span class="think-chevron">▾</span></div>
     <div class="think-content">${esc(thinkText)}</div>
   </div>`;
 }
@@ -4253,6 +4621,10 @@ function addMsg(role,text,files,extra={}){
         raHtml+=`</div>`;
         html=`<div class="lbl">gyro</div>`+raHtml;
       }
+    }
+    // Suggested follow-up questions (from history)
+    if(extra.suggested_questions?.length){
+      html+=`<div class="sq-wrap"><div class="sq-label">💬 Follow up</div><div class="sq-list">${extra.suggested_questions.map(q=>`<button class="sq-chip" onclick="(function(btn){var inp=document.getElementById('msgInput');if(inp){inp.value=${JSON.stringify(q).replace(/'/g,"\\'")};sendMessage()}})(this)">${esc(q)}</button>`).join('')}</div></div>`;
     }
     html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
   }
