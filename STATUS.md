@@ -1,13 +1,8 @@
-# Mission Control
+# Current Operational Status
+**Last Updated: 2026-03-26**
 
 ## Active Projects
+- **Iron Man MK 46 Suit**: Currently in the research and scaling phase for the leg components. Using DaDave/Max_3D_Design as primary file sources.
 
-### 📈 Project: The First Trade (SOFI)
-**Status:** Waiting on Fidelity bank link (1-5 business days from March 24)
-**Capital:** $79.00
-**Target Asset:** SoFi Technologies (SOFI)
-**Catalyst Date:** April 28, 2026 (Earnings Report)
-**Exit Strategy Date:** Morning of April 29, 2026
-
-**Next Action:** 
-Check Fidelity app around Thursday/Friday to see if the Chase account link has turned green. Once it clears, transfer the $79.
+## Friction Points
+- **Scaling**: Need to ensure 1:1 scale fits Blake's measurements before starting major prints.

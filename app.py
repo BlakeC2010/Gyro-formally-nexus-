@@ -224,6 +224,9 @@ def _refresh_session():
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Catch-all so Firestore / unexpected errors return JSON, not a 500 HTML page."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
     print(f"  [!] Unhandled error: {e}")
     return jsonify({"error": f"Server error: {str(e)[:200]}"}), 500
 
@@ -564,6 +567,40 @@ def save_memory(m):
     if not ref: return
     m["updated"] = datetime.datetime.now().isoformat()
     ref.set(m)
+
+# ─── Connectors (HuggingFace, etc.) ──────────────────────────────────────────
+
+def load_connectors():
+    uid = session.get("user_id")
+    defaults = {"huggingface": {"token": "", "enabled": False}}
+    if not uid: return defaults
+    if not FIREBASE_ENABLED:
+        c = _load_json(_local_user_dir(uid) / "connectors.json", {})
+        for k, v in defaults.items(): c.setdefault(k, v)
+        return c
+    ref = _uid_doc("connectors")
+    if not ref: return defaults
+    snap = ref.get()
+    c = snap.to_dict() if snap.exists else {}
+    for k, v in defaults.items(): c.setdefault(k, v)
+    return c
+
+def save_connectors(c):
+    if not FIREBASE_ENABLED:
+        uid = session.get("user_id")
+        if not uid: return
+        _save_json(_local_user_dir(uid) / "connectors.json", c)
+        return
+    ref = _uid_doc("connectors")
+    if ref: ref.set(c)
+
+def _hf_token():
+    """Return the user's HuggingFace token if configured, or empty string."""
+    c = load_connectors()
+    hf = c.get("huggingface", {})
+    if hf.get("enabled") and hf.get("token"):
+        return hf["token"]
+    return ""
 
 def load_profile():
     default = {
@@ -940,7 +977,18 @@ print('Hello world')
 <<<END_CODE>>>
 The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 45-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
 When generating files (images, PDFs, etc.), save them to the current working directory. The system will automatically detect new files and display them to the user with download links (images are shown inline).
-PDF GENERATION: Use fpdf2 (import as: from fpdf import FPDF). Example: pdf=FPDF(); pdf.add_page(); pdf.set_font('Helvetica','',12); pdf.cell(0,10,'Hello'); pdf.output('output.pdf'). For Unicode text, use pdf.set_font('Helvetica') — do NOT try to load custom .ttf fonts unless the user provides them. Always call pdf.output() with a filename to save.
+PDF GENERATION: Use fpdf2 (import as: from fpdf import FPDF). For Unicode text, use pdf.set_font('Helvetica') — do NOT try to load custom .ttf fonts unless the user provides them. Always call pdf.output() with a filename to save.
+PDF QUALITY STANDARDS — ALL PDFs MUST look immaculate and professional:
+- TITLE PAGE: Large bold title (24-28pt), subtitle/date (14pt), clean spacing. Use set_font('Helvetica','B',28) for titles.
+- SECTION HEADERS: Bold 16-18pt with a colored underline or separator line. Use pdf.set_draw_color() and pdf.line() for dividers.
+- BODY TEXT: 11-12pt with proper line_height (1.5x font size). Use multi_cell() for paragraph text, not cell().
+- SPACING: Add proper margins (left=20, top=20). Add spacing between sections (pdf.ln(8) between paragraphs, pdf.ln(15) between major sections).
+- VISUAL HIERARCHY: Use bold for key terms, italic for emphasis. Vary font sizes for different heading levels (H1=18pt, H2=14pt, H3=12pt bold).
+- COLOR ACCENTS: Use subtle color for headers (e.g. dark blue pdf.set_text_color(20,60,120)) and reset to black for body text.
+- PAGE NUMBERS: Add page numbers at the bottom: pdf.set_y(-15); pdf.cell(0,10,f'Page {{pdf.page_no()}}',align='C')
+- TABLES: Use alternating row colors for readability. Draw cell borders with pdf.cell(w,h,text,border=1).
+- NEVER produce a plain text-dump PDF. Every PDF should look like a polished report that could be submitted to a teacher or executive.
+- When making a RESEARCH document: include a table of contents, numbered sections, proper citations, and a references section at the end.
 
 CRITICAL CODE EXECUTION RULES:
 - ALWAYS use print() to log EVERY meaningful result — even when generating files. If you create an image, print what you created: print(f"Created {{filename}} ({{width}}x{{height}})")
@@ -1661,6 +1709,209 @@ def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None):
     except Exception as e:
         return None, f"Image generation failed: {str(e)[:200]}"
 
+# ─── HuggingFace Space Connector ─────────────────────────────────────────────
+
+def extract_hf_space_calls(text):
+    """Extract <<<HF_SPACE: space_id | input text or JSON>>> tags from AI response.
+    Returns (text_with_placeholders, [{'space': str, 'input': str, 'params': dict, 'index': int}])."""
+    pattern = re.compile(r'<<<HF_SPACE:\s*(.+?)>>>')
+    calls = []
+    idx = 0
+    def _replace(m):
+        nonlocal idx
+        raw = m.group(1).strip()
+        space_id = raw
+        user_input = ""
+        params = {}
+        if '|' in raw:
+            parts = [p.strip() for p in raw.split('|')]
+            space_id = parts[0]
+            if len(parts) > 1:
+                user_input = parts[1]
+            # Parse optional key=value params after the second pipe
+            for extra in parts[2:]:
+                if '=' in extra:
+                    k, v = extra.split('=', 1)
+                    params[k.strip()] = v.strip()
+        calls.append({'space': space_id, 'input': user_input, 'params': params, 'index': idx})
+        placeholder = f'%%%HFBLOCK:{idx}%%%'
+        idx += 1
+        return placeholder
+    result_text = pattern.sub(_replace, text)
+    return result_text, calls
+
+
+def run_hf_space(space_id, user_input, params=None, hf_token=None):
+    """Call a HuggingFace Space via gradio_client. Returns a dict with results.
+    
+    Returns:
+      {"success": True, "type": "image"|"text"|"video"|"audio"|"file", "data": ..., "mime": ...}
+      or {"success": False, "error": "..."}
+    """
+    if not hf_token:
+        return {"success": False, "error": "No HuggingFace token configured. Set up the HuggingFace connector in Settings → Connectors."}
+    try:
+        from gradio_client import Client, handle_file
+        client = Client(space_id, hf_token=hf_token)
+        api_info = client.view_api(return_format="dict")
+        
+        # Find the main prediction endpoint
+        endpoints = api_info.get("named_endpoints", {})
+        unnamed = api_info.get("unnamed_endpoints", {})
+        
+        # Prefer /predict, /generate, /run, or the first unnamed endpoint
+        endpoint_name = None
+        for name in ("/predict", "/generate", "/run", "/infer", "/process"):
+            if name in endpoints:
+                endpoint_name = name
+                break
+        if not endpoint_name and endpoints:
+            endpoint_name = next(iter(endpoints))
+        
+        # Build the input - try to be smart about what the Space expects
+        api_name = endpoint_name
+        fn_index = None
+        if not api_name and unnamed:
+            fn_index = int(next(iter(unnamed)))
+        
+        # Call the Space
+        if api_name:
+            result = client.predict(user_input, api_name=api_name)
+        elif fn_index is not None:
+            result = client.predict(user_input, fn_index=fn_index)
+        else:
+            result = client.predict(user_input)
+
+        return _process_hf_result(result, space_id)
+    except Exception as e:
+        err = str(e)
+        if "token" in err.lower() or "401" in err or "403" in err:
+            return {"success": False, "error": f"HuggingFace authentication failed. Check your token in Settings → Connectors. ({err[:150]})"}
+        if "not found" in err.lower() or "404" in err:
+            return {"success": False, "error": f"Space '{space_id}' not found. Check the Space ID (format: username/space-name). ({err[:150]})"}
+        if "queue" in err.lower() or "timeout" in err.lower():
+            return {"success": False, "error": f"Space '{space_id}' is busy or timed out. Try again in a moment. ({err[:150]})"}
+        return {"success": False, "error": f"HuggingFace Space error: {err[:200]}"}
+
+
+def run_hf_inference(task, model_id, user_input, hf_token=None, params=None):
+    """Call HuggingFace Inference API for standard tasks.
+    
+    Supported tasks: text-to-image, image-to-image, text-to-video, text-to-speech, etc.
+    Returns same format as run_hf_space.
+    """
+    if not hf_token:
+        return {"success": False, "error": "No HuggingFace token configured."}
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=hf_token)
+        
+        if task == "text-to-image":
+            image = client.text_to_image(user_input, model=model_id, **(params or {}))
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            img_b64 = base64.b64encode(buf.getvalue()).decode()
+            return {"success": True, "type": "image", "data": f"data:image/png;base64,{img_b64}", "mime": "image/png"}
+        
+        elif task == "text-to-speech":
+            audio_bytes = client.text_to_speech(user_input, model=model_id)
+            audio_b64 = base64.b64encode(audio_bytes).decode()
+            return {"success": True, "type": "audio", "data": f"data:audio/wav;base64,{audio_b64}", "mime": "audio/wav"}
+        
+        elif task == "text-to-video":
+            # Most video models use Spaces, not the Inference API directly
+            return {"success": False, "error": "Text-to-video typically requires a HuggingFace Space. Use <<<HF_SPACE: space_id | prompt>>> instead."}
+        
+        elif task == "image-to-text":
+            result = client.image_to_text(user_input, model=model_id)
+            text = result if isinstance(result, str) else str(result)
+            return {"success": True, "type": "text", "data": text}
+        
+        elif task == "summarization":
+            result = client.summarization(user_input, model=model_id)
+            text = result.summary_text if hasattr(result, 'summary_text') else str(result)
+            return {"success": True, "type": "text", "data": text}
+        
+        elif task == "translation":
+            result = client.translation(user_input, model=model_id)
+            text = result.translation_text if hasattr(result, 'translation_text') else str(result)
+            return {"success": True, "type": "text", "data": text}
+        
+        else:
+            return {"success": False, "error": f"Unsupported task: {task}. Use <<<HF_SPACE>>> for custom Spaces."}
+    
+    except Exception as e:
+        return {"success": False, "error": f"HuggingFace Inference API error: {str(e)[:200]}"}
+
+
+def _process_hf_result(result, space_id):
+    """Process gradio_client result into a standardized format."""
+    if result is None:
+        return {"success": True, "type": "text", "data": "(Space returned no output)"}
+    
+    # Tuple results (multiple outputs) — take the most interesting one
+    if isinstance(result, tuple):
+        for item in result:
+            processed = _process_hf_result(item, space_id)
+            if processed.get("success") and processed.get("type") != "text":
+                return processed
+        # Fall back to first item
+        return _process_hf_result(result[0], space_id) if result else {"success": True, "type": "text", "data": ""}
+    
+    # String result — could be a file path or text
+    if isinstance(result, str):
+        if os.path.isfile(result):
+            return _process_hf_file(result)
+        return {"success": True, "type": "text", "data": result}
+    
+    # Dict result (gradio returns these sometimes)
+    if isinstance(result, dict):
+        if "path" in result and os.path.isfile(result["path"]):
+            return _process_hf_file(result["path"])
+        if "url" in result:
+            return {"success": True, "type": "url", "data": result["url"]}
+        return {"success": True, "type": "text", "data": json.dumps(result, default=str)[:2000]}
+    
+    # List of results
+    if isinstance(result, list):
+        items = []
+        for item in result[:5]:
+            processed = _process_hf_result(item, space_id)
+            if processed.get("success"):
+                items.append(processed)
+        if items:
+            return items[0] if len(items) == 1 else {"success": True, "type": "multi", "data": items}
+    
+    return {"success": True, "type": "text", "data": str(result)[:2000]}
+
+
+def _process_hf_file(filepath):
+    """Read a file returned by gradio_client and convert to base64 data URI."""
+    try:
+        mime = mimetypes.guess_type(filepath)[0] or "application/octet-stream"
+        with open(filepath, "rb") as f:
+            data = f.read()
+        b64 = base64.b64encode(data).decode()
+        
+        if mime.startswith("image/"):
+            return {"success": True, "type": "image", "data": f"data:{mime};base64,{b64}", "mime": mime}
+        elif mime.startswith("video/"):
+            return {"success": True, "type": "video", "data": f"data:{mime};base64,{b64}", "mime": mime}
+        elif mime.startswith("audio/"):
+            return {"success": True, "type": "audio", "data": f"data:{mime};base64,{b64}", "mime": mime}
+        else:
+            # Save to workspace for download
+            fname = os.path.basename(filepath)
+            dest = WORKSPACE / fname
+            if not dest.exists():
+                import shutil
+                shutil.copy2(filepath, str(dest))
+            return {"success": True, "type": "file", "data": fname, "mime": mime}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to process output file: {str(e)[:200]}"}
+
+# ─── End HuggingFace Connector ───────────────────────────────────────────────
+
 def extract_image_searches(text):
     """Extract <<<IMAGE_SEARCH: query>>> or <<<IMAGE_SEARCH: query | count=N>>> tags.
     Returns (text_with_placeholders, [{'query': str, 'count': int, 'index': int}]).
@@ -1794,12 +2045,14 @@ def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
     text = re.sub(r'(?:<<<|%%%|<<)IMAGE_SEARCH:\s*.+?(?:>>>|%%%)', '', text)
     text = re.sub(r'<<<IMAGE_GENERATE:\s*.+?>>>', '', text)
+    text = re.sub(r'<<<HF_SPACE:\s*.+?>>>', '', text)
     text = re.sub(r'<<<CONTINUE>>>', '', text)
-    # Strip image/stock placeholders so saved messages are clean (unless caller needs them)
+    # Strip image/stock/hf placeholders so saved messages are clean (unless caller needs them)
     if not keep_img_placeholders:
         text = re.sub(r'%%%IMGBLOCK:\d+%%%', '', text)
         text = re.sub(r'%%%IMGGEN:\d+%%%', '', text)
         text = re.sub(r'%%%STOCKBLOCK:\d+%%%', '', text)
+        text = re.sub(r'%%%HFBLOCK:\d+%%%', '', text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1899,7 +2152,12 @@ def _build_tool_instructions(active_tools):
             "The user has activated the Web Search tool. Your AI model has BUILT-IN web search grounding — the search happens automatically behind the scenes.\n"
             "DO NOT try to search using CODE_EXECUTE blocks (e.g. google_search.search(), requests.get(), etc.) — that will fail.\n"
             "DO NOT write Python code to fetch web pages. Your model already has real-time web access built in.\n"
-            "Just answer the question directly using the most current, accurate information available from your grounded web search. Cite sources when possible."
+            "Just answer the question directly using the most current, accurate information available from your grounded web search. Cite sources when possible.\n\n"
+            "CRITICAL — URL VERIFICATION:\n"
+            "Before presenting ANY link or URL to the user, you MUST verify it is relevant to the topic. "
+            "Search for the specific page and confirm its content matches what you're recommending. "
+            "NEVER link a page just because it's on the right website — verify the SPECIFIC page covers the right topic. "
+            "If you cannot verify a link's content, say so and provide the search query the user can use instead."
         ),
         "mindmap": (
             "[TOOL ACTIVE: MIND MAP]\n"
@@ -1985,7 +2243,11 @@ def _build_tool_instructions(active_tools):
             "Example: 'I'll launch a deep research investigation into that for you.\n<<<DEEP_RESEARCH: comprehensive analysis of [topic] including [specific angles]>>>'\n"
             "CRITICAL: You MUST emit <<<DEEP_RESEARCH: ...>>> — do NOT attempt to research the topic yourself. "
             "The Research Agent handles real web searching, URL deep-reading, cross-referencing, and report generation.\n"
-            "The ONLY exception is if the user's message is a simple greeting with no research intent (e.g. 'hi', 'hello')."
+            "The ONLY exception is if the user's message is a simple greeting with no research intent (e.g. 'hi', 'hello').\n\n"
+            "⚠️ ABSOLUTE PRIORITY RULE: Do NOT generate any files (PDFs, images, documents), run any CODE_EXECUTE blocks, "
+            "or create any content before triggering <<<DEEP_RESEARCH>>>. The Research Agent MUST run FIRST. "
+            "Once research is complete, the final intelligence brief from the research agent can then be turned into a PDF if requested. "
+            "Generating a file BEFORE research means the content will be shallow and inaccurate — NEVER do this."
         ),
         "imagegen": (
             "[TOOL ACTIVE: IMAGE GENERATION]\n"
@@ -1993,6 +2255,20 @@ def _build_tool_instructions(active_tools):
             "to create the image. Write a highly detailed, art-directed prompt with style, colors, mood, "
             "composition, lighting, and specific details.\n"
             "After generation, tell the user the image has been created and they can download it as PNG using the download button."
+        ),
+        "huggingface": (
+            "[TOOL ACTIVE: HUGGINGFACE SPACES]\n"
+            "The user has explicitly activated the HuggingFace Spaces tool. You MUST use a HuggingFace Space "
+            "for this request. Use the tag: <<<HF_SPACE: owner/space-name | your input prompt>>>\n"
+            "Pick the best Space for what the user is asking:\n"
+            "- Image generation: black-forest-labs/FLUX.1-schnell (fast), stabilityai/stable-diffusion-3.5-large (high quality)\n"
+            "- Video generation: KwaiVGI/LivePortrait\n"
+            "- Text-to-speech: suno/bark\n"
+            "- Music generation: facebook/MusicGen\n"
+            "- Background removal: ECCV2022/dis-background-removal\n"
+            "- Image upscaling: finegrain/finegrain-image-enhancer\n"
+            "If the user doesn't specify a Space, choose the most appropriate one. "
+            "Always explain what Space you're using and why."
         ),
     }
     for tool in active_tools:
@@ -2769,7 +3045,44 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Ideal investor type (growth, value, income, swing trader)\n\n"
                     "### Bottom Line\n"
                     "2-3 sentences. Clear winner, clear action, specific price levels. "
-                    "Reference the most compelling news/catalyst that tips the scale."
+                    "Reference the most compelling news/catalyst that tips the scale.\n\n"
+                    "### ⚠️ MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "<<<STOCK_RATINGS>>>\n"
+                    '{"ratings":{' + ','.join(f'"{t}":{{"score":0,"verdict":"hold"}}' for t in tickers) + '},"winner":"' + (tickers[0] if tickers else '?') + '"}\n'
+                    "<<<END_STOCK_RATINGS>>>\n"
+                    "Replace each score with your ACTUAL rating (1-100) and verdict with buy/hold/sell. "
+                    "Replace winner with the actual winning ticker. This data block is parsed by the UI — do NOT skip it."
+                ),
+            },
+            {
+                "title": "Buying Plan",
+                "system": base_system + "\nYou are now a personal investment advisor giving an actionable buying plan. Be specific, practical, and clear. The user needs step-by-step instructions they can follow RIGHT NOW.",
+                "web_search": False,
+                "prompt": (
+                    f"BUYING PLAN for the user.{uq_note}\n\n"
+                    "You just completed a full stock analysis. Now give the user a SPECIFIC, ACTIONABLE buying plan.\n\n"
+                    "Structure EXACTLY like this:\n\n"
+                    "## 💰 Your Buying Plan\n\n"
+                    "**Your Budget:** [reference the user's stated budget if mentioned]\n\n"
+                    "### Step-by-Step Instructions:\n"
+                    "1. **Open your brokerage app** (Robinhood, Fidelity, Schwab, etc.)\n"
+                    "2. **Search for [TICKER]** — this is your primary buy\n"
+                    "3. **Order type:** [Market order / Limit order at $X.XX] — explain why\n"
+                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] — show the math\n"
+                    "   - If the stock is too expensive for full shares, explain fractional shares\n"
+                    "5. **Set a stop-loss** at $X.XX to protect your downside\n\n"
+                    "### If you want to split your money:\n"
+                    "Show an alternative portfolio split with exact dollar amounts and share counts.\n\n"
+                    "### When to Buy:\n"
+                    "- Is now a good entry or should they wait for a dip?\n"
+                    "- Any upcoming events (earnings, etc.) to be aware of?\n\n"
+                    "### When to Sell:\n"
+                    "- Target price to take profits: $X.XX (X% gain)\n"
+                    "- Stop-loss price to cut losses: $X.XX (X% loss)\n\n"
+                    "### Important Reminders:\n"
+                    "- Don't invest money you can't afford to lose\n"
+                    "- This is AI analysis, not professional financial advice\n"
+                    "- Consider your risk tolerance and time horizon"
                 ),
             },
         ]
@@ -3047,7 +3360,44 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- **Ideal For:** [growth investor / value investor / swing trader / income investor]\n\n"
                     "### Bottom Line\n"
                     "2-3 sentences. Crystal clear. No ambiguity. What should the investor DO? "
-                    "Reference the most compelling news/catalyst that tips the scale."
+                    "Reference the most compelling news/catalyst that tips the scale.\n\n"
+                    "### ⚠️ MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "<<<STOCK_RATINGS>>>\n"
+                    + ('{"ratings":{"' + tickers[0] + '":{"score":0,"verdict":"hold"}},"winner":"' + tickers[0] + '"}\n' if tickers else '{"ratings":{},"winner":""}\n') +
+                    "<<<END_STOCK_RATINGS>>>\n"
+                    "Replace score with your ACTUAL rating (1-100) and verdict with buy/hold/sell. "
+                    "This data block is parsed by the UI — do NOT skip it."
+                ),
+            },
+            {
+                "title": "Buying Plan",
+                "system": base_system + "\nYou are now a personal investment advisor giving an actionable buying plan. Be specific, practical, and clear. The user needs step-by-step instructions they can follow RIGHT NOW.",
+                "web_search": False,
+                "prompt": (
+                    f"BUYING PLAN for the user.{uq_note}\n\n"
+                    "You just completed a full stock analysis. Now give the user a SPECIFIC, ACTIONABLE buying plan.\n\n"
+                    "Structure EXACTLY like this:\n\n"
+                    "## 💰 Your Buying Plan\n\n"
+                    "**Your Budget:** [reference the user's stated budget if mentioned]\n\n"
+                    "### Step-by-Step Instructions:\n"
+                    "1. **Open your brokerage app** (Robinhood, Fidelity, Schwab, etc.)\n"
+                    "2. **Search for [TICKER]** — this is your primary buy\n"
+                    "3. **Order type:** [Market order / Limit order at $X.XX] — explain why\n"
+                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] — show the math\n"
+                    "   - If the stock is too expensive for full shares, explain fractional shares\n"
+                    "5. **Set a stop-loss** at $X.XX to protect your downside\n\n"
+                    "### If you want to split your money:\n"
+                    "Show an alternative portfolio split with exact dollar amounts and share counts.\n\n"
+                    "### When to Buy:\n"
+                    "- Is now a good entry or should they wait for a dip?\n"
+                    "- Any upcoming events (earnings, etc.) to be aware of?\n\n"
+                    "### When to Sell:\n"
+                    "- Target price to take profits: $X.XX (X% gain)\n"
+                    "- Stop-loss price to cut losses: $X.XX (X% loss)\n\n"
+                    "### Important Reminders:\n"
+                    "- Don't invest money you can't afford to lose\n"
+                    "- This is AI analysis, not professional financial advice\n"
+                    "- Consider your risk tolerance and time horizon"
                 ),
             },
         ]
@@ -3228,6 +3578,46 @@ def prepare_chat_turn(chat, payload):
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
         sysprompt += tool_instructions
+
+    # --- HuggingFace Connector context ---
+    try:
+        hf_token = _hf_token()
+        if hf_token:
+            sysprompt += (
+                "\n\n[HUGGINGFACE CONNECTOR — ACTIVE]\n"
+                "The user has connected their HuggingFace account. You can use HuggingFace Spaces to perform tasks "
+                "beyond your built-in capabilities — like generating images with specific models (Flux, SDXL, etc.), "
+                "generating videos, text-to-speech, music generation, and more.\n\n"
+                "To use a HuggingFace Space, include this tag in your response:\n"
+                "<<<HF_SPACE: owner/space-name | your input prompt or text>>>\n\n"
+                "Examples:\n"
+                "- Image generation with Flux: <<<HF_SPACE: black-forest-labs/FLUX.1-schnell | a photorealistic cat astronaut>>>\n"
+                "- Video generation: <<<HF_SPACE: KwaiVGI/LivePortrait | input text or description>>>\n"
+                "- Text-to-speech: <<<HF_SPACE: suno/bark | Hello, this is a test>>>\n"
+                "- Music generation: <<<HF_SPACE: facebook/MusicGen | upbeat electronic dance music>>>\n"
+                "- Background removal: <<<HF_SPACE: ECCV2022/dis-background-removal | image_url>>>\n"
+                "- Image upscaling: <<<HF_SPACE: finegrain/finegrain-image-enhancer | image_url>>>\n\n"
+                "WHEN TO USE HuggingFace Spaces:\n"
+                "- When the user asks for a SPECIFIC image model (Flux, Stable Diffusion XL, Midjourney-style, etc.) "
+                "that isn't your built-in Gemini image generation\n"
+                "- When the user wants to generate VIDEO, AUDIO, MUSIC, or SPEECH\n"
+                "- When the user needs specialized AI tasks like background removal, image upscaling, style transfer, etc.\n"
+                "- When the user explicitly mentions HuggingFace or a specific Space\n\n"
+                "WHEN NOT TO USE HuggingFace Spaces:\n"
+                "- For regular image generation — use your built-in <<<IMAGE_GENERATE>>> (Gemini) first since it's faster\n"
+                "- For text conversations, code, file operations — use your normal capabilities\n"
+                "- If the user hasn't specifically asked for a different model or capability\n\n"
+                "RULES:\n"
+                "- The Space ID format is always 'owner/space-name' (e.g., 'black-forest-labs/FLUX.1-schnell')\n"
+                "- Include a descriptive prompt after the pipe (|)\n"
+                "- You can use MULTIPLE <<<HF_SPACE>>> tags in one response\n"
+                "- If a Space is busy or fails, inform the user and suggest trying again\n"
+                "- Always explain what you're doing: 'Let me generate that with Flux...' before the tag\n"
+                "- Popular Spaces for image gen: black-forest-labs/FLUX.1-schnell (fast), "
+                "stabilityai/stable-diffusion-3.5-large (high quality), playgroundai/playground-v2.5 (creative)\n"
+            )
+    except Exception:
+        pass
 
     # --- Reminder system ---
     # Always include reminder capability instructions
@@ -4601,6 +4991,102 @@ def get_models():
                        "base_url": ep.get("base_url"), "model": ep.get("model")})
     return jsonify({"models": result, "selected": normalize_selected_model(s)})
 
+# ─── Routes: Connectors ──────────────────────────────────────────────────────
+
+@app.route("/api/connectors")
+@require_auth
+def get_connectors():
+    c = load_connectors()
+    # Mask the token for security
+    safe = {}
+    for name, cfg in c.items():
+        safe[name] = dict(cfg)
+        if safe[name].get("token"):
+            t = safe[name]["token"]
+            safe[name]["token"] = "••••" + t[-4:] if len(t) > 4 else "••••"
+    return jsonify({"connectors": safe})
+
+@app.route("/api/connectors", methods=["POST"])
+@require_auth
+def update_connectors():
+    d = request.get_json() or {}
+    c = load_connectors()
+    connector = d.get("connector")
+    if connector == "huggingface":
+        token = d.get("token")
+        enabled = d.get("enabled")
+        if token is not None:
+            c.setdefault("huggingface", {})["token"] = token
+        if enabled is not None:
+            c.setdefault("huggingface", {})["enabled"] = bool(enabled)
+    save_connectors(c)
+    return jsonify({"ok": True})
+
+@app.route("/api/connectors/huggingface/test", methods=["POST"])
+@require_auth
+def test_hf_connector():
+    """Test that the HuggingFace token is valid."""
+    c = load_connectors()
+    token = c.get("huggingface", {}).get("token", "")
+    if not token:
+        return jsonify({"ok": False, "error": "No token configured"})
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        info = api.whoami()
+        username = info.get("name", info.get("fullname", "Unknown"))
+        return jsonify({"ok": True, "username": username})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Token invalid: {str(e)[:200]}"})
+
+@app.route("/api/connectors/huggingface/spaces/search", methods=["POST"])
+@require_auth
+def search_hf_spaces():
+    """Search HuggingFace Spaces by query."""
+    d = request.get_json() or {}
+    query = (d.get("query") or "").strip()
+    if not query:
+        return jsonify({"spaces": []})
+    token = _hf_token()
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token or None)
+        spaces = api.list_spaces(search=query, limit=10, sort="likes")
+        results = []
+        for s in spaces:
+            results.append({
+                "id": s.id,
+                "likes": getattr(s, 'likes', 0),
+                "sdk": getattr(s, 'sdk', ''),
+            })
+        return jsonify({"spaces": results})
+    except Exception as e:
+        return jsonify({"spaces": [], "error": str(e)[:200]})
+
+@app.route("/api/connectors/huggingface/run", methods=["POST"])
+@require_auth
+def run_hf_space_route():
+    """Run a HuggingFace Space with given input."""
+    d = request.get_json() or {}
+    space_id = (d.get("space") or "").strip()
+    user_input = (d.get("input") or "").strip()
+    if not space_id:
+        return jsonify({"error": "No space_id provided"}), 400
+    token = _hf_token()
+    if not token:
+        return jsonify({"error": "HuggingFace connector not configured. Go to Settings → Connectors to set up your HuggingFace token."}), 400
+    result = run_hf_space(space_id, user_input, hf_token=token)
+    return jsonify(result)
+
+@app.route("/api/connectors/huggingface/delete", methods=["POST"])
+@require_auth
+def delete_hf_connector():
+    """Remove the HuggingFace connector."""
+    c = load_connectors()
+    c["huggingface"] = {"token": "", "enabled": False}
+    save_connectors(c)
+    return jsonify({"ok": True})
+
 # ─── Routes: Chats ────────────────────────────────────────────────────────────
 
 @app.route("/api/chats")
@@ -4985,6 +5471,7 @@ def chat_message(chat_id):
     resp, image_searches = extract_image_searches(resp)
     resp, image_generations = extract_image_generation(resp)
     resp, stock_tickers_sync = extract_stock_tickers(resp)
+    resp, hf_calls_sync = extract_hf_space_calls(resp)
     resp, extracted_reminders = extract_reminders(resp)
     # Fetch stock data synchronously for non-streaming path
     stock_results_sync = []
@@ -5013,6 +5500,13 @@ def chat_message(chat_id):
             if img_b64:
                 data_uri = f"data:{result_or_err};base64,{img_b64}"
                 gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": result_or_err})
+    hf_results_sync = []
+    if hf_calls_sync:
+        token = _hf_token()
+        for entry in hf_calls_sync:
+            hf_res = run_hf_space(entry['space'], entry['input'], entry.get('params'), hf_token=token)
+            if hf_res.get("success"):
+                hf_results_sync.append({"space": entry['space'], "index": entry['index'], "result": hf_res})
     clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, resp, original_raw=original_resp)
     if image_results:
         chat["messages"][-1]["image_results"] = image_results
@@ -5020,9 +5514,11 @@ def chat_message(chat_id):
         chat["messages"][-1]["generated_images"] = gen_results
     if stock_results_sync:
         chat["messages"][-1]["stock_results"] = stock_results_sync
-    if image_results or gen_results or stock_results_sync:
+    if hf_results_sync:
+        chat["messages"][-1]["hf_results"] = hf_results_sync
+    if image_results or gen_results or stock_results_sync or hf_results_sync:
         save_chat(chat)
-    result = {"reply": clean_wp if (image_searches or image_generations or stock_tickers_sync) else clean, "files": executed, "memory_added": new_facts}
+    result = {"reply": clean_wp if (image_searches or image_generations or stock_tickers_sync or hf_calls_sync) else clean, "files": executed, "memory_added": new_facts}
     if code_results:
         result["code_results"] = code_results
     if research_query:
@@ -5033,6 +5529,8 @@ def chat_message(chat_id):
         result["generated_images"] = gen_results
     if stock_results_sync:
         result["stock_results"] = stock_results_sync
+    if hf_results_sync:
+        result["hf_results"] = hf_results_sync
     if extracted_reminders:
         result["reminders_set"] = extracted_reminders
     return jsonify(result)
@@ -5731,6 +6229,8 @@ def chat_message_stream(chat_id):
                 import queue, threading
                 _SENTINEL = object()
                 _HEARTBEAT_INTERVAL = 15          # seconds
+                _MAX_STALL_HEARTBEATS = 8         # give up after 8 heartbeats (~2 min) with no data
+                _stall_count = 0
                 _chunk_q = queue.Queue()
 
                 def _stream_worker():
@@ -5758,9 +6258,14 @@ def chat_message_stream(chat_id):
                     try:
                         chunk = _chunk_q.get(timeout=_HEARTBEAT_INTERVAL)
                     except queue.Empty:
+                        _stall_count += 1
+                        if _stall_count >= _MAX_STALL_HEARTBEATS:
+                            print(f"  [stream] Stall detected — {_stall_count} heartbeats with no data. Ending stream.")
+                            break
                         # No data for 15 s — send heartbeat to keep connection alive
                         yield event({"type": "heartbeat"})
                         continue
+                    _stall_count = 0  # reset on any real data
                     if chunk is _SENTINEL:
                         break
                     if isinstance(chunk, Exception):
@@ -5912,12 +6417,35 @@ def chat_message_stream(chat_id):
             raw_text, image_searches = extract_image_searches(raw_text)
             raw_text, image_generations = extract_image_generation(raw_text)
             raw_text, stock_tickers = extract_stock_tickers(raw_text)
+            raw_text, hf_space_calls = extract_hf_space_calls(raw_text)
             raw_text, stream_reminders = extract_reminders(raw_text)
-            has_pending_ops = bool(image_searches or image_generations or stock_tickers)
+
+            # ── Execute HuggingFace Space calls (stop-and-wait, like code execution) ──
+            _hf_results_stream = []
+            if hf_space_calls:
+                hf_token = _hf_token()
+                yield event({"type": "hf_executing", "count": len(hf_space_calls)})
+                for call in hf_space_calls:
+                    yield event({"type": "hf_loading", "space": call['space'], "index": call['index'], "input": call['input']})
+                    if hf_token:
+                        try:
+                            result = run_hf_space(call['space'], call['input'], call.get('params'), hf_token)
+                            hr = {"space": call['space'], "index": call['index'], "result": result}
+                            _hf_results_stream.append(hr)
+                            if result and result.get("success"):
+                                yield event({"type": "hf_space_result", "hf": hr})
+                            else:
+                                yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": (result or {}).get("error", "Unknown error")})
+                        except Exception as e:
+                            yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": str(e)[:200]})
+                    else:
+                        yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": "HuggingFace connector not configured. Go to Settings → Connectors to add your token."})
+
+            has_pending_ops = bool(image_searches or image_generations or stock_tickers or hf_space_calls)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
             done_payload = {
                 "type": "done",
-                "reply": clean_wp if (image_searches or image_generations or stock_tickers) else clean,
+                "reply": clean_wp if (image_searches or image_generations or stock_tickers or hf_space_calls) else clean,
                 "files": executed,
                 "memory_added": new_facts,
                 "title": chat.get("title", "New Chat"),
@@ -5954,6 +6482,8 @@ def chat_message_stream(chat_id):
                 done_payload["preloaded_stock_indices"] = [r["index"] for r in _fetched_stocks]
             if _fetched_gens:
                 done_payload["preloaded_gen_indices"] = [r["index"] for r in _fetched_gens]
+            if _hf_results_stream:
+                done_payload["hf_results"] = _hf_results_stream
             yield event(done_payload)
 
             # Persist mid-stream results in chat history
@@ -5963,7 +6493,9 @@ def chat_message_stream(chat_id):
                 chat["messages"][-1]["stock_results"] = _fetched_stocks
             if _fetched_gens:
                 chat["messages"][-1]["generated_images"] = _fetched_gens
-            if _fetched_images or _fetched_stocks or _fetched_gens:
+            if _hf_results_stream:
+                chat["messages"][-1]["hf_results"] = _hf_results_stream
+            if _fetched_images or _fetched_stocks or _fetched_gens or _hf_results_stream:
                 save_chat(chat)
 
             # gen_ops_complete signal
@@ -6762,65 +7294,19 @@ def _research_agent_steps(query):
 @app.route("/api/research-plan", methods=["POST"])
 @require_auth_or_guest
 def research_plan():
-    """Generate a research plan with clarifying questions before running the agent."""
+    """Return a preset research plan based on the query. Uses the same steps as the agent."""
     data = request.get_json() or {}
     query = (data.get("query") or "").strip()
     if not query:
         return jsonify({"error": "No research query provided"}), 400
 
-    settings = load_settings()
-    selected = normalize_selected_model(settings)
-    resolved = resolve_chat_model({"model": selected}, settings)
-    if resolved.get("error"):
-        return jsonify({"error": resolved["error"]}), 403
-
-    provider = resolved.get("provider")
-    api_key = resolved.get("api_key")
-    model = resolved.get("actual_model")
-    base_url = resolved.get("base_url")
-
-    system = (
-        "You are a research planning assistant. Given a research query, generate a concise research plan.\n"
-        "Respond in EXACTLY this JSON format (no markdown, no code fences):\n"
-        "{\n"
-        '  "questions": ["question1", "question2"],\n'
-        '  "plan": [\n'
-        '    {"title": "Step Title", "description": "What this step will do"},\n'
-        '    ...\n'
-        '  ],\n'
-        '  "refined_query": "improved version of the original query"\n'
-        "}\n\n"
-        "RULES:\n"
-        "- If the query is clear and specific, return an empty questions array.\n"
-        "- If the query is vague or ambiguous, include 1-3 short clarifying questions.\n"
-        "- Plan should have 5-8 steps that are specific to the query.\n"
-        "- Each step title should be short (3-6 words).\n"
-        "- Each step description should be 1 sentence explaining the research approach.\n"
-        "- The refined_query should be a clearer, more focused version of the user's query.\n"
-        "- Return ONLY valid JSON, nothing else."
-    )
-    messages = [{"role": "user", "text": f"Create a research plan for: {query}"}]
-
-    try:
-        result = PROVIDERS.get(provider, call_openai)(
-            api_key, model, system, messages, base_url=base_url,
-        )
-        # Parse JSON from response
-        text = result.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = re.sub(r'^```(?:json)?\s*', '', text)
-            text = re.sub(r'```\s*$', '', text)
-        plan_data = json.loads(text)
-        return jsonify(plan_data)
-    except (json.JSONDecodeError, Exception) as e:
-        # Fallback: return default plan
-        default_steps = _research_agent_steps(query)
-        return jsonify({
-            "questions": [],
-            "plan": [{"title": s["title"], "description": s["prompt"][:100] + "..."} for s in default_steps],
-            "refined_query": query,
-        })
+    # Always use the preset 8-step plan — consistent and reliable
+    default_steps = _research_agent_steps(query)
+    return jsonify({
+        "questions": [],
+        "plan": [{"title": s["title"], "description": s["prompt"][:120]} for s in default_steps],
+        "refined_query": query,
+    })
 
 
 @app.route("/api/research-agent", methods=["POST"])
@@ -6884,6 +7370,30 @@ def research_agent():
         """Extract key findings / important statements from step output."""
         findings = []
         seen = set()
+
+        # Skip patterns that are clearly from prompt templates / instructions
+        _SKIP_PHRASES = [
+            'research mission', 'specific research', 'the topic', 'your task',
+            'execute the', 'search the web', 'for each', 'run at least',
+            'key claims, findings', 'preceding steps', 'clear list of',
+            'one-sentence statement', 'supporting data', 'direct quotes',
+            'search for', 'example query', 'source mapping', 'evidence inventory',
+            'initial findings', 'research gaps', 'primary source', 'deep dive',
+            'additional discovery', 'claim verification', 'contradiction analysis',
+            'recency check', 'confidence summary', 'expert voices', 'stakeholder map',
+            'schools of thought', 'historical context', 'key metrics', 'comparative analysis',
+            'pattern recognition', 'implications of data', 'core findings',
+            'non-obvious connections', 'risk & opportunity', 'confidence dashboard',
+            'open questions', 'scenario analysis', 'actionable recommendations',
+            'what to watch', 'second-order effects', 'intelligence brief',
+            'executive summary', 'analysis & implications', 'actionable takeaways',
+            'sources & references', 'tell me what topic', 'please tell me',
+            'not been provided', 'have not been', 'topic i need',
+        ]
+        def _is_instructional(txt):
+            low = txt.lower()
+            return any(p in low for p in _SKIP_PHRASES)
+
         # 📌 Finding pattern
         for m in re.finditer(r'📌\s*\*\*([^*]+)\*\*[:\s]*([^\n]*)', text):
             f = m.group(1).strip()
@@ -6891,7 +7401,7 @@ def research_agent():
             if desc:
                 f += ": " + desc
             key = f.lower()[:50]
-            if key not in seen and len(f) > 10:
+            if key not in seen and len(f) > 10 and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         # **Bold Key**: description pattern
@@ -6903,28 +7413,28 @@ def research_agent():
                 continue
             f = label + ": " + desc
             key = f.lower()[:50]
-            if key not in seen:
+            if key not in seen and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         # 🟢/🟡/🔴 confidence-tagged items
         for m in re.finditer(r'[🟢🟡🔴]\s*\*\*([^*]{5,80})\*\*', text):
             f = m.group(1).strip()
             key = f.lower()[:50]
-            if key not in seen and len(f) > 10:
+            if key not in seen and len(f) > 10 and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         # Numbered findings: "1. **..." or "- **..."
         for m in re.finditer(r'(?:^|\n)\s*(?:\d+[\.\)]\s*|[-•]\s*)\*\*([^*]{8,80})\*\*', text):
             f = m.group(1).strip()
             key = f.lower()[:50]
-            if key not in seen and len(f) > 10:
+            if key not in seen and len(f) > 10 and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         # Key insight / key takeaway / key finding / important patterns
         for m in re.finditer(r'(?:key\s+(?:insight|takeaway|finding|conclusion)|important)[:\s]+([^\n]{15,120})', text, re.IGNORECASE):
             f = m.group(1).strip().rstrip('.')
             key = f.lower()[:50]
-            if key not in seen and len(f) > 10:
+            if key not in seen and len(f) > 10 and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         return findings[:12]
@@ -6934,6 +7444,7 @@ def research_agent():
         import time as _time
         import itertools
         import threading
+        import queue as _queue
         all_research = []
         all_sources = []
         all_findings = []
@@ -6941,6 +7452,7 @@ def research_agent():
         seen_urls = set()
         total_word_count = 0
         STEP_TIMEOUT = 300  # 5 minute timeout per step
+        _HEARTBEAT_SEC = 12  # Send keepalive every 12s to prevent proxy/browser timeouts
 
         yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
                     "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
@@ -7016,7 +7528,7 @@ def research_agent():
                             except (AttributeError, TypeError):
                                 pass  # url_context not available in this SDK version
 
-                        _client = genai.Client(api_key=api_key, http_options={"timeout": 300})
+                        _client = genai.Client(api_key=api_key)
                         _turn_contents = _google_contents_from_messages(messages, types)
                         _cfg_args = dict(
                             system_instruction=step["system"],
@@ -7036,12 +7548,42 @@ def research_agent():
                         # Multi-turn loop: let the model do multiple rounds per step
                         for _turn in range(MAX_TURNS_PER_STEP):
                             _turn_pieces = []
-                            _stream = _client.models.generate_content_stream(
-                                model=model, contents=_turn_contents, config=_cfg,
-                            )
-                            _first = next(_stream, None)
 
-                            for chunk in itertools.chain([_first] if _first else [], _stream):
+                            # Run API streaming in a background thread with heartbeat
+                            # to prevent proxy/browser timeouts during slow API calls
+                            _chunk_q = _queue.Queue()
+                            _SENTINEL = object()
+
+                            def _stream_worker(_client, _model, _contents, _cfg, _q, _sentinel):
+                                try:
+                                    _s = _client.models.generate_content_stream(
+                                        model=_model, contents=_contents, config=_cfg,
+                                    )
+                                    for _c in _s:
+                                        _q.put(_c)
+                                except Exception as _e:
+                                    _q.put(_e)
+                                finally:
+                                    _q.put(_sentinel)
+
+                            _worker = threading.Thread(
+                                target=_stream_worker,
+                                args=(_client, model, _turn_contents, _cfg, _chunk_q, _SENTINEL),
+                                daemon=True,
+                            )
+                            _worker.start()
+
+                            while True:
+                                try:
+                                    chunk = _chunk_q.get(timeout=_HEARTBEAT_SEC)
+                                except _queue.Empty:
+                                    # No data for a while — send heartbeat to keep connection alive
+                                    yield evt({"type": "heartbeat"})
+                                    continue
+                                if chunk is _SENTINEL:
+                                    break
+                                if isinstance(chunk, Exception):
+                                    raise chunk
                                 try:
                                     for candidate in (chunk.candidates or []):
                                         for part in (candidate.content.parts or []):
@@ -7193,7 +7735,20 @@ def research_agent():
             except Exception:
                 pass
 
-    return Response(generate(), mimetype="application/x-ndjson")
+    def _safe_generate():
+        """Wrapper that catches unexpected errors in the research generator and emits an error event."""
+        try:
+            yield from generate()
+        except GeneratorExit:
+            pass  # Client disconnected, normal cleanup
+        except Exception as e:
+            print(f"  [research] FATAL generator error: {e}")
+            try:
+                yield json.dumps({"type": "agent_error", "error": str(e)[:300]}) + "\n"
+            except Exception:
+                pass
+
+    return Response(_safe_generate(), mimetype="application/x-ndjson")
 
 
 

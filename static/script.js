@@ -176,30 +176,73 @@ function stopStreaming(){
 
 function editMsg(btn){
   const msgEl=btn.closest('.msg');
-  const text=msgEl.dataset.text||'';
-  const input=document.getElementById('msgInput');
-  input.value=text;autoResize(input);
-  // Count user messages before this one to determine truncation index
+  if(msgEl.querySelector('.msg-edit-area'))return; // already editing
+  const originalText=msgEl.dataset.text||'';
+
+  // Save original innerHTML so we can restore on cancel
+  const originalHTML=msgEl.innerHTML;
+
+  // Find the text content area — could be a .upf-full pre, or direct text node, etc.
+  // We'll overlay an edit UI on the message itself
   const area=document.getElementById('chatArea');
   const allMsgs=[...area.querySelectorAll('.msg')];
-  const msgIndex=allMsgs.indexOf(msgEl);
-  // Count actual chat messages (user + assistant pairs) up to this point
+
+  // Count backend index for truncation
   let backendIndex=0;
   for(let i=0;i<allMsgs.length;i++){
     if(allMsgs[i]===msgEl)break;
     if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
   }
-  // Remove this message and ALL subsequent messages from DOM
-  let toRemove=[];
-  let found=false;
-  for(const el of allMsgs){
-    if(el===msgEl)found=true;
-    if(found)toRemove.push(el);
-  }
-  toRemove.forEach(el=>el.remove());
-  // Store truncation index so next sendMessage includes it
-  window._editTruncateAt=backendIndex;
-  input.focus();
+
+  // Build inline edit UI — keep files/images at top, replace text with textarea
+  const filesEl=msgEl.querySelector('.msg-user-files');
+  const filesHTML=filesEl?filesEl.outerHTML:'';
+
+  msgEl.innerHTML=filesHTML+
+    `<div class="msg-edit-area">`+
+    `<textarea class="msg-edit-input" id="_msgEditInput">${esc(originalText)}</textarea>`+
+    `<div class="msg-edit-actions">`+
+    `<button class="msg-edit-save" id="_msgEditSave">Send Edit</button>`+
+    `<button class="msg-edit-cancel" id="_msgEditCancel">Cancel</button>`+
+    `</div></div>`;
+
+  const editInput=document.getElementById('_msgEditInput');
+  editInput.focus();
+  // Auto-resize textarea
+  editInput.style.height='auto';
+  editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
+  editInput.addEventListener('input',()=>{
+    editInput.style.height='auto';
+    editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
+  });
+
+  // Cancel — restore original message
+  document.getElementById('_msgEditCancel').addEventListener('click',()=>{
+    msgEl.innerHTML=originalHTML;
+  });
+
+  // Save — send the edited message
+  document.getElementById('_msgEditSave').addEventListener('click',()=>{
+    const newText=editInput.value.trim();
+    if(!newText)return;
+
+    // Remove this message and all subsequent messages
+    let toRemove=[];
+    let found=false;
+    for(const el of allMsgs){
+      if(el===msgEl)found=true;
+      if(found)toRemove.push(el);
+    }
+    toRemove.forEach(el=>el.remove());
+
+    // Set truncation index and send
+    window._editTruncateAt=backendIndex;
+    const input=document.getElementById('msgInput');
+    input.value=newText;
+    autoResize(input);
+    // Trigger send
+    sendMessage();
+  });
 }
 
 function retryMsg(btn){
@@ -560,6 +603,8 @@ async function showApp(){
   document.getElementById('msgInput').focus();
   checkForUpdates();
   ensureOnboarding();
+  // Show HF tool in + menu if connected
+  try{const cr=await fetch('/api/connectors');if(cr.ok){const cd=await cr.json();const hf=cd.connectors?.huggingface||{};const hfTool=document.getElementById('hfToolItem');if(hfTool)hfTool.style.display=(hf.enabled&&hf.token)?'':'none';}}catch{}
 }
 
 // ─── Changelog / Update Notification ──────────────
@@ -1485,18 +1530,64 @@ function renderChatList(filter=''){
       const g=isChatRunning(c.id)?' generating':'';
       const u=unreadChats.has(c.id)?' unread':'';
       const sel=selectMode&&selectedItems.has(c.id)?' selected':'';
-      html+=`<div class="sb-chat${a}${g}${u}${sel}" onclick="${selectMode?`toggleSelectChat('${c.id}')`:"openChat('"+c.id+"')"}">`;
+      const inFld=fld?' in-folder':'';
+      html+=`<div class="sb-chat${a}${g}${u}${sel}${inFld}" draggable="true" data-chat-id="${c.id}" onclick="${selectMode?`toggleSelectChat('${c.id}')`:"openChat('"+c.id+"')"}">`;
       if(selectMode)html+=`<input type="checkbox" class="sb-sel-cb" ${selectedItems.has(c.id)?'checked':''} onclick="event.stopPropagation();toggleSelectChat('${c.id}')">`;
       html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();showMoveMenu(this,'${c.id}')" title="Move to folder">📁</button><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
+  // ── Drag-to-folder: wire up after render ──
+  _initSidebarDrag(el);
   // Update select bar count
   const selBar=document.getElementById('selectBar');
   if(selBar){
     const cnt=selectedItems.size;
     document.getElementById('selCount').textContent=cnt?`${cnt} selected`:'None selected';
   }
+}
+
+// ── Sidebar drag-to-folder ──
+function _initSidebarDrag(container){
+  let _dragChatId=null;
+  container.addEventListener('dragstart',e=>{
+    const chatEl=e.target.closest('.sb-chat[data-chat-id]');
+    if(!chatEl)return;
+    _dragChatId=chatEl.dataset.chatId;
+    chatEl.classList.add('sb-drag-active');
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain',_dragChatId);
+  });
+  container.addEventListener('dragend',e=>{
+    _dragChatId=null;
+    container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
+    container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
+  });
+  container.addEventListener('dragover',e=>{
+    if(!_dragChatId)return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    const folderEl=e.target.closest('.sb-folder[data-folder]');
+    container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
+    if(folderEl)folderEl.classList.add('sb-drag-over');
+  });
+  container.addEventListener('dragleave',e=>{
+    const folderEl=e.target.closest('.sb-folder[data-folder]');
+    if(folderEl)folderEl.classList.remove('sb-drag-over');
+  });
+  container.addEventListener('drop',e=>{
+    e.preventDefault();
+    container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
+    container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
+    const folderEl=e.target.closest('.sb-folder[data-folder]');
+    if(!_dragChatId||!folderEl)return;
+    const targetFolder=folderEl.dataset.folder;
+    const chat=allChats.find(c=>c.id===_dragChatId);
+    if(chat&&chat.folder!==targetFolder){
+      moveChat(_dragChatId,targetFolder);
+    }
+    _dragChatId=null;
+  });
 }
 
 function filterChats(){renderChatList(document.getElementById('chatSearch').value)}
@@ -2139,7 +2230,7 @@ function renderToolBadges(){
   }
   if(!activeTools.size){wrap.style.display='none';return;}
   wrap.style.display='flex';
-  const names={canvas:'Canvas',search:'Web Search',mindmap:'Mind Map',research:'Research Agent',summarize:'Summarize',code:'Code Execution',imagegen:'Image Generation'};
+  const names={canvas:'Canvas',search:'Web Search',mindmap:'Mind Map',research:'Research Agent',summarize:'Summarize',code:'Code Execution',imagegen:'Image Generation',huggingface:'HuggingFace Spaces'};
   wrap.innerHTML=[...activeTools].map(t=>`<span class="tool-badge" onclick="activateTool('${t}')">${names[t]||t} <span class="tb-x">×</span></span>`).join('');
 }
 
@@ -2447,6 +2538,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
     let stepThinking='';
     let failedSteps=0;
     let followupQuestions=[];
+    let _raDoneReceived=false;
 
     while(true){
       const{done,value}=await reader.read();
@@ -2563,6 +2655,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             addFinding(f, ev.step);
           }
         }else if(ev.type==='agent_done'){
+          _raDoneReceived=true;
           clearInterval(elTimer);
           if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
           updateProgress(totalSteps,'Research complete!');
@@ -2695,15 +2788,32 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
           showToast('Research complete!','✅');
           _raAutoScroll();
+        }else if(ev.type==='heartbeat'){
+          // Keepalive from server — ignore, just prevents connection timeout
+        }else if(ev.type==='agent_error'){
+          // Fatal server-side error during research
+          clearInterval(elTimer);
+          if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+          const badge=document.getElementById('_raBadge');
+          if(badge){badge.classList.add('ra-badge-done');badge.textContent='❌ Research Error';}
+          const actEl=document.getElementById('_raActivity');
+          if(actEl) actEl.innerHTML=`<span>Server error: ${esc((ev.error||'Unknown error').slice(0,150))}</span>`;
+          contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='✗ error';el.className='ra-section-status ra-failed';});
         }
       }
     }
+    // Stream ended — check if we got a proper completion
+    if(!_raDoneReceived){
+      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      const badge=document.getElementById('_raBadge');
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Research Interrupted — '+totalTime+'s';}
+      const actEl=document.getElementById('_raActivity');
+      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. The server may have timed out. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></span>`;
+      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
+    }
   }catch(e){
-    clearInterval(elTimer);
-    if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
-    area.removeEventListener('scroll',_raOnScroll);
-    setChatRunning(chatId,false);
     const isAbort=e.name==='AbortError';
+    const isNetwork=e.name==='TypeError'||e.message?.includes('network')||e.message?.includes('Failed to fetch');
     if(isAbort){
       // User cancelled — show a clean message
       const badge=document.getElementById('_raBadge');
@@ -2711,10 +2821,26 @@ async function runResearchAgent(query, contentEl, area, chatId){
       const actEl=document.getElementById('_raActivity');
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⏹ cancelled';el.className='ra-section-status ra-failed';});
+    }else if(isNetwork){
+      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      const badge=document.getElementById('_raBadge');
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Connection Lost — '+totalTime+'s';}
+      const actEl=document.getElementById('_raActivity');
+      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></span>`;
+      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ lost';el.className='ra-section-status ra-failed';});
     }else{
-      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}</div>`;
+      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      const badge=document.getElementById('_raBadge');
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='❌ Research Failed — '+totalTime+'s';}
+      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container')?.parentElement||contentEl;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg')?.parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></div>`;
       setStatus('Research failed.');
     }
+  }finally{
+    // Always clean up regardless of how the research ended
+    clearInterval(elTimer);
+    if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+    area.removeEventListener('scroll',_raOnScroll);
+    setChatRunning(chatId,false);
   }
 }
 
@@ -2747,22 +2873,46 @@ function _saParseRating(text){
   return{label:'Hold',score:50};
 }
 
+function _saParseStockRatings(text){
+  // Extract <<<STOCK_RATINGS>>> JSON block from AI text
+  if(!text)return null;
+  const m=text.match(/<<<STOCK_RATINGS>>>\s*([\s\S]*?)\s*<<<END_STOCK_RATINGS>>>/);
+  if(!m)return null;
+  try{
+    const data=JSON.parse(m[1].trim());
+    if(data&&data.ratings)return data;
+  }catch(e){}
+  return null;
+}
+
+function _scoreToLabel(n){
+  if(n>=90)return'Strong Buy';
+  if(n>=75)return'Buy';
+  if(n>=60)return'Lean Buy';
+  if(n>=45)return'Hold';
+  if(n>=30)return'Lean Sell';
+  if(n>=15)return'Sell';
+  return'Strong Sell';
+}
+
 function _buildGaugeHTML(pct,label,title){
   const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
   const r=54,cx=60,cy=60,stroke=8;
   const circ=2*Math.PI*r;
-  const arcLen=circ*0.75;
+  const gapFrac=0.25;
+  const arcLen=circ*(1-gapFrac);
   const filled=arcLen*(pct/100);
-  const dashArr=`${filled} ${arcLen-filled}`;
-  return `<div class="sa-gauge-arc"><svg viewBox="0 0 120 120" width="120" height="120"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-dasharray="${arcLen} ${circ-arcLen}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${dashArr}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round" class="sa-gauge-arc-fill"/><text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="24" font-weight="800" font-family="var(--mono)">${pct}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div class="sa-gauge-verdict" style="color:${color}">${esc(label)}</div></div>`;
+  // Offset rotates start to bottom-left of gap; gap is centered at top
+  const offset=-circ*0.125;
+  return `<div class="sa-gauge-arc"><svg viewBox="0 0 120 120" width="160" height="160"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-dasharray="${arcLen} ${circ}" stroke-dashoffset="${offset}"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${filled} ${circ}" stroke-dashoffset="${offset}" class="sa-gauge-arc-fill"/><text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="24" font-weight="800" font-family="var(--mono)">${pct}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div class="sa-gauge-verdict" style="color:${color}">${esc(label)}</div></div>`;
 }
 
 function buildSentimentGauge(rating, stockDataArr, lastStepText){
   if(!rating)return'';
-  // Build per-stock gauges if multiple stocks
+  // Parse AI's structured ratings if available
+  const aiRatings=_saParseStockRatings(lastStepText);
   const stocks=(stockDataArr||[]).filter(d=>!d.error);
   if(stocks.length>1){
-    // Extract per-stock summary snippets from verdict text
     const _extractSnippet=(ticker,text)=>{
       if(!text)return'';
       const lines=text.split('\n');
@@ -2775,28 +2925,36 @@ function buildSentimentGauge(rating, stockDataArr, lastStepText){
       }
       return'';
     };
-    let tabs='';let panels='';
+    let panels='';
     for(let i=0;i<stocks.length;i++){
       const sd=stocks[i];
       const ticker=sd.ticker||'?';
-      const hs=sd.health&&sd.health.score!=null?sd.health.score:50;
-      let label;
-      if(hs>=90)label='Strong Buy';else if(hs>=75)label='Buy';else if(hs>=60)label='Lean Buy';else if(hs>=45)label='Hold';else if(hs>=30)label='Lean Sell';else if(hs>=15)label='Sell';else label='Strong Sell';
-      const active=i===0?' sa-gauge-tab-active':'';
+      // Use AI rating if available, otherwise fall back to health score
+      let hs=sd.health&&sd.health.score!=null?sd.health.score:50;
+      if(aiRatings&&aiRatings.ratings&&aiRatings.ratings[ticker]){
+        hs=Math.max(1,Math.min(100,aiRatings.ratings[ticker].score||hs));
+      }
+      const label=_scoreToLabel(hs);
       const hidden=i===0?'':'display:none;';
       const color=hs>=75?'#22c55e':hs>=60?'#86efac':hs>=45?'#eab308':hs>=30?'#f97316':'#ef4444';
       const bgGrad=hs>=75?'linear-gradient(135deg,rgba(34,197,94,.08),rgba(34,197,94,.02))':hs>=45?'linear-gradient(135deg,rgba(234,179,8,.08),rgba(234,179,8,.02))':'linear-gradient(135deg,rgba(239,68,68,.08),rgba(239,68,68,.02))';
-      tabs+=`<button class="sa-gauge-tab${active}" data-sa-gauge-idx="${i}" onclick="(function(btn){var wrap=btn.closest('.sa-gauge-wrap');wrap.querySelectorAll('.sa-gauge-tab').forEach(function(t){t.classList.remove('sa-gauge-tab-active')});btn.classList.add('sa-gauge-tab-active');wrap.querySelectorAll('.sa-gauge-panel').forEach(function(p,j){p.style.display=j==btn.dataset.saGaugeIdx?'':'none'});})(this)">${esc(ticker)}</button>`;
       const snippet=_extractSnippet(ticker,lastStepText);
-      panels+=`<div class="sa-gauge-panel" style="${hidden}background:${bgGrad};border-radius:var(--r-sm);padding:12px">${_buildGaugeHTML(hs,label,ticker)}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${hs}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div>${snippet?`<div class="sa-gauge-snippet">${esc(snippet)}</div>`:''}</div>`;
+      panels+=`<div class="sa-gauge-panel" data-sa-ticker="${esc(ticker)}" style="${hidden}background:${bgGrad};border-radius:var(--r-sm);padding:12px">${_buildGaugeHTML(hs,label,ticker)}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${hs}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div>${snippet?`<div class="sa-gauge-snippet">${esc(snippet)}</div>`:''}</div>`;
     }
-    return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Per-Stock Sentiment</div><div class="sa-gauge-tabs">${tabs}</div>${panels}</div></div>`;
+    return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Per-Stock Sentiment</div>${panels}</div></div>`;
   }
-  // Single stock — original gauge
-  const pct=Math.max(0,Math.min(100,rating.score));
+  // Single stock — use AI rating if available
+  let pct=Math.max(0,Math.min(100,rating.score));
+  if(aiRatings&&aiRatings.ratings){
+    const keys=Object.keys(aiRatings.ratings);
+    if(keys.length===1&&aiRatings.ratings[keys[0]].score){
+      pct=Math.max(1,Math.min(100,aiRatings.ratings[keys[0]].score));
+    }
+  }
+  const sLabel=_scoreToLabel(pct);
   const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
   const bgGrad=pct>=75?'linear-gradient(135deg,rgba(34,197,94,.08),rgba(34,197,94,.02))':pct>=45?'linear-gradient(135deg,rgba(234,179,8,.08),rgba(234,179,8,.02))':'linear-gradient(135deg,rgba(239,68,68,.08),rgba(239,68,68,.02))';
-  return`<div class="sa-extras"><div class="sa-gauge-wrap" style="background:${bgGrad}"><div class="sa-gauge-title">📊 Overall Sentiment</div>${_buildGaugeHTML(pct,esc(rating.label),'')}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`; 
+  return`<div class="sa-extras"><div class="sa-gauge-wrap" style="background:${bgGrad}"><div class="sa-gauge-title">📊 Overall Sentiment</div>${_buildGaugeHTML(pct,esc(sLabel),'')}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`;
 }
 
 function buildGrowthChart(stockDataArr){
@@ -2835,9 +2993,9 @@ function buildGrowthChart(stockDataArr){
 
 // ─── Stock Analysis Agent ─────────────────────────
 async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId){
-  const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠️','🎯','🔎','🏆'];
-  const stepNames=['Stock Screening','Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Winner Deep Dive','Final Verdict'];
-  const totalSteps=10;
+  const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠️','🎯','🔎','🏆','💰'];
+  const stepNames=['Stock Screening','Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Winner Deep Dive','Final Verdict','Buying Plan'];
+  const totalSteps=11;
   let currentStep=0;
   const stepTimers={};
   const stepElapsed={};
@@ -2955,6 +3113,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     let stepThinking='';
     let failedSteps=0;
     let lastStepText='';
+    let verdictStepText='';
+    let allStepTexts={};
 
     while(true){
       const{done,value}=await reader.read();
@@ -3002,6 +3162,9 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const ce=document.getElementById('_saC'+ev.step);
             if(ce) ce.innerHTML=fmt(stepContent);
             lastStepText=stepContent;
+            allStepTexts[ev.step]=stepContent;
+            // Track the Final Verdict step specifically for ratings (step 10 = index before Buying Plan)
+            if(ev.title==='Final Verdict')verdictStepText=stepContent;
             const thEl=document.getElementById('_saThink'+ev.step);
             if(thEl&&stepThinking){
               const lb=thEl.querySelector('.sa-thinking-label');
@@ -3049,11 +3212,13 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           // Collapse all sections
           if(outEl) outEl.querySelectorAll('.sa-section').forEach(s=>s.classList.add('sa-collapsed'));
 
-          // Parse rating and build combined overview card
-          const rating=_saParseRating(lastStepText);
-          const gaugeHtml=buildSentimentGauge(rating, stockDataArray, lastStepText);
+          // Parse rating from Final Verdict step (not Buying Plan) and build combined overview card
+          const ratingText=verdictStepText||lastStepText;
+          const rating=_saParseRating(ratingText);
+          const aiRatings=_saParseStockRatings(ratingText);
+          const gaugeHtml=buildSentimentGauge(rating, stockDataArray, ratingText);
           const chartHtml=buildGrowthChart(stockDataArray);
-          const plainLast=(lastStepText||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+          const plainLast=(ratingText||'').replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
           const sentences=plainLast?plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' '):'';
 
           if(outEl){
@@ -3061,19 +3226,28 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             overview.className='sa-overview-card sa-slide-in';
             let ovHtml='';
 
-            // Mini stock cards summary
+            // Mini stock cards summary — clickable to switch gauge panels
             if(stockDataArray&&stockDataArray.length){
               ovHtml+='<div class="sa-mini-cards">';
-              for(const sd of stockDataArray){
+              for(let si=0;si<stockDataArray.length;si++){
+                const sd=stockDataArray[si];
                 if(sd.error)continue;
                 const up=(sd.change||0)>=0;
                 const arrow=up?'▲':'▼';
                 const cls=up?'stock-up':'stock-down';
-                const hs=sd.health&&sd.health.score;
+                // Use AI rating if available, fall back to health score
+                let hs=sd.health&&sd.health.score;
+                let vLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[sd.verdict||'hold']||'HOLD';
+                if(aiRatings&&aiRatings.ratings&&aiRatings.ratings[sd.ticker]){
+                  const ar=aiRatings.ratings[sd.ticker];
+                  hs=ar.score||hs;
+                  if(ar.verdict)vLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[ar.verdict.toLowerCase()]||vLabel;
+                }
                 const hColor=hs!=null?(hs>=65?'#22c55e':hs>=40?'#eab308':'#ef4444'):'var(--text-muted)';
-                const vLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[sd.verdict||'hold']||'HOLD';
-                const vCls={buy:'sa-mini-buy',hold:'sa-mini-hold',sell:'sa-mini-sell'}[sd.verdict||'hold']||'sa-mini-hold';
-                ovHtml+=`<div class="sa-mini-card ${vCls}"><div class="sa-mini-card-head"><span class="sa-mini-ticker">${esc(sd.ticker||'?')}</span><span class="sa-mini-verdict">${vLabel}</span></div><div class="sa-mini-price">$${(sd.price||0).toFixed(2)} <span class="${cls}">${arrow} ${Math.abs(sd.changePct||0).toFixed(2)}%</span></div>${hs!=null?`<div class="sa-mini-health"><span>Health Score</span><span style="color:${hColor};font-weight:700">${hs}/100</span></div>`:''}</div>`;
+                const vCls=vLabel==='BUY'?'sa-mini-buy':vLabel==='SELL'?'sa-mini-sell':'sa-mini-hold';
+                const activeClass=si===0?' sa-mini-card-active':'';
+                const companyName=sd.name||'';
+                ovHtml+=`<div class="sa-mini-card ${vCls}${activeClass}" data-sa-card-idx="${si}" data-sa-ticker="${esc(sd.ticker||'?')}" onclick="(function(card){var wrap=card.closest('.sa-overview-card');if(!wrap)return;wrap.querySelectorAll('.sa-mini-card').forEach(function(c){c.classList.remove('sa-mini-card-active')});card.classList.add('sa-mini-card-active');var panels=wrap.querySelectorAll('.sa-gauge-panel');panels.forEach(function(p,j){p.style.display=j==card.dataset.saCardIdx?'':'none'});})(this)"><div class="sa-mini-card-head"><span class="sa-mini-ticker">${esc(sd.ticker||'?')}</span><span class="sa-mini-verdict">${vLabel}</span></div>${companyName?`<div class="sa-mini-company">${esc(companyName)}</div>`:''}<div class="sa-mini-price">$${(sd.price||0).toFixed(2)} <span class="${cls}">${arrow} ${Math.abs(sd.changePct||0).toFixed(2)}%</span></div>${hs!=null?`<div class="sa-mini-health"><span>Health Score</span><span style="color:${hColor};font-weight:700">${hs}/100</span></div>`:''}</div>`;
               }
               ovHtml+='</div>';
             }
@@ -3152,6 +3326,82 @@ function renderMapEmbed(query, label){
 function renderFlightsLink(query){
   const q=encodeURIComponent(query);
   return `<div class="flights-link-wrap"><a href="https://www.google.com/travel/flights?q=${q}" target="_blank" rel="noopener" class="flights-link-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5 5.2 3 -2 2-1.8-.6c-.4-.1-.8 0-1 .3l-.3.3 2.5 1.5 1.5 2.5.3-.3c.3-.3.4-.7.3-1l-.6-1.8 2-2 3 5.2.5-.3c.4-.2.6-.6.5-1.1z"/></svg> Search flights: ${esc(query)}</a></div>`;
+}
+
+// ─── HuggingFace Space Results ────────────────────
+function renderHFResult(hfData){
+  const result=hfData.result||{};
+  const space=esc(hfData.space||'');
+  const type=result.type||'text';
+  if(type==='image'&&result.data){
+    return `<div class="hf-result-card" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);">
+      <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-deep);">
+        <span style="font-size:14px">🤗</span>
+        <span style="font-size:11px;font-weight:500;color:var(--text-primary);">${space}</span>
+      </div>
+      <div style="padding:8px;text-align:center;">
+        <img src="${result.data}" style="max-width:100%;max-height:512px;border-radius:8px;" alt="HuggingFace generated image">
+      </div>
+      <div style="padding:6px 12px 8px;display:flex;gap:8px;">
+        <a href="${result.data}" download="hf_output.png" style="font-size:10px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:4px;cursor:pointer;">⬇ Download</a>
+      </div>
+    </div>`;
+  }
+  if(type==='video'&&result.data){
+    return `<div class="hf-result-card" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);">
+      <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-deep);">
+        <span style="font-size:14px">🤗</span>
+        <span style="font-size:11px;font-weight:500;color:var(--text-primary);">${space}</span>
+      </div>
+      <div style="padding:8px;text-align:center;">
+        <video controls style="max-width:100%;max-height:512px;border-radius:8px;"><source src="${result.data}" type="${esc(result.mime||'video/mp4')}">Your browser does not support video.</video>
+      </div>
+    </div>`;
+  }
+  if(type==='audio'&&result.data){
+    return `<div class="hf-result-card" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);">
+      <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-deep);">
+        <span style="font-size:14px">🤗</span>
+        <span style="font-size:11px;font-weight:500;color:var(--text-primary);">${space}</span>
+      </div>
+      <div style="padding:12px;">
+        <audio controls style="width:100%;"><source src="${result.data}" type="${esc(result.mime||'audio/wav')}">Your browser does not support audio.</audio>
+      </div>
+    </div>`;
+  }
+  if(type==='file'&&result.data){
+    return `<div class="hf-result-card" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);">
+      <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-deep);">
+        <span style="font-size:14px">🤗</span>
+        <span style="font-size:11px;font-weight:500;color:var(--text-primary);">${space}</span>
+      </div>
+      <div style="padding:12px;">
+        <a href="/api/files/download?path=${encodeURIComponent(result.data)}" style="font-size:12px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:6px;">📄 Download ${esc(result.data)}</a>
+      </div>
+    </div>`;
+  }
+  // Default: text result
+  const text=result.data||'(No output)';
+  return `<div class="hf-result-card" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);">
+    <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-deep);">
+      <span style="font-size:14px">🤗</span>
+      <span style="font-size:11px;font-weight:500;color:var(--text-primary);">${space}</span>
+    </div>
+    <div style="padding:12px;font-size:12px;color:var(--text-primary);white-space:pre-wrap;max-height:300px;overflow-y:auto;">${esc(typeof text==='string'?text:JSON.stringify(text))}</div>
+  </div>`;
+}
+
+function renderHFLoading(info){
+  const space=esc(info||'');
+  return `<div class="hf-loading-placeholder" style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);animation:pulse 1.5s ease-in-out infinite;">
+    <div style="padding:12px;display:flex;align-items:center;gap:8px;">
+      <span style="font-size:16px">🤗</span>
+      <div>
+        <div style="font-size:11px;font-weight:500;color:var(--text-primary);">Running HuggingFace Space...</div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${space}</div>
+      </div>
+    </div>
+  </div>`;
 }
 
 // ─── Stock Cards ──────────────────────────────────
@@ -3551,6 +3801,7 @@ function stripMetaBlocks(text){
     .replace(/<<<IMAGE_SEARCH:\s*.+?>>>/g,'')
     .replace(/%%%IMAGE_SEARCH:\s*.+?(?:>>>|%%%)/g,'')
     .replace(/<<<IMAGE_GENERATE:\s*.+?>>>/g,'')
+    .replace(/<<<HF_SPACE:\s*.+?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'')
@@ -3610,7 +3861,11 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈️</span> Finding flights...</div>');
   html=html.replace(/&lt;&lt;&lt;STOCK:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/%%%STOCKBLOCK:\d+%%%/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
+  html=html.replace(/&lt;&lt;&lt;HF_SPACE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🤗</span> Running HuggingFace Space...</div>');
+  html=html.replace(/%%%HFBLOCK:\d+%%%/g,'<div class="stream-placeholder"><span class="sp-icon">🤗</span> Running HuggingFace Space...</div>');
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_STOCK_RATINGS&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*$/,'');
   // Completed CODE_EXECUTE blocks — show code + executing indicator
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
@@ -4009,6 +4264,21 @@ async function sendMessage(opts){
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
+    // Stall detection: if no meaningful event for 120s, warn the user
+    let _lastMeaningfulEvent=Date.now();
+    let _stallTimer=setInterval(()=>{
+      if(_doneReceived){clearInterval(_stallTimer);return;}
+      if(Date.now()-_lastMeaningfulEvent>120000){
+        clearInterval(_stallTimer);
+        console.warn('[gyro] Stream stalled — no data for 120s');
+        const cur=runningStreams.get(targetChatId);
+        if(cur&&cur.streamId===streamId)setChatRunning(targetChatId,false);
+        const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+        if(!fullText.trim()&&!thinkText.trim()){
+          targetEl.innerHTML='<div style="color:var(--text-muted);font-size:13px;padding:12px 0;font-style:italic">The response timed out. Please try sending your message again.</div>';
+        }
+      }
+    },10000);
 
     // Create a live thinking panel (collapsed by default — click to expand)
     let thinkPanel=null;
@@ -4061,7 +4331,7 @@ async function sendMessage(opts){
 
     while(true){
       const{done,value}=await reader.read();
-      if(done)break;
+      if(done){clearInterval(_stallTimer);break;}
       buffer+=decoder.decode(value,{stream:true});
       let nlIdx;
       while((nlIdx=buffer.indexOf('\n'))>=0){
@@ -4071,9 +4341,10 @@ async function sendMessage(opts){
         try{
           const data=JSON.parse(line);
           if(data.type==='heartbeat'){
-            // Keep-alive ping from backend — ignore
+            // Keep-alive ping from backend — no stall reset
             continue;
           }else if(data.type==='thinking_delta'){
+            _lastMeaningfulEvent=Date.now();
             if(!isThinking)console.log('[gyro] thinking_delta received — thinking panel activating');
             isThinking=true;
             thinkText+=data.text;
@@ -4094,6 +4365,7 @@ async function sendMessage(opts){
               _autoScroll();
             }
           }else if(data.type==='delta'){
+            _lastMeaningfulEvent=Date.now();
             // Transition from thinking to response
             if(isThinking&&thinkPanel){
               isThinking=false;
@@ -4154,6 +4426,7 @@ async function sendMessage(opts){
             }
           }else if(data.type==='done'){
             _doneReceived=true;
+            clearInterval(_stallTimer);
             // Immediately mark chat as not running so UI updates (stop button → send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse live thinking panel if present
@@ -4342,6 +4615,19 @@ async function sendMessage(opts){
                 finalHTML=finalHTML.replace(re,stockHTML);
                 if(finalHTML===before){
                   finalHTML+=stockHTML;
+                }
+              }
+            }
+
+            // ── HuggingFace results — render inline ──
+            if(!devRawMode&&data.hf_results?.length){
+              for(const hr of data.hf_results){
+                const hfHTML=renderHFResult(hr);
+                const re=new RegExp(`<p>\\s*%%%HFBLOCK:${hr.index}%%%\\s*</p>|%%%HFBLOCK:${hr.index}%%%`,'g');
+                const before=finalHTML;
+                finalHTML=finalHTML.replace(re,hfHTML);
+                if(finalHTML===before){
+                  finalHTML+=hfHTML;
                 }
               }
             }
@@ -4618,6 +4904,56 @@ async function sendMessage(opts){
                 loader.classList.remove('stock-loading-placeholder');
               }
             }
+          }else if(data.type==='hf_executing'){
+            // HF Space execution started post-stream (stop-and-wait)
+            if(canRender()){
+              const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+              let hfWrap=contentEl.querySelector('#hf-exec-wrap');
+              if(!hfWrap){
+                hfWrap=document.createElement('div');
+                hfWrap.id='hf-exec-wrap';
+                targetEl.appendChild(hfWrap);
+              }
+              _autoScroll();
+            }
+          }else if(data.type==='hf_loading'){
+            // Individual HF Space starting to execute
+            if(canRender()){
+              let hfWrap=contentEl.querySelector('#hf-exec-wrap');
+              if(!hfWrap){
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                hfWrap=document.createElement('div');
+                hfWrap.id='hf-exec-wrap';
+                targetEl.appendChild(hfWrap);
+              }
+              const loader=document.createElement('div');
+              loader.id=`hf-loader-${data.index}`;
+              loader.className='hf-loading-placeholder';
+              loader.innerHTML=`<div style="margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-surface);"><div style="padding:12px 16px;display:flex;align-items:center;gap:8px;background:var(--bg-deep);"><span style="font-size:16px">🤗</span><div><div style="font-size:12px;font-weight:600;color:var(--text-primary)">Running ${esc(data.space||'HuggingFace Space')}...</div><div style="font-size:10px;color:var(--text-muted);margin-top:2px">${esc(data.input||'Processing...')}</div></div></div><div style="padding:16px;display:flex;align-items:center;gap:10px;"><div class="dots" style="display:flex;gap:3px"><span></span><span></span><span></span></div><span style="font-size:11px;color:var(--text-muted)">This may take a moment...</span></div></div>`;
+              hfWrap.appendChild(loader);
+              _autoScroll();
+            }
+          }else if(data.type==='hf_space_result'){
+            // HF result arrived (post-stream, before done)
+            if(canRender()){
+              const loader=contentEl.querySelector(`#hf-loader-${data.hf.index}`);
+              if(loader){
+                const html=renderHFResult(data.hf);
+                const temp=document.createElement('div');
+                temp.innerHTML=html;
+                loader.replaceWith(temp.firstElementChild||temp);
+              }
+              _autoScroll();
+            }
+          }else if(data.type==='hf_space_failed'){
+            if(canRender()){
+              const loader=contentEl.querySelector(`#hf-loader-${data.index}`);
+              if(loader){
+                loader.innerHTML=`<div style="margin:12px 0;padding:12px 16px;border:1px solid var(--error);border-radius:12px;background:rgba(239,68,68,0.08);"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><span style="font-size:14px">🤗</span><span style="font-size:12px;font-weight:600;color:var(--error)">HuggingFace Space failed</span></div><div style="font-size:11px;color:var(--text-muted)">${esc(data.error||'Unknown error')}</div>${data.space?`<div style="font-size:10px;color:var(--text-muted);margin-top:4px">Space: ${esc(data.space)}</div>`:''}</div>`;
+                loader.classList.remove('hf-loading-placeholder');
+              }
+              _autoScroll();
+            }
           }else if(data.type==='gen_ops_complete'){
             // All generative operations (image gen, image search, stock) are done
             // Stock agent: run multi-step analysis instead of simple reprompt
@@ -4794,12 +5130,38 @@ function addMsg(role,text,files,extra={}){
   // Detect research/stock agent messages early — skip fmt() for these since the card replaces everything
   const _isResearchMsg=!!(extra.research_agent||(role==='kairo'&&/^## (?:Intelligence Gathering|📋 Intelligence Brief)/m.test(displayText)));
   const _isStockMsg=!!extra.stock_agent;
-  // Long user text → collapsible file block
-  if(role==='user'&&displayText.length>600){
+  // Long user text → collapsible file block (only for code, not regular text)
+  const _looksLikeCode=(function(t){
+    if(t.length<=600)return false;
+    // Explicit code fences → definitely code
+    if(/```/.test(t))return true;
+    const lines=t.split('\n');
+    // Single-line pastes are never "code files"
+    if(lines.length<4)return false;
+    let codeSignals=0;
+    const totalLines=lines.length;
+    // Check for consistent indentation (spaces/tabs at start)
+    const indentedLines=lines.filter(l=>l.length>0&&/^[\t ]{2,}/.test(l)).length;
+    if(indentedLines/Math.max(totalLines,1)>0.3)codeSignals+=2;
+    // Check for code-like syntax
+    const joined=t;
+    if(/[{}\[\]];?\s*$/.test(joined))codeSignals++;
+    if((joined.match(/[{}();]/g)||[]).length>totalLines*0.3)codeSignals+=2;
+    if(/\b(function|const |let |var |import |export |class |def |return |if\s*\(|for\s*\(|while\s*\(|=>|async |await )\b/.test(joined))codeSignals+=2;
+    if(/\b(public |private |static |void |int |string |bool |float )\b/i.test(joined))codeSignals++;
+    if(/#include|#import|#define|#pragma/.test(joined))codeSignals+=2;
+    if(/\b(SELECT |INSERT |UPDATE |DELETE |FROM |WHERE |JOIN )\b/i.test(joined)&&(joined.match(/\b(SELECT|FROM|WHERE)\b/gi)||[]).length>=2)codeSignals+=2;
+    // HTML/XML tags
+    if(/<\/?[a-z][\w-]*[\s>]/i.test(joined)&&(joined.match(/<\/?[a-z]/gi)||[]).length>3)codeSignals+=2;
+    // File paths or URLs in code context
+    if(/\b(https?:\/\/|\/[\w]+\/[\w]+|\.\/|\.\.\/)\b/.test(joined)&&codeSignals>0)codeSignals++;
+    return codeSignals>=3;
+  })(displayText);
+  if(role==='user'&&_looksLikeCode){
     const lines=displayText.split('\n');
     const preview=lines.slice(0,3).join('\n');
     html+=`<div class="user-paste-file"><div class="upf-header" onclick="this.parentElement.classList.toggle('upf-expanded')">`
-      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted text (${lines.length} lines)</span><span class="upf-chevron">▾</span></div>`
+      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">▾</span></div>`
       +`<div class="upf-preview">${esc(preview)}${lines.length>3?'\n…':''}</div>`
       +`<div class="upf-full"><pre>${esc(displayText)}</pre></div></div>`;
   } else if(devRawMode&&role==='kairo'){
@@ -4895,6 +5257,18 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
+  // Render persisted HuggingFace results on reload
+  if(!devRawMode&&extra.hf_results?.length){
+    for(const hr of extra.hf_results){
+      const hfHTML=renderHFResult(hr);
+      const hfRe=new RegExp(`<p>\\s*%%%HFBLOCK:${hr.index}%%%\\s*</p>|%%%HFBLOCK:${hr.index}%%%`,'g');
+      const before=html;
+      html=html.replace(hfRe,hfHTML);
+      if(html===before){
+        html+=hfHTML;
+      }
+    }
+  }
   if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
@@ -4925,15 +5299,16 @@ function addMsg(role,text,files,extra={}){
         const tickers=extra.stock_agent_tickers||[];
         const tickerStr=tickers.length?` — ${esc(tickers.join(', '))}`:'';
         let saHtml=`<div class="sa-badge sa-badge-done">✅ Stock Analysis Complete${tickerStr}</div><div class="sa-output">`;
-        // Sentiment gauge from final step text
-        const lastBody=steps[steps.length-1]?.body||'';
-        const rating=_saParseRating(lastBody);
-        saHtml+=buildSentimentGauge(rating, stockDataArr, lastBody);
-        // Growth chart if we have stock data
+        // Find the Final Verdict step for ratings (prefer it over Buying Plan)
+        const verdictStep=steps.find(s=>s.title==='Final Verdict');
+        const verdictBody=verdictStep?verdictStep.body:(steps[steps.length-1]?.body||'');
+        const rating=_saParseRating(verdictBody);
         const stockDataArr=extra.stock_agent_data||[];
+        saHtml+=buildSentimentGauge(rating, stockDataArr, verdictBody);
+        // Growth chart if we have stock data
         if(stockDataArr.length)saHtml+=buildGrowthChart(stockDataArr);
-        // Quick summary from last step
-        const plainLast=(lastBody||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
+        // Quick summary from verdict step
+        const plainLast=(verdictBody||lastBody||'').replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
         if(plainLast){
           const sentences=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
           if(sentences)saHtml+=`<div class="sa-summary"><div class="sa-summary-hd">📋 Quick Summary</div><div class="sa-summary-body">${esc(sentences)}</div><div class="sa-summary-hint">Click any step above to expand full details</div></div>`;
@@ -5322,6 +5697,7 @@ function addSubtask(listId,parentId){
 
 function fmt(text){
   if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
+  t=t.replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'');
   t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
   // Timeline blocks: ```timeline\ndate | title | description\n```
@@ -5612,6 +5988,7 @@ async function openSettings(){
   if(curUser)document.getElementById('profileName').value=curUser.name||'';
   updateLocationToggleUI();
   initDevRawToggle();
+  loadConnectors();
 }
 
 async function saveKey(p,id){
@@ -5654,6 +6031,80 @@ async function saveName(){
   await fetch('/api/auth/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
   curUser.name=name;updateUserUI();
   showToast('Profile updated.','success');
+}
+
+// ─── Connectors ───────────────────────────────────
+async function loadConnectors(){
+  try{
+    const r=await fetch('/api/connectors');
+    if(!r.ok)return;
+    const d=await r.json();
+    const hf=d.connectors?.huggingface||{};
+    const statusEl=document.getElementById('hfStatus');
+    const connectedEl=document.getElementById('hfConnected');
+    const setupEl=document.getElementById('hfSetup');
+    if(!statusEl)return;
+    if(hf.enabled&&hf.token){
+      statusEl.textContent='Connected';
+      statusEl.style.background='rgba(34,197,94,0.15)';
+      statusEl.style.color='#22c55e';
+      if(connectedEl)connectedEl.style.display='block';
+      if(setupEl)setupEl.style.display='none';
+      const hfTool=document.getElementById('hfToolItem');
+      if(hfTool)hfTool.style.display='';
+      // Fetch username
+      try{
+        const tr=await fetch('/api/connectors/huggingface/test',{method:'POST'});
+        const td=await tr.json();
+        const unEl=document.getElementById('hfUsername');
+        if(td.ok&&unEl)unEl.textContent=td.username||'your account';
+      }catch{}
+    }else{
+      statusEl.textContent='Not connected';
+      statusEl.style.background='var(--bg-surface)';
+      statusEl.style.color='var(--text-muted)';
+      if(connectedEl)connectedEl.style.display='none';
+      if(setupEl)setupEl.style.display='block';
+      const hfTool=document.getElementById('hfToolItem');
+      if(hfTool)hfTool.style.display='none';
+    }
+  }catch{}
+}
+
+async function connectHF(){
+  const inp=document.getElementById('hfTokenInput');
+  const errEl=document.getElementById('hfError');
+  const token=inp?.value.trim();
+  if(!token){if(errEl){errEl.textContent='Please enter your HuggingFace token.';errEl.style.display='block';}return;}
+  if(errEl)errEl.style.display='none';
+  try{
+    // Save token first
+    const sr=await fetch('/api/connectors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({connector:'huggingface',token,enabled:true})});
+    if(!sr.ok){if(errEl){errEl.textContent='Failed to save token. Please try again.';errEl.style.display='block';}return;}
+    // Test it
+    const r=await fetch('/api/connectors/huggingface/test',{method:'POST'});
+    if(!r.ok){if(errEl){errEl.textContent=`Server error (${r.status}). Make sure the server is up to date and restart it.`;errEl.style.display='block';}return;}
+    const d=await r.json();
+    if(d.ok){
+      inp.value='';
+      showToast(`HuggingFace connected as ${d.username||'your account'}!`,'success');
+      loadConnectors();
+    }else{
+      // Token was bad — remove it
+      await fetch('/api/connectors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({connector:'huggingface',token:'',enabled:false})});
+      if(errEl){errEl.textContent=d.error||'Invalid token. Please check and try again.';errEl.style.display='block';}
+    }
+  }catch(e){
+    if(errEl){errEl.textContent='Connection error. Please check the server is running.';errEl.style.display='block';}
+  }
+}
+
+async function disconnectHF(){
+  const ok=await _dlg({title:'Disconnect HuggingFace?',msg:'Gyro will no longer be able to use HuggingFace Spaces. You can reconnect anytime.',icon:'🤗',iconType:'warning',confirmText:'Disconnect',cancelText:'Cancel',dangerous:true});
+  if(!ok)return;
+  await fetch('/api/connectors/huggingface/delete',{method:'POST'});
+  showToast('HuggingFace disconnected.','info');
+  loadConnectors();
 }
 
 // ─── Memory ───────────────────────────────────────

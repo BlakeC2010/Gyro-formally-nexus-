@@ -227,6 +227,7 @@
               <div class="plus-item" onclick="activateTool('code');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span><span class="pi-label">Code Execution</span></div>
 
               <div class="plus-item" onclick="activateTool('imagegen');closePlusMenu()"><span class="pi-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></span><span class="pi-label">Image Generation</span></div>
+              <div class="plus-item" id="hfToolItem" onclick="activateTool('huggingface');closePlusMenu()" style="display:none"><span class="pi-icon">🤗</span><span class="pi-label">HuggingFace Spaces</span></div>
 
             </div>
           </div>
@@ -362,6 +363,46 @@
         <span style="position:absolute;cursor:pointer;inset:0;background:var(--bg-deep);border:1px solid var(--border);border-radius:11px;transition:.3s"></span>
         <span style="position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:var(--text-muted);border-radius:50%;transition:.3s;pointer-events:none" id="devRawDot"></span>
       </label>
+    </div>
+    <hr>
+
+    <p class="st">Connectors</p>
+    <p class="hint">Connect external services to expand Gyro's capabilities — like using HuggingFace Spaces for image, video, audio, and more.</p>
+    <div id="connectorsSection">
+      <!-- HuggingFace Connector -->
+      <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:12px;margin:8px 0;background:var(--bg-deep);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:20px">🤗</span>
+            <div>
+              <div style="font-size:12px;font-weight:600;color:var(--text-primary)">HuggingFace</div>
+              <div style="font-size:10px;color:var(--text-muted)">Access thousands of AI Spaces — image gen, video, audio, and more</div>
+            </div>
+          </div>
+          <div id="hfStatus" style="font-size:10px;padding:3px 8px;border-radius:10px;font-weight:500;background:var(--bg-surface);color:var(--text-muted)">Not connected</div>
+        </div>
+        <div id="hfSetupArea">
+          <div id="hfConnected" style="display:none;">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;">
+              <div style="font-size:11px;color:var(--text-muted);">Connected as <strong id="hfUsername" style="color:var(--text-primary)"></strong></div>
+              <button onclick="disconnectHF()" style="font-size:10px;padding:4px 10px;background:var(--error);color:#fff;border:none;border-radius:4px;cursor:pointer;">Disconnect</button>
+            </div>
+          </div>
+          <div id="hfSetup">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">
+              <strong>How to get your token:</strong><br>
+              1. Go to <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--accent)">huggingface.co/settings/tokens</a><br>
+              2. Create a new token (or use an existing one) with <strong>read</strong> access<br>
+              3. Paste it below
+            </div>
+            <div class="kr">
+              <input type="password" id="hfTokenInput" placeholder="hf_xxxxxxxxxxxxxxxxxxxx" style="font-family:monospace;font-size:11px;">
+              <button onclick="connectHF()">Connect</button>
+            </div>
+            <div id="hfError" style="font-size:10px;color:var(--error);margin-top:4px;display:none;"></div>
+          </div>
+        </div>
+      </div>
     </div>
     <hr>
 
