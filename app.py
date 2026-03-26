@@ -781,6 +781,33 @@ def format_workspace_context(files):
 
 # ─── KAIRO System Prompt ─────────────────────────────────────────────────────
 
+def _build_cross_chat_context(current_chat_id, max_chats=8):
+    """Build a brief summary of other recent chats for cross-chat awareness."""
+    try:
+        all_chats = list_chats()
+        lines = []
+        count = 0
+        for c in all_chats:
+            if c["id"] == current_chat_id:
+                continue
+            title = c.get("title", "Untitled")
+            if title in ("New Chat", "Untitled"):
+                continue
+            lines.append(f"- \"{title}\"")
+            count += 1
+            if count >= max_chats:
+                break
+        if not lines:
+            return ""
+        return (
+            "\n\n[OTHER RECENT CONVERSATIONS]\n"
+            "The user has these other recent chats. If they reference something from another conversation, "
+            "use these titles to understand the context. Don't mention these unless relevant.\n"
+            + "\n".join(lines)
+        )
+    except Exception:
+        return ""
+
 def build_system_prompt(memory=None):
     for name in ("gyro_INSTRUCTIONS.md", "KAIRO_INSTRUCTIONS.md", "gyro_INSTRUCTIONS.md"):
         f = WORKSPACE / name
@@ -911,7 +938,7 @@ IMPORTANT: ALWAYS read filenames from the UPLOADED_IMAGES env var or list the _u
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
 <<<END_CODE>>>
-The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 30-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
+The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 45-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
 When generating files (images, PDFs, etc.), save them to the current working directory. The system will automatically detect new files and display them to the user with download links (images are shown inline).
 PDF GENERATION: Use fpdf2 (import as: from fpdf import FPDF). Example: pdf=FPDF(); pdf.add_page(); pdf.set_font('Helvetica','',12); pdf.cell(0,10,'Hello'); pdf.output('output.pdf'). For Unicode text, use pdf.set_font('Helvetica') — do NOT try to load custom .ttf fonts unless the user provides them. Always call pdf.output() with a filename to save.
 
@@ -1489,17 +1516,31 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
                             pre_snapshot[str(p.relative_to(WORKSPACE))] = p.stat().st_mtime
                         except Exception:
                             pass
+
+            # Build optimised wrapper: pre-import heavy libs so cached .pyc is used
+            _needs_sympy = 'sympy' in code or ' sp.' in code or 'sp.Symbol' in code
+            _needs_numpy = 'numpy' in code or ' np.' in code or 'np.array' in code
+            _needs_matplotlib = 'matplotlib' in code or 'pyplot' in code or 'plt.' in code
+            prelude_lines = []
+            if _needs_sympy:
+                prelude_lines.append("import sympy")
+            if _needs_numpy:
+                prelude_lines.append("import numpy")
+            if _needs_matplotlib:
+                prelude_lines.append("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot")
+            prelude = "\n".join(prelude_lines) + "\n" if prelude_lines else ""
+
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
-                tmp.write(code)
+                tmp.write(prelude + code)
                 tmp_path = tmp.name
-            # Build env that inherits PATH (for pip/packages) and strips bytecode caching
-            exec_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            # Inherit env; allow .pyc caching for faster repeated imports
+            exec_env = {**os.environ}
             # Pass uploaded image paths so code can find them
             if uploaded_image_paths:
                 exec_env["UPLOADED_IMAGES"] = ",".join(uploaded_image_paths)
             result = subprocess.run(
-                [sys.executable, tmp_path],
-                capture_output=True, text=True, timeout=30,
+                [sys.executable, "-u", tmp_path],
+                capture_output=True, text=True, timeout=45,
                 env=exec_env,
                 cwd=str(WORKSPACE),
             )
@@ -1538,7 +1579,7 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
         except subprocess.TimeoutExpired:
             try: os.unlink(tmp_path)
             except Exception: pass
-            results.append({"language": lang, "code": code, "output": "Execution timed out (30s limit).", "success": False, "files": []})
+            results.append({"language": lang, "code": code, "output": "Execution timed out (45s limit).", "success": False, "files": []})
         except Exception as e:
             results.append({"language": lang, "code": code, "output": f"Error: {e}", "success": False, "files": []})
     return results
@@ -1882,7 +1923,7 @@ def _build_tool_instructions(active_tools):
             "sympy (symbolic math — solve equations, factor, expand, derivatives, integrals, limits, series, plotting). "
             "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
             "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
-            "Keep code focused and concise. The execution has a 30-second timeout.\n\n"
+            "Keep code focused and concise. The execution has a 45-second timeout.\n\n"
             "🧮 MATH & GRAPHING CALCULATOR (CRITICAL — ALWAYS USE CODE FOR MATH):\n"
             "You have a BUILT-IN graphing calculator more powerful than Desmos. For ANY math question — "
             "algebra, calculus, graphing, equations, statistics, geometry, trig, etc. — you MUST use code execution. "
@@ -3164,6 +3205,9 @@ def prepare_chat_turn(chat, payload):
 
     memory = load_memory()
     sysprompt = build_system_prompt(memory)
+
+    # --- Cross-chat context for natural referencing ---
+    sysprompt += _build_cross_chat_context(chat.get("id", ""))
 
     # --- Per-chat custom instructions ---
     if chat.get("custom_instructions"):
@@ -7099,6 +7143,27 @@ def research_agent():
 
     return Response(generate(), mimetype="application/x-ndjson")
 
+
+
+# ─── Pre-warm heavy modules (.pyc compilation) ──────────────────────────────
+def _prewarm_modules():
+    """Background thread that imports heavy packages once so .pyc files are cached."""
+    import threading
+    def _warm():
+        try:
+            import subprocess as _sp
+            _sp.run(
+                [sys.executable, "-c",
+                 "import sympy; import numpy; import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot"],
+                capture_output=True, timeout=60,
+                cwd=str(WORKSPACE),
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_warm, daemon=True).start()
+
+# Pre-warm on import (covers gunicorn and direct run)
+_prewarm_modules()
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

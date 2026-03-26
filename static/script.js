@@ -1,6 +1,7 @@
 ﻿// ─── State ────────────────────────────────────────
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
+let _uploadsInFlight=0,_pendingSendOpts=null;
 let _codeRepromptCount=0;const _MAX_CODE_REPROMPTS=3;
 let _nextStreamId=0;
 let curUser=null,isGuest=false,authMode='login',theme='dark',googleClientId='';
@@ -1960,27 +1961,55 @@ document.addEventListener('click',e=>{
 // ─── File Upload ──────────────────────────────────
 function handleFiles(input){
   for(const file of input.files){
+    // Add a loading placeholder immediately so user sees the file
+    const idx=pendingFiles.length;
+    pendingFiles.push({name:file.name,mime:file.type||'application/octet-stream',data:'',text:'',doc_data:'',_loading:true});
+    renderPF();
+    _uploadsInFlight++;
     const reader=new FileReader();
     reader.onload=async()=>{
       const form=new FormData();form.append('file',file);
       try{
         const r=await fetch('/api/upload',{method:'POST',body:form});
         const d=await r.json();
-        pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||'',doc_data:d.doc_data||''});
+        // Find and update the placeholder (match by name + _loading)
+        const ph=pendingFiles.find(f=>f._loading&&f.name===file.name);
+        if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
         renderPF();
-      }catch(e){console.error('Upload failed',e)}
+      }catch(e){
+        console.error('Upload failed',e);
+        // Remove the placeholder on failure
+        const pi=pendingFiles.findIndex(f=>f._loading&&f.name===file.name);
+        if(pi>=0)pendingFiles.splice(pi,1);
+        renderPF();
+      }finally{
+        _uploadsInFlight=Math.max(0,_uploadsInFlight-1);
+        _checkUploadsComplete();
+      }
     };
     reader.readAsArrayBuffer(file);
   }
   input.value='';
 }
+function _checkUploadsComplete(){
+  if(_uploadsInFlight>0)return;
+  if(_pendingSendOpts!==null){
+    const opts=_pendingSendOpts;
+    _pendingSendOpts=null;
+    sendMessage(opts);
+  }
+}
 
 function renderPF(){
   document.getElementById('filePreview').innerHTML=pendingFiles.map((f,i)=>{
-    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:f.doc_data?'📄':'▪';
-    return`<div class="file-chip">${t} ${esc(f.name)} <button class="fc-x" onclick="pendingFiles.splice(${i},1);renderPF()">✕</button></div>`;
+    const loading=f._loading;
+    const t=loading?'<span class="fc-spinner"></span>':f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:f.doc_data?'📄':'▪';
+    return`<div class="file-chip${loading?' loading':''}">${t} ${esc(f.name)} <button class="fc-x" onclick="pendingFiles.splice(${i},1);if(pendingFiles.length===0&&_pendingSendOpts)_pendingSendOpts=null;renderPF()">✕</button></div>`;
   }).join('');
-  if(pendingFiles.length)setStatus(`${pendingFiles.length} file${pendingFiles.length===1?'':'s'} attached and ready.`);
+  const ready=pendingFiles.filter(f=>!f._loading).length;
+  const uploading=pendingFiles.filter(f=>f._loading).length;
+  if(uploading)setStatus(`Uploading ${uploading} file${uploading===1?'':'s'}...`);
+  else if(ready)setStatus(`${ready} file${ready===1?'':'s'} attached and ready.`);
 }
 
 /* ─── Reply Context (images + text from chat) ─── */
@@ -2034,10 +2063,18 @@ function initDropzone(){
         const blob=item.getAsFile();if(!blob)continue;
         const form=new FormData();
         form.append('file',blob,'pasted_image.png');
+        pendingFiles.push({name:'pasted_image.png',mime:blob.type||'image/png',data:'',text:'',doc_data:'',_loading:true});
+        renderPF();
+        _uploadsInFlight++;
         fetch('/api/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
-          pendingFiles.push({name:d.name,mime:d.mime,data:d.image_data||'',text:d.text||'',doc_data:d.doc_data||''});
+          const ph=pendingFiles.find(f=>f._loading&&f.name==='pasted_image.png');
+          if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
           renderPF();showToast('Image pasted','success');
-        }).catch(()=>showToast('Paste upload failed','error'));
+        }).catch(()=>{
+          const pi=pendingFiles.findIndex(f=>f._loading&&f.name==='pasted_image.png');
+          if(pi>=0)pendingFiles.splice(pi,1);
+          renderPF();showToast('Paste upload failed','error');
+        }).finally(()=>{_uploadsInFlight=Math.max(0,_uploadsInFlight-1);_checkUploadsComplete();});
         break;
       }
     }
@@ -2697,27 +2734,67 @@ function _saParseRating(text){
   return{label:'Hold',score:50};
 }
 
-function buildSentimentGauge(rating){
+function _buildGaugeHTML(pct,label,title){
+  const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
+  const r=54,cx=60,cy=60,stroke=8;
+  const circ=2*Math.PI*r;
+  const arcLen=circ*0.75;
+  const filled=arcLen*(pct/100);
+  const dashArr=`${filled} ${arcLen-filled}`;
+  return `<div class="sa-gauge-arc"><svg viewBox="0 0 120 120" width="120" height="120"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-dasharray="${arcLen} ${circ-arcLen}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${dashArr}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round" class="sa-gauge-arc-fill"/><text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="24" font-weight="800" font-family="var(--mono)">${pct}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div class="sa-gauge-verdict" style="color:${color}">${esc(label)}</div></div>`;
+}
+
+function buildSentimentGauge(rating, stockDataArr, lastStepText){
   if(!rating)return'';
+  // Build per-stock gauges if multiple stocks
+  const stocks=(stockDataArr||[]).filter(d=>!d.error);
+  if(stocks.length>1){
+    // Extract per-stock summary snippets from verdict text
+    const _extractSnippet=(ticker,text)=>{
+      if(!text)return'';
+      const lines=text.split('\n');
+      for(const line of lines){
+        if(line.toUpperCase().includes(ticker.toUpperCase())&&line.replace(/[#*_`|>\-\[\]()]/g,' ').trim().length>20){
+          let clean=line.replace(/^[-•*#>\s]+/,'').replace(/[*_`]/g,'').trim();
+          if(clean.length>120)clean=clean.slice(0,120)+'…';
+          return clean;
+        }
+      }
+      return'';
+    };
+    let tabs='';let panels='';
+    for(let i=0;i<stocks.length;i++){
+      const sd=stocks[i];
+      const ticker=sd.ticker||'?';
+      const hs=sd.health&&sd.health.score!=null?sd.health.score:50;
+      let label;
+      if(hs>=90)label='Strong Buy';else if(hs>=75)label='Buy';else if(hs>=60)label='Lean Buy';else if(hs>=45)label='Hold';else if(hs>=30)label='Lean Sell';else if(hs>=15)label='Sell';else label='Strong Sell';
+      const active=i===0?' sa-gauge-tab-active':'';
+      const hidden=i===0?'':'display:none;';
+      const color=hs>=75?'#22c55e':hs>=60?'#86efac':hs>=45?'#eab308':hs>=30?'#f97316':'#ef4444';
+      const bgGrad=hs>=75?'linear-gradient(135deg,rgba(34,197,94,.08),rgba(34,197,94,.02))':hs>=45?'linear-gradient(135deg,rgba(234,179,8,.08),rgba(234,179,8,.02))':'linear-gradient(135deg,rgba(239,68,68,.08),rgba(239,68,68,.02))';
+      tabs+=`<button class="sa-gauge-tab${active}" data-sa-gauge-idx="${i}" onclick="(function(btn){var wrap=btn.closest('.sa-gauge-wrap');wrap.querySelectorAll('.sa-gauge-tab').forEach(function(t){t.classList.remove('sa-gauge-tab-active')});btn.classList.add('sa-gauge-tab-active');wrap.querySelectorAll('.sa-gauge-panel').forEach(function(p,j){p.style.display=j==btn.dataset.saGaugeIdx?'':'none'});})(this)">${esc(ticker)}</button>`;
+      const snippet=_extractSnippet(ticker,lastStepText);
+      panels+=`<div class="sa-gauge-panel" style="${hidden}background:${bgGrad};border-radius:var(--r-sm);padding:12px">${_buildGaugeHTML(hs,label,ticker)}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${hs}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div>${snippet?`<div class="sa-gauge-snippet">${esc(snippet)}</div>`:''}</div>`;
+    }
+    return`<div class="sa-extras"><div class="sa-gauge-wrap"><div class="sa-gauge-title">📊 Per-Stock Sentiment</div><div class="sa-gauge-tabs">${tabs}</div>${panels}</div></div>`;
+  }
+  // Single stock — original gauge
   const pct=Math.max(0,Math.min(100,rating.score));
   const color=pct>=75?'#22c55e':pct>=60?'#86efac':pct>=45?'#eab308':pct>=30?'#f97316':'#ef4444';
   const bgGrad=pct>=75?'linear-gradient(135deg,rgba(34,197,94,.08),rgba(34,197,94,.02))':pct>=45?'linear-gradient(135deg,rgba(234,179,8,.08),rgba(234,179,8,.02))':'linear-gradient(135deg,rgba(239,68,68,.08),rgba(239,68,68,.02))';
-  // SVG arc gauge
-  const r=54,cx=60,cy=60,stroke=8;
-  const circ=2*Math.PI*r;
-  const arcLen=circ*0.75; // 270 degrees
-  const filled=arcLen*(pct/100);
-  const dashArr=`${filled} ${arcLen-filled}`;
-  return`<div class="sa-extras"><div class="sa-gauge-wrap" style="background:${bgGrad}"><div class="sa-gauge-title">📊 Overall Sentiment</div><div class="sa-gauge-arc"><svg viewBox="0 0 120 120" width="120" height="120"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}" stroke-dasharray="${arcLen} ${circ-arcLen}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${dashArr}" stroke-dashoffset="${-circ*0.125}" stroke-linecap="round" class="sa-gauge-arc-fill"/><text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="24" font-weight="800" font-family="var(--mono)">${pct}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div class="sa-gauge-verdict" style="color:${color}">${esc(rating.label)}</div></div><div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`; 
+  return`<div class="sa-extras"><div class="sa-gauge-wrap" style="background:${bgGrad}"><div class="sa-gauge-title">📊 Overall Sentiment</div>${_buildGaugeHTML(pct,esc(rating.label),'')}<div class="sa-gauge-bar"><div class="sa-gauge-marker" style="left:${pct}%"><div class="sa-gauge-marker-dot" style="background:${color}"></div></div></div><div class="sa-gauge-labels"><span>Strong Sell</span><span>Sell</span><span>Hold</span><span>Buy</span><span>Strong Buy</span></div></div></div>`; 
 }
 
 function buildGrowthChart(stockDataArr){
   if(!stockDataArr||!stockDataArr.length)return'';
-  let html='<div class="sa-growth-wrap"><div class="sa-growth-title">📈 Key Metrics Comparison</div>';
-  for(const sd of stockDataArr){
+  let html='<div class="sa-growth-wrap sa-growth-collapsed"><div class="sa-growth-header" onclick="this.parentElement.classList.toggle(\'sa-growth-collapsed\')"><div class="sa-growth-title">📈 Key Metrics Comparison</div><span class="sa-growth-chevron">▾</span></div><div class="sa-growth-body">';
+  for(let si=0;si<stockDataArr.length;si++){
+    const sd=stockDataArr[si];
     const ticker=sd.ticker||'?';
     const h=sd.health||{};
     const p=sd.perf||{};
+    if(si>0)html+='<div class="sa-growth-divider"></div>';
     html+=`<div class="sa-growth-ticker"><div class="sa-growth-ticker-label">${esc(ticker)}</div>`;
     const metrics=[
       {label:'Revenue Growth',key:'revenueGrowth',src:h},
@@ -2739,7 +2816,7 @@ function buildGrowthChart(stockDataArr){
     }
     html+='</div>';
   }
-  html+='</div>';
+  html+='</div></div>';
   return html;
 }
 
@@ -2756,17 +2833,22 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
   window._saManualToggles=manualToggles;
   let startTime=Date.now();
 
+  // AbortController so stop button can cancel stock analysis
+  const _saController=new AbortController();
+  setChatRunning(chatId,true,{type:'stock_agent',controller:_saController});
+
   const stepsHtml=stepNames.map((name,i)=>`<div class="sa-step" data-sa="${i}"><div class="sa-step-dot" onclick="saScrollToStep(${i+1})">${stepIcons[i]}</div><div class="sa-step-label">${name}</div></div>`).join('');
 
   const tickers=stockDataArray.map(d=>d.ticker||'?').filter(t=>t!=='?');
   const tickerStr=tickers.join(', ');
+  const shortTitle=tickers.length?tickers.join(', ')+' Analysis':'Stock Analysis';
 
   contentEl.innerHTML=`
     <div class="sa-container">
       <div class="sa-badge" id="_saBadge">📊 Stock Analysis — In Progress${tickerStr?' — '+esc(tickerStr):''}</div>
       <div class="sa-progress">
         <div class="sa-header">
-          <span class="sa-title">${esc(userQuery||'Stock Analysis')}</span>
+          <span class="sa-title">${esc(shortTitle)}</span>
           <span class="sa-pct" id="_saPct">0%</span>
         </div>
         <div class="sa-bar-track"><div class="sa-bar-fill" id="_saBar" style="width:0%"></div></div>
@@ -2778,7 +2860,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
       </div>
       <div class="sa-output" id="_saOut"></div>
     </div>`;
-  chatArea.scrollTop=chatArea.scrollHeight;
+  if(window._chatAutoScroll)window._chatAutoScroll();
 
   const elTimer=setInterval(()=>{
     // Live elapsed timer per active step
@@ -2843,7 +2925,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     const response=await apiFetch('/api/stock-agent',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chatId,stock_data:stockDataArray,query:userQuery})
+      body:JSON.stringify({chat_id:chatId,stock_data:stockDataArray,query:userQuery}),
+      signal:_saController.signal
     });
     if(!response.ok){
       const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
@@ -2893,7 +2976,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
             if(outEl) outEl.appendChild(section);
             currentContentEl=section.querySelector('.sa-step-content');
-            chatArea.scrollTop=chatArea.scrollHeight;
+            if(window._chatAutoScroll)window._chatAutoScroll();
           }else if(ev.status==='complete'){
             completedSteps.add(ev.step);
             updateProgress(ev.step, '✓ '+ev.title+' complete');
@@ -2911,7 +2994,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
               const lb=thEl.querySelector('.sa-thinking-label');
               if(lb) lb.textContent='View thinking';
             }
-            chatArea.scrollTop=chatArea.scrollHeight;
+            if(window._chatAutoScroll)window._chatAutoScroll();
           }else if(ev.status==='failed'){
             failedSteps++;
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
@@ -2940,7 +3023,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           stepContent+=ev.text;
           if(currentContentEl){
             currentContentEl.innerHTML=fmtLive(stepContent);
-            chatArea.scrollTop=chatArea.scrollHeight;
+            if(window._chatAutoScroll)window._chatAutoScroll();
           }
         }else if(ev.type==='agent_done'){
           clearInterval(elTimer);
@@ -2955,7 +3038,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
 
           // Parse rating and build combined overview card
           const rating=_saParseRating(lastStepText);
-          const gaugeHtml=buildSentimentGauge(rating);
+          const gaugeHtml=buildSentimentGauge(rating, stockDataArray, lastStepText);
           const chartHtml=buildGrowthChart(stockDataArray);
           const plainLast=(lastStepText||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
           const sentences=plainLast?plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' '):'';
@@ -3025,7 +3108,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           const badge=document.getElementById('_saBadge');
           if(badge){badge.classList.add('sa-badge-done');badge.textContent='✅ Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
 
-          chatArea.scrollTop=chatArea.scrollHeight;
+          if(window._chatAutoScroll)window._chatAutoScroll();
         }
       }
     }
@@ -3695,6 +3778,14 @@ async function sendMessage(opts){
   const input=document.getElementById('msgInput');
   const text=(opts&&opts.message)?opts.message:input.value.trim();
   if(!text&&!pendingFiles.length&&!pendingReplies.length)return;
+  // If files are still uploading, defer the actual send until they finish
+  if(_uploadsInFlight>0&&!_silent){
+    // Capture the text now and clear input so user sees their intent was received
+    if(!(opts&&opts.message)){input.value='';input.style.height='auto';}
+    _pendingSendOpts=opts&&opts.message?opts:{message:text};
+    setStatus(`Waiting for ${_uploadsInFlight} file${_uploadsInFlight===1?'':'s'} to finish uploading...`);
+    return;
+  }
   if(!_silent){_codeRepromptCount=0;}
   if(!_targetChat&&curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
   // Force-create a new chat if none exists (don't rely on createChat guard)
@@ -3750,7 +3841,7 @@ async function sendMessage(opts){
     w.style.opacity='0';
     setTimeout(()=>{if(w.parentNode)w.remove();},400);
   }
-  const files=[...pendingFiles];
+  const files=[...pendingFiles].filter(f=>!f._loading);
   const replies=[...pendingReplies];
 
   // Build reply context prefix for the message
@@ -3786,6 +3877,18 @@ async function sendMessage(opts){
   pendingReplies=[];renderReplyContext();
   if(!_silent)for(const f of files)uploadedHistory.unshift({name:f.name,mime:f.mime,when:Date.now()});
 
+  // Move active chat to top of list on send
+  if(!_silent&&!_isFirstMessage&&targetChatId){
+    const idx=allChats.findIndex(c=>c.id===targetChatId);
+    if(idx>0){
+      const [chat]=allChats.splice(idx,1);
+      chat.updated=new Date().toISOString();
+      allChats.unshift(chat);
+      saveCachedChats(allChats);
+      renderChatList(document.getElementById('chatSearch')?.value||'');
+    }
+  }
+
   // ── Research when explicitly activated via tool ──
   // Research agent silently enhances the prompt — no visible plan/modal
   // It's sent as part of activeTools in the normal chat flow
@@ -3798,12 +3901,16 @@ async function sendMessage(opts){
   // Smart auto-scroll: only scroll to bottom if user is near the bottom already
   let _userScrolledAway=false;
   const _scrollThreshold=150;
+  let _isProgrammaticScroll=false;
   const _onUserScroll=()=>{
+    if(_isProgrammaticScroll){_isProgrammaticScroll=false;return;}
     const distFromBottom=area.scrollHeight-area.scrollTop-area.clientHeight;
     _userScrolledAway=distFromBottom>_scrollThreshold;
   };
   area.addEventListener('scroll',_onUserScroll,{passive:true});
-  const _autoScroll=()=>{if(!_userScrolledAway)area.scrollTop=area.scrollHeight;};
+  const _autoScroll=()=>{if(!_userScrolledAway){_isProgrammaticScroll=true;area.scrollTop=area.scrollHeight;}};
+  // Expose for stock agent and other sub-flows
+  window._chatAutoScroll=_autoScroll;
 
   const msgDiv=document.createElement('div');
   msgDiv.className='msg kairo';
@@ -3930,7 +4037,7 @@ async function sendMessage(opts){
       if(ta)ta.remove();
       stopThinkingPhrases();
       thinkPanel=document.createElement('div');
-      thinkPanel.className='live-think-panel';
+      thinkPanel.className='live-think-panel ltp-collapsed';
       thinkPanel.innerHTML='<div class="ltp-header" style="cursor:pointer"><span class="ltp-icon">💭</span><span class="ltp-label">Considering your question</span><span class="ltp-chevron">▾</span><span class="ltp-dots"><span></span><span></span><span></span></span></div><div class="ltp-body"><div class="ltp-text"></div></div>';
       const hdr=thinkPanel.querySelector('.ltp-header');
       const body=thinkPanel.querySelector('.ltp-body');
@@ -4528,7 +4635,6 @@ async function sendMessage(opts){
                 agentMsgDiv.appendChild(agentContentEl);
                 chatArea.appendChild(agentMsgDiv);
                 _autoScroll();
-                setChatRunning(targetChatId,true,{type:'stock_agent'});
                 try{
                   const userQ=data.user_query||'Analyze this stock';
                   await runStockAgent(agentStockData, userQ, agentContentEl, chatArea, targetChatId);
@@ -4807,7 +4913,7 @@ function addMsg(role,text,files,extra={}){
         // Sentiment gauge from final step text
         const lastBody=steps[steps.length-1]?.body||'';
         const rating=_saParseRating(lastBody);
-        saHtml+=buildSentimentGauge(rating);
+        saHtml+=buildSentimentGauge(rating, stockDataArr, lastBody);
         // Growth chart if we have stock data
         const stockDataArr=extra.stock_agent_data||[];
         if(stockDataArr.length)saHtml+=buildGrowthChart(stockDataArr);
