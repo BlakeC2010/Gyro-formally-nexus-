@@ -1358,10 +1358,18 @@ def generate_chat_title_fast(user_text):
         f"User: {user_text[:400]}"
     )
     title_messages = [{"role": "user", "text": prompt}]
-    title_system = "You write concise conversation titles. Keep them specific, natural, and easy to scan."
-    g_key = load_settings().get("keys", {}).get("google", "")
+    title_system = "You write concise conversation titles. Keep them specific, natural, and easy to scan. Return ONLY the title text, nothing else."
+    settings = load_settings()
+    g_key = settings.get("keys", {}).get("google", "")
     if g_key:
-        raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+        try:
+            raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+        except Exception:
+            # Try with standard flash if lite fails
+            try:
+                raw_title = call_google(g_key, "gemini-2.5-flash", title_system, title_messages)
+            except Exception:
+                raise ValueError("Title generation failed")
     else:
         raise ValueError("No Google API key")
     return _clean_raw_title(raw_title, user_text)
@@ -1381,7 +1389,10 @@ def generate_chat_title(api_key, provider, model_name, base_url, user_text, assi
     try:
         g_key = load_settings().get("keys", {}).get("google", "")
         if g_key:
-            raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+            try:
+                raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+            except Exception:
+                raw_title = call_google(g_key, "gemini-2.5-flash", title_system, title_messages)
         else:
             raw_title = PROVIDERS.get(provider, call_openai)(
                 api_key, model_name, title_system, title_messages, base_url=base_url
@@ -1966,15 +1977,15 @@ def _build_tool_instructions(active_tools):
             "8. Always print clear, formatted output showing the answer"
         ),
         "research": (
-            "[TOOL HINT: RESEARCH AGENT REQUESTED]\n"
+            "[TOOL ACTIVE: RESEARCH AGENT — MUST TRIGGER]\n"
             "The user has specifically activated the Research Agent tool for this message. "
-            "This launches a multi-step Research Agent with web search and deep URL reading for comprehensive research.\n"
-            "You should strongly consider triggering it. You can:\n"
-            "- Trigger it immediately if their intent is clear: emit <<<DEEP_RESEARCH: detailed query>>>\n"
-            "- Ask 1-2 quick clarifying questions first if the scope is genuinely unclear, then trigger on the next response\n"
-            "- In rare cases, decline if the request truly doesn't need research (e.g. simple greeting)\n"
-            "Remember: DO NOT write research yourself. The Research Agent handles real web searching, URL deep-reading, cross-referencing, and report generation.\n"
-            "Keep your response brief — acknowledge and trigger, or ask quick clarifying questions."
+            "You MUST trigger the multi-step Research Agent by emitting <<<DEEP_RESEARCH: detailed query>>>.\n"
+            "Write a brief 1-2 sentence acknowledgment, then immediately emit the tag. "
+            "Rephrase the user's request into a detailed, specific research query for the tag.\n"
+            "Example: 'I'll launch a deep research investigation into that for you.\n<<<DEEP_RESEARCH: comprehensive analysis of [topic] including [specific angles]>>>'\n"
+            "CRITICAL: You MUST emit <<<DEEP_RESEARCH: ...>>> — do NOT attempt to research the topic yourself. "
+            "The Research Agent handles real web searching, URL deep-reading, cross-referencing, and report generation.\n"
+            "The ONLY exception is if the user's message is a simple greeting with no research intent (e.g. 'hi', 'hello')."
         ),
         "imagegen": (
             "[TOOL ACTIVE: IMAGE GENERATION]\n"
@@ -6985,6 +6996,7 @@ def research_agent():
             step_pieces = []
             step_success = False
             _last_err = None
+            MAX_TURNS_PER_STEP = 3  # Allow multi-turn per step
 
             for _att_idx, _att in enumerate(_attempts):
                 if _att_idx > 0:
@@ -6999,10 +7011,13 @@ def research_agent():
                         if _att.get("web"):
                             _tools.append(types.Tool(google_search=types.GoogleSearch()))
                         if _att.get("url_ctx"):
-                            _tools.append(types.Tool(url_context=types.UrlContext()))
+                            try:
+                                _tools.append(types.Tool(url_context=types.UrlContext()))
+                            except (AttributeError, TypeError):
+                                pass  # url_context not available in this SDK version
 
                         _client = genai.Client(api_key=api_key, http_options={"timeout": 300})
-                        _contents = _google_contents_from_messages(messages, types)
+                        _turn_contents = _google_contents_from_messages(messages, types)
                         _cfg_args = dict(
                             system_instruction=step["system"],
                             max_output_tokens=65536,
@@ -7010,31 +7025,68 @@ def research_agent():
                         if _tools:
                             _cfg_args["tools"] = _tools
                         if _att.get("thinking"):
-                            _cfg_args["thinking_config"] = types.ThinkingConfig(
-                                thinking_budget=16000, include_thoughts=True
-                            )
-                        _cfg = types.GenerateContentConfig(**_cfg_args)
-                        _stream = _client.models.generate_content_stream(
-                            model=model, contents=_contents, config=_cfg,
-                        )
-                        # Pull first chunk to verify stream is valid
-                        _first = next(_stream, None)
-
-                        for chunk in itertools.chain([_first] if _first else [], _stream):
                             try:
-                                for candidate in (chunk.candidates or []):
-                                    for part in (candidate.content.parts or []):
-                                        if getattr(part, "thought", None) and part.text:
-                                            yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
-                                            continue
-                                        if part.text:
-                                            step_pieces.append(part.text)
-                                            yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                                _cfg_args["thinking_config"] = types.ThinkingConfig(
+                                    thinking_budget=16000, include_thoughts=True
+                                )
                             except (AttributeError, TypeError):
-                                text = getattr(chunk, "text", "") or ""
-                                if text:
-                                    step_pieces.append(text)
-                                    yield evt({"type": "agent_delta", "step": i + 1, "text": text})
+                                pass  # thinking config not supported
+                        _cfg = types.GenerateContentConfig(**_cfg_args)
+
+                        # Multi-turn loop: let the model do multiple rounds per step
+                        for _turn in range(MAX_TURNS_PER_STEP):
+                            _turn_pieces = []
+                            _stream = _client.models.generate_content_stream(
+                                model=model, contents=_turn_contents, config=_cfg,
+                            )
+                            _first = next(_stream, None)
+
+                            for chunk in itertools.chain([_first] if _first else [], _stream):
+                                try:
+                                    for candidate in (chunk.candidates or []):
+                                        for part in (candidate.content.parts or []):
+                                            if getattr(part, "thought", None) and part.text:
+                                                yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
+                                                continue
+                                            if part.text:
+                                                _turn_pieces.append(part.text)
+                                                step_pieces.append(part.text)
+                                                yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                                except (AttributeError, TypeError):
+                                    text = getattr(chunk, "text", "") or ""
+                                    if text:
+                                        _turn_pieces.append(text)
+                                        step_pieces.append(text)
+                                        yield evt({"type": "agent_delta", "step": i + 1, "text": text})
+
+                            _turn_text = "".join(_turn_pieces).strip()
+                            if not _turn_text:
+                                break  # Empty response, stop turns
+
+                            # Check if the model wants to continue (has search results to analyze, etc.)
+                            # Continue if: response is short AND has web tools AND this isn't the last allowed turn
+                            _needs_more = (
+                                _turn < MAX_TURNS_PER_STEP - 1
+                                and _att.get("web")
+                                and len(_turn_text) < 800
+                                and _turn_text.rstrip().endswith(("...", "…", ":"))
+                            )
+                            if not _needs_more:
+                                break
+
+                            # Feed response back as context for next turn
+                            _turn_contents.append(types.Content(
+                                role="model",
+                                parts=[types.Part.from_text(text=_turn_text)]
+                            ))
+                            _turn_contents.append(types.Content(
+                                role="user",
+                                parts=[types.Part.from_text(
+                                    text="Continue your research. Search for more information, read additional sources, and expand your analysis. Go deeper."
+                                )]
+                            ))
+                            yield evt({"type": "agent_thinking", "step": i + 1,
+                                       "text": "\n\n[Continuing research — additional turn...]\n"})
                     else:
                         stream_fn = STREAM_PROVIDERS.get(provider)
                         if stream_fn:
@@ -7066,7 +7118,7 @@ def research_agent():
                         print(f"  [research] Step {i+1} attempt {_att_idx+1} returned empty, trying next...")
                 except Exception as _att_err:
                     _last_err = _att_err
-                    print(f"  [research] Step {i+1} attempt {_att_idx+1} ({_att['label']}) failed: {str(_att_err)[:100]}")
+                    print(f"  [research] Step {i+1} attempt {_att_idx+1} ({_att['label']}) failed: {str(_att_err)[:200]}")
                     continue
 
             if step_success:

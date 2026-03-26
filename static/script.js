@@ -402,8 +402,8 @@ function toggleDevRaw(on){
     topDev.style.opacity=on?'1':'.4';
     topDev.style.color=on?'var(--accent)':'var(--text-muted)';
   }
-  // Live re-render: re-render current chat to apply new mode
-  if(curChat){
+  // Live re-render: re-render current chat to apply new mode (skip during active streaming)
+  if(curChat&&!isChatRunning(curChat)){
     reRenderCurrentChat();
   }
 }
@@ -2159,7 +2159,7 @@ async function showResearchPlan(query, contentEl, area, chatId){
     const refined=plan.refined_query||query;
 
     let html=`<div class="ra-plan-container">`;
-    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><span class="ra-plan-title">Research Plan</span></div>`;
+    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><div><span class="ra-plan-title">Research Plan</span><div style="font-size:12px;color:var(--text-muted);margin-top:2px">Customize your research before launching</div></div></div>`;
     html+=`<div class="ra-plan-query-wrap"><label class="ra-plan-label">Research Query</label><textarea class="ra-plan-query" id="_raPlanQuery" rows="2">${esc(refined)}</textarea></div>`;
 
     if(questions.length){
@@ -2170,13 +2170,13 @@ async function showResearchPlan(query, contentEl, area, chatId){
       html+=`</div>`;
     }
 
-    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">📋 Research Steps <span class="ra-plan-hint">(drag to reorder, click × to remove, edit titles)</span></div><div class="ra-plan-steps" id="_raPlanSteps">`;
+    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">Research Steps <span class="ra-plan-hint">drag to reorder · click × to remove · edit titles</span></div><div class="ra-plan-steps" id="_raPlanSteps">`;
     steps.forEach((s,i)=>{
       html+=`<div class="ra-plan-step" draggable="true" data-idx="${i}"><span class="ra-plan-step-drag">⋮⋮</span><span class="ra-plan-step-num">${i+1}</span><input class="ra-plan-step-title" value="${esc(s.title)}" /><span class="ra-plan-step-desc">${esc(s.description||'')}</span><button class="ra-plan-step-rm" onclick="this.parentElement.remove();_raPlanRenum()" title="Remove step">×</button></div>`;
     });
     html+=`</div><button class="ra-plan-add-step" onclick="_raPlanAddStep()">+ Add Step</button></div>`;
 
-    html+=`<div class="ra-plan-actions"><button class="ra-plan-btn ra-plan-btn-primary" id="_raPlanStart">🚀 Start Research</button><button class="ra-plan-btn ra-plan-btn-skip" id="_raPlanSkip">⚡ Quick Start (skip planning)</button></div>`;
+    html+=`<div class="ra-plan-actions"><button class="ra-plan-btn ra-plan-btn-primary" id="_raPlanStart">🚀 Start Research</button><button class="ra-plan-btn ra-plan-btn-skip" id="_raPlanSkip">⚡ Quick Start</button></div>`;
     html+=`</div>`;
     contentEl.innerHTML=html;
 
@@ -2424,6 +2424,9 @@ async function runResearchAgent(query, contentEl, area, chatId){
   };
 
   try{
+    // Register abort controller BEFORE fetch so stop button works immediately
+    setChatRunning(chatId,true,{type:'research',controller:_raAbort});
+
     const response=await apiFetch('/api/research-agent',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -2434,9 +2437,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
       const d=await response.json().catch(()=>({error:'Failed to start research'}));
       throw new Error(d.error||'Research failed');
     }
-
-    // Register abort controller so stop button works
-    setChatRunning(chatId,true,{type:'research',controller:_raAbort});
 
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
@@ -2700,8 +2700,21 @@ async function runResearchAgent(query, contentEl, area, chatId){
     }
   }catch(e){
     clearInterval(elTimer);
-    contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}</div>`;
-    setStatus('Research failed.');
+    if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+    area.removeEventListener('scroll',_raOnScroll);
+    setChatRunning(chatId,false);
+    const isAbort=e.name==='AbortError';
+    if(isAbort){
+      // User cancelled — show a clean message
+      const badge=document.getElementById('_raBadge');
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⏹️ Research Cancelled';}
+      const actEl=document.getElementById('_raActivity');
+      if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
+      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⏹ cancelled';el.className='ra-section-status ra-failed';});
+    }else{
+      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}</div>`;
+      setStatus('Research failed.');
+    }
   }
 }
 
@@ -3932,21 +3945,9 @@ async function sendMessage(opts){
     activeTools.clear();
     renderToolBadges();
 
-    // ── Direct research agent launch when user explicitly activated the tool ──
-    if(toolsForMsg.includes('research')){
-      contentEl.innerHTML='';
-      setChatRunning(targetChatId,false);
-      setChatRunning(targetChatId,true,{type:'research'});
-      try{
-        await showResearchPlan(text, contentEl, area, targetChatId);
-        await refreshChats();
-      }catch(e){
-        contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px">${esc(e.message||'Research failed.')}</div>`;
-        setStatus('Research failed.');
-      }
-      setChatRunning(targetChatId,false);
-      return;
-    }
+    // ── Research tool: send to AI with tool hint instead of launching directly ──
+    // The AI will decide whether to trigger <<<DEEP_RESEARCH: query>>> based on
+    // the tool instructions injected into the system prompt by the backend.
 
     // If canvas is open, include canvas context for select-to-edit
     let messageToSend=replyPrefix?replyPrefix+text:text;
@@ -4014,22 +4015,31 @@ async function sendMessage(opts){
     let thinkTextEl=null;
     let _lastThinkLabel='';
     function _extractThinkSubject(text){
-      // Extract the latest meaningful topic from the thinking text
+      // Extract a short topic heading from the thinking text
       const lines=(text||'').split('\n').filter(l=>l.trim());
-      // Walk backwards to find the latest line that looks like a topic/action
+      // Priority 1: look for markdown headings (## Something) — walk backwards for most recent
+      for(let i=lines.length-1;i>=0;i--){
+        const hm=lines[i].match(/^#{1,4}\s+(.+)/);
+        if(hm){let h=hm[1].trim();if(h.length>50)h=h.slice(0,50)+'…';return h;}
+      }
+      // Priority 2: look for bold text (**Something**) as a heading — walk backwards
+      for(let i=lines.length-1;i>=Math.max(0,lines.length-15);i--){
+        const bm=lines[i].match(/^\*\*(.+?)\*\*/);
+        if(bm){let b=bm[1].trim();if(b.length>50)b=b.slice(0,50)+'…';return b;}
+      }
+      // Priority 3: find a short title-like line (< 45 chars, not a sentence)
+      for(let i=lines.length-1;i>=Math.max(0,lines.length-10);i--){
+        let line=lines[i].replace(/^[-•*#>\s]+/,'').trim();
+        if(line.length>=5&&line.length<=45&&!/[.!?]$/.test(line)&&!/^[\W]+$/.test(line))return line;
+      }
+      // Fallback: last meaningful short phrase, truncated
       for(let i=lines.length-1;i>=Math.max(0,lines.length-8);i--){
         let line=lines[i].replace(/^[-•*#>\s]+/,'').trim();
-        if(line.length<5)continue;
-        // Skip lines that are just punctuation or code
-        if(/^[\W]+$/.test(line))continue;
-        if(line.length>60)line=line.slice(0,60)+'…';
+        if(line.length<5||/^[\W]+$/.test(line))continue;
+        if(line.length>45)line=line.slice(0,45)+'…';
         return line;
       }
-      // Fallback to first line
-      const first=lines[0]||'';
-      const clean=first.replace(/^[-•*#>\s]+/,'').trim();
-      if(clean.length>60)return clean.slice(0,60)+'…';
-      return clean||'your question';
+      return 'your question';
     }
     function ensureThinkPanel(){
       if(thinkPanel)return;
@@ -4193,7 +4203,12 @@ async function sendMessage(opts){
               // In dev raw mode, show the full unprocessed AI response with all tags
               finalHTML+='<pre class="dev-raw-log">'+esc(fullText||data.reply||displayReply)+'</pre>';
             }else{
-              finalHTML+=fmt(displayReply);
+              // If thinking was used but no response was generated, show a helpful message
+              if(!displayReply.trim()&&(thinkText||_replyThinkText)){
+                finalHTML+='<div style="color:var(--text-muted);font-size:13px;padding:12px 0;font-style:italic">The model used its full output on thinking and didn\'t produce a response. Try sending your message again or reducing the thinking level.</div>';
+              }else{
+                finalHTML+=fmt(displayReply);
+              }
             }
             if(!devRawMode&&choiceBlocks.length){
               const validBlocks=choiceBlocks.filter(cb=>cb.choices.length);
