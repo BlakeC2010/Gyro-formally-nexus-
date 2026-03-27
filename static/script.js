@@ -4041,6 +4041,8 @@ async function openArtifact(id){
 async function sendMessage(opts){
   const _silent=opts&&opts.silent;
   const _noThinking=opts&&opts.noThinking;
+  const _retryCount=(opts&&opts._retryCount)||0;
+  const _MAX_STREAM_RETRIES=2;
   // Allow background reprompt/continue to target a specific chat
   const _targetChat=opts&&opts.targetChat;
   const input=document.getElementById('msgInput');
@@ -4264,13 +4266,28 @@ async function sendMessage(opts){
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
-    // Stall detection: if no meaningful event for 120s, warn the user
+    // Stall detection: if no event (including heartbeats) for 45s, warn the user
+    // Reduced from 120s for school/corporate WiFi where proxies kill idle connections
+    let _lastAnyEvent=Date.now();
     let _lastMeaningfulEvent=Date.now();
     let _stallTimer=setInterval(()=>{
       if(_doneReceived){clearInterval(_stallTimer);return;}
-      if(Date.now()-_lastMeaningfulEvent>120000){
+      const noEventMs=Date.now()-_lastAnyEvent;
+      const noMeaningfulMs=Date.now()-_lastMeaningfulEvent;
+      // If no events at all (not even heartbeats) for 45s, connection is dead
+      if(noEventMs>45000){
         clearInterval(_stallTimer);
-        console.warn('[gyro] Stream stalled — no data for 120s');
+        console.warn('[gyro] Stream stalled — no events for 45s (proxy may have killed connection)');
+        // Auto-retry if no content received yet
+        if(!fullText.trim()&&!thinkText.trim()&&_retryCount<_MAX_STREAM_RETRIES){
+          console.warn(`[gyro] Auto-retrying stalled stream (attempt ${_retryCount+1}/${_MAX_STREAM_RETRIES})`);
+          try{controller.abort();}catch(_){}
+          msgDiv.remove();
+          setChatRunning(targetChatId,false);
+          area.removeEventListener('scroll',_onUserScroll);
+          setTimeout(()=>sendMessage({...opts,message:text,_retryCount:_retryCount+1,targetChat:targetChatId}),1500*(_retryCount+1));
+          return;
+        }
         const cur=runningStreams.get(targetChatId);
         if(cur&&cur.streamId===streamId)setChatRunning(targetChatId,false);
         const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
@@ -4278,7 +4295,7 @@ async function sendMessage(opts){
           targetEl.innerHTML='<div style="color:var(--text-muted);font-size:13px;padding:12px 0;font-style:italic">The response timed out. Please try sending your message again.</div>';
         }
       }
-    },10000);
+    },5000);
 
     // Create a live thinking panel (collapsed by default — click to expand)
     let thinkPanel=null;
@@ -4341,7 +4358,8 @@ async function sendMessage(opts){
         try{
           const data=JSON.parse(line);
           if(data.type==='heartbeat'){
-            // Keep-alive ping from backend — no stall reset
+            // Keep-alive ping from backend — reset connection timer but not meaningful timer
+            _lastAnyEvent=Date.now();
             continue;
           }else if(data.type==='thinking_delta'){
             _lastMeaningfulEvent=Date.now();
@@ -5028,8 +5046,19 @@ async function sendMessage(opts){
       if(canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
     }else{
       stopThinkingPhrases();
+      // Auto-retry on connection error if no content was received yet
+      const _hasContent=contentEl&&contentEl.textContent&&contentEl.textContent.trim().length>20;
+      if(_retryCount<_MAX_STREAM_RETRIES&&!_hasContent){
+        console.warn(`[gyro] Stream connection error (attempt ${_retryCount+1}/${_MAX_STREAM_RETRIES}), retrying...`,e.message);
+        msgDiv.remove();
+        setChatRunning(targetChatId,false);
+        area.removeEventListener('scroll',_onUserScroll);
+        await new Promise(r=>setTimeout(r,1500*(_retryCount+1)));
+        return sendMessage({...opts,message:text,_retryCount:_retryCount+1,targetChat:targetChatId});
+      }
       const errDetail=e.message||'Unknown error';
-      if(canRender())contentEl.innerHTML=`<div style=\"color:var(--red)\">Connection error: ${esc(errDetail)}<br><small>Is the server running? Check your network.</small></div>`;
+      const retryHint=_retryCount>0?' (retried '+_retryCount+' time'+(_retryCount>1?'s)':')'):'';
+      if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">Connection error: ${esc(errDetail)}${retryHint}<br><small>Your network may be blocking streaming responses. Try refreshing the page.</small></div>`;
     }
   }finally{
     // ── Handle stream ending without a done event (connection drop, timeout, etc.) ──

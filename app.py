@@ -4363,7 +4363,7 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions):
 
 def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"timeout": 120_000})
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
@@ -4397,7 +4397,7 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
 
 def call_google_stream(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"timeout": 120_000})
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
@@ -4464,7 +4464,7 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
 
 def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
-    kw = {"api_key": api_key}
+    kw = {"api_key": api_key, "timeout": 120.0}
     if base_url: kw["base_url"] = base_url
     client = openai.OpenAI(**kw)
     msgs = [{"role": "system", "content": sysprompt}]
@@ -4489,7 +4489,7 @@ def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=F
 
 def call_anthropic(api_key, model, sysprompt, messages, base_url=None, thinking=False, **kwargs):
     anthropic = _import_anthropic()
-    kw = {"api_key": api_key}
+    kw = {"api_key": api_key, "timeout": 120.0}
     if base_url: kw["base_url"] = base_url
     client = anthropic.Anthropic(**kw)
     msgs = []
@@ -4523,7 +4523,7 @@ PROVIDERS = {"google": call_google, "openai": call_openai,
 
 def call_openai_stream(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
-    kw = {"api_key": api_key}
+    kw = {"api_key": api_key, "timeout": 120.0}
     if base_url: kw["base_url"] = base_url
     client = openai.OpenAI(**kw)
     msgs = [{"role": "system", "content": sysprompt}]
@@ -4550,7 +4550,7 @@ def call_openai_stream(api_key, model, sysprompt, messages, base_url=None, web_s
 
 def call_anthropic_stream(api_key, model, sysprompt, messages, base_url=None, thinking=False, **kwargs):
     anthropic = _import_anthropic()
-    kw = {"api_key": api_key}
+    kw = {"api_key": api_key, "timeout": 120.0}
     if base_url: kw["base_url"] = base_url
     client = anthropic.Anthropic(**kw)
     msgs = []
@@ -4630,6 +4630,12 @@ def add_no_cache_headers(resp):
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+    # Anti-proxy-buffering for all streaming (ndjson) responses
+    ct = resp.headers.get("Content-Type", "")
+    if "ndjson" in ct or "event-stream" in ct:
+        resp.headers.setdefault("X-Accel-Buffering", "no")
+        resp.headers.setdefault("Cache-Control", "no-cache, no-transform")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     return resp
 
 # ─── Routes: Auth ─────────────────────────────────────────────────────────────
@@ -6078,7 +6084,14 @@ def stock_agent():
             except Exception:
                 pass
 
-    return Response(generate(), mimetype="application/x-ndjson")
+    resp = Response(generate(), mimetype="application/x-ndjson")
+    # Anti-proxy-buffering headers — critical for school/corporate WiFi
+    resp.headers["X-Accel-Buffering"] = "no"           # Nginx
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["Transfer-Encoding"] = "chunked"
+    return resp
 
 
 @app.route("/api/detect-tools", methods=["POST"])
@@ -6228,8 +6241,8 @@ def chat_message_stream(chat_id):
                 # Render's proxy from killing the connection.
                 import queue, threading
                 _SENTINEL = object()
-                _HEARTBEAT_INTERVAL = 15          # seconds
-                _MAX_STALL_HEARTBEATS = 8         # give up after 8 heartbeats (~2 min) with no data
+                _HEARTBEAT_INTERVAL = 8           # seconds (reduced from 15 — school/corp proxies kill idle connections at ~30s)
+                _MAX_STALL_HEARTBEATS = 20        # give up after 20 heartbeats (~160s) with no data
                 _stall_count = 0
                 _chunk_q = queue.Queue()
 
@@ -6254,6 +6267,10 @@ def chat_message_stream(chat_id):
                 _worker = threading.Thread(target=_stream_worker, daemon=True)
                 _worker.start()
 
+                # Send immediate heartbeat so the connection is established
+                # before the API starts processing (defeats proxy buffering)
+                yield event({"type": "heartbeat", "ts": int(time.time())})
+
                 while True:
                     try:
                         chunk = _chunk_q.get(timeout=_HEARTBEAT_INTERVAL)
@@ -6262,8 +6279,9 @@ def chat_message_stream(chat_id):
                         if _stall_count >= _MAX_STALL_HEARTBEATS:
                             print(f"  [stream] Stall detected — {_stall_count} heartbeats with no data. Ending stream.")
                             break
-                        # No data for 15 s — send heartbeat to keep connection alive
-                        yield event({"type": "heartbeat"})
+                        # No data — send padded heartbeat to keep connection alive
+                        # Padding defeats proxy buffering (some proxies wait for N bytes)
+                        yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
                         continue
                     _stall_count = 0  # reset on any real data
                     if chunk is _SENTINEL:
@@ -6518,7 +6536,14 @@ def chat_message_stream(chat_id):
             else:
                 yield event({"type": "error", "error": f"API error: {err}"})
 
-    return Response(generate(), mimetype="application/x-ndjson")
+    resp = Response(generate(), mimetype="application/x-ndjson")
+    # Anti-proxy-buffering headers — critical for school/corporate WiFi
+    resp.headers["X-Accel-Buffering"] = "no"           # Nginx
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["Transfer-Encoding"] = "chunked"
+    return resp
 
 @app.route("/api/canvas/apply", methods=["POST"])
 @require_auth
@@ -7748,7 +7773,13 @@ def research_agent():
             except Exception:
                 pass
 
-    return Response(_safe_generate(), mimetype="application/x-ndjson")
+    resp = Response(_safe_generate(), mimetype="application/x-ndjson")
+    resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["Transfer-Encoding"] = "chunked"
+    return resp
 
 
 
