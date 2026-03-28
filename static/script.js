@@ -322,11 +322,13 @@ async function apiFetch(url, opts={}){
 }
 
 // ─── Session keep-alive ───────────────────────────
-function _handleSessionLost(){
+async function _handleSessionLost(){
   showToast('Session expired. Please sign in again.','info');
   curUser=null; curChat=null;
   document.getElementById('appPage').classList.remove('visible');
   document.getElementById('loginPage').style.display='flex';
+  googleInitDone=false;
+  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -1453,6 +1455,7 @@ async function signOut(){
   document.getElementById('loginPage').style.display='flex';
   document.getElementById('loginErr').textContent='';
   googleInitDone=false;
+  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -6638,9 +6641,12 @@ async function resetData(){
     localStorage.removeItem(FOLDER_META_KEY);
     try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
     closeM('settingsModal');
-    curChat=null;curUser=null;
+    curChat=null;curUser=null;isGuest=false;
     document.getElementById('appPage').classList.remove('visible');
     document.getElementById('loginPage').style.display='flex';
+    googleInitDone=false;
+    await ensureOAuthConfigLoaded();
+    initGoogleAuthUI();
     showToast('Account deleted.','success');
   }else{
     await _dlg({title:'Deletion failed',msg:d.error||'Something went wrong.',icon:'✕',iconType:'danger',confirmText:'OK'});
