@@ -3723,6 +3723,11 @@ def prepare_chat_turn(chat, payload):
     if chat.get("custom_instructions"):
         sysprompt += f"\n\n[CHAT-SPECIFIC INSTRUCTIONS]\n{chat['custom_instructions']}"
 
+    # --- Per-folder custom instructions (from request body) ---
+    folder_instructions = (payload.get("folder_instructions") or "").strip()
+    if folder_instructions:
+        sysprompt += f"\n\n[FOLDER INSTRUCTIONS]\nThis chat is in a folder with these instructions:\n{folder_instructions}"
+
     # --- Active tool instructions (injected silently into system prompt) ---
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
@@ -4920,6 +4925,7 @@ def auth_google():
     user["remember_tokens"] = tokens
     _save_user(user)
     session.permanent = True
+    session.pop("guest", None); session.pop("guest_id", None)
     session["user_id"] = user["id"]; session["email"] = user["email"]
     return jsonify({"user": {"id": user["id"], "email": user["email"],
                              "name": user["name"], "theme": user.get("theme", "dark"), "plan": user.get("plan", "free")},
@@ -4941,6 +4947,7 @@ def auth_resume():
     if hashed not in stored:
         return jsonify({"authenticated": False}), 401
     session.permanent = True
+    session.pop("guest", None); session.pop("guest_id", None)
     session["user_id"] = user["id"]
     session["email"] = user["email"]
     profile = load_profile()
@@ -6972,6 +6979,7 @@ def canvas_apply():
     content = (d.get("content") or "")
     instruction = (d.get("instruction") or "").strip()
     language = (d.get("language") or "text").strip()
+    do_stream = d.get("stream", False)
     if not content.strip():
         return jsonify({"error": "Canvas is empty."}), 400
     if not instruction:
@@ -6996,6 +7004,31 @@ def canvas_apply():
         "[CURRENT DOCUMENT]\n"
         f"{content}"
     )
+
+    if do_stream:
+        stream_fn = STREAM_PROVIDERS.get(resolved["provider"])
+        if not stream_fn:
+            return jsonify({"error": "Streaming not supported for this provider."}), 400
+
+        def gen():
+            try:
+                for chunk in stream_fn(
+                    resolved["api_key"],
+                    resolved["actual_model"],
+                    "You are a document editor. Return only the updated content.",
+                    [{"role": "user", "text": canvas_prompt}],
+                    base_url=resolved.get("base_url"),
+                ):
+                    yield json.dumps({"text": chunk}) + "\n"
+                yield json.dumps({"done": True}) + "\n"
+            except Exception as e:
+                yield json.dumps({"error": str(e)}) + "\n"
+
+        resp = Response(gen(), mimetype="application/x-ndjson")
+        resp.headers["X-Accel-Buffering"] = "no"
+        resp.headers["Cache-Control"] = "no-cache, no-transform"
+        return resp
+
     try:
         updated = PROVIDERS.get(resolved["provider"], call_openai)(
             resolved["api_key"],
@@ -7058,6 +7091,41 @@ def gen_image():
         return jsonify({"image": img}) if img else jsonify({"error": "No image generated"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/folders/enhance-instructions", methods=["POST"])
+@require_auth
+def enhance_folder_instructions():
+    d = request.get_json() or {}
+    instructions = (d.get("instructions") or "").strip()
+    if not instructions:
+        return jsonify({"error": "No instructions provided."}), 400
+    settings = load_settings()
+    api_key = settings.get("keys", {}).get("google", "")
+    if not api_key:
+        return jsonify({"error": "Google API key required."}), 400
+    try:
+        genai, types = _import_google()
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            "You are helping a user write better custom instructions for an AI chat folder. "
+            "The user wrote a brief description of what the folder is for. "
+            "Expand it into clear, detailed, well-structured instructions that an AI assistant should follow "
+            "for all conversations in this folder. Keep it practical and specific. "
+            "Return ONLY the enhanced instructions text, nothing else.\n\n"
+            f"User's description:\n{instructions}"
+        )
+        r = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=prompt,
+        )
+        enhanced = r.text.strip() if r.text else ""
+        if not enhanced:
+            return jsonify({"error": "No enhancement generated."}), 500
+        return jsonify({"enhanced": enhanced})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/upload", methods=["POST"])
 @require_auth_or_guest

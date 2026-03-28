@@ -1157,30 +1157,54 @@ function openFolderView(folder){
   document.getElementById('topTitle').textContent=folder;
   const meta=getFolderMeta(folder);
   const fIcon=meta.emoji||'📁';
-  const fColor=meta.color||'var(--accent)';
-  const chatListHtml=chats.length?chats.map(c=>{
-    const preview=c.messages?.length?`${c.messages.length} messages`:'Empty chat';
+  const instructions=meta.instructions||'';
+
+  // Recent chats widget
+  const recentChats=chats.slice(0,6);
+  const chatListHtml=recentChats.length?recentChats.map(c=>{
+    const msgCount=c.messages?.length||0;
+    const preview=msgCount?`${msgCount} message${msgCount!==1?'s':''}`:'Empty chat';
     return `<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
       +`<span class="fv-chat-icon">💬</span>`
       +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${preview}</div></div>`
       +`<span class="fv-chat-arrow">→</span></div>`;
   }).join('')
     :'<div class="fv-empty">No chats yet. Start one below.</div>';
+
+  // Build folder-specific todo widget from chats
+  const state=loadProductivityState();
+  const allTodos=(state.todos||[]).filter(t=>!t.done);
+  const folderTodos=allTodos.filter(t=>{
+    const chatId=(t.id||'').split('_')[1]||'';
+    return chats.some(c=>c.id===chatId);
+  }).slice(0,5);
+  const todoWidget=folderTodos.length?renderHomeWidget({type:'todos',size:'medium',title:'Folder Tasks',items:folderTodos}):'';
+
+  // Quick actions for this folder
+  const quickActions=`<div class="wl-action-grid">
+    <div class="wl-action-card" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation in this folder</span></div>
+    <div class="wl-action-card" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')"><span class="wl-ac-icon">⚙</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Customize icon, instructions</span></div>
+  </div>`;
+
+  // Folder instructions preview
+  const instrPreview=instructions?`<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Custom Instructions</div><div class="wl-focus-copy" style="font-size:12px;opacity:.8">${esc(instructions.length>200?instructions.slice(0,200)+'…':instructions)}</div></div>`:'';
+
   area.innerHTML=`<div class="folder-view">
     <div class="fv-hero">
-      <div class="fv-hero-icon" style="background:${fColor}20;color:${fColor}">${fIcon}</div>
+      <div class="fv-hero-icon" style="background:var(--accent-dim);color:var(--accent)">${fIcon}</div>
       <h1 class="fv-title">${esc(folder)}</h1>
-      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}</p>
+      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}${instructions?' · Custom instructions active':''}</p>
     </div>
     <div class="fv-actions">
       <button class="fv-action-btn fv-action-primary" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         New Chat
       </button>
-      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">🎨 Customize</button>
-      <button class="fv-action-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Rename</button>
+      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">⚙ Settings</button>
       <button class="fv-action-btn fv-action-danger" onclick="deleteFolderAndChats('${esc(folder).replace(/'/g,"\\'")}')">🗑 Delete</button>
     </div>
+    ${instrPreview||todoWidget?`<div class="wl-data-section" style="width:100%;margin-bottom:20px"><div class="wl-grid">${instrPreview}${todoWidget}</div></div>`:''}
+    <div style="width:100%;margin-bottom:16px"><div class="wl-widget-hd" style="padding:0 4px">${chats.length>6?`Recent Chats (${chats.length} total)`:'Chats'}</div></div>
     <div class="fv-chat-list">${chatListHtml}</div>
   </div>`;
   renderChatList();
@@ -1201,38 +1225,50 @@ async function renameFolderFromView(oldName){
 }
 
 async function customizeFolder(folder){
+  document.querySelector('.sf-menu')?.remove();
   const meta=getFolderMeta(folder);
-  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','❤️','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊',''];
-  const colors=['','#bf6b3a','#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e91e63','#00bcd4','#ff5722'];
-  const colorNames=['Default','Orange','Red','Amber','Yellow','Green','Teal','Blue','Purple','Pink','Cyan','Deep Orange'];
+  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','💰','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊','🏋️','🍳','✈️','🎬','📱','🔒','🎓','❤️','🏆','🧠','💻'];
   const curEmoji=meta.emoji||'📁';
-  const curColor=meta.color||'';
+  const curName=folder;
+  const curInstructions=meta.instructions||'';
+  const curFiles=meta.instructionFiles||[];
   const emojiGrid=emojis.map(e=>{
-    const label=e||'None';
-    const sel=e===curEmoji||(e===''&&!curEmoji)?' fv-cust-sel':'';
-    return `<button class="fv-cust-btn${sel}" onclick="this.closest('.fv-cust-popup').dataset.emoji='${e}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')">${label}</button>`;
-  }).join('');
-  const colorGrid=colors.map((c,i)=>{
-    const sel=c===curColor||(c===''&&!curColor)?' fv-cust-sel':'';
-    const bg=c||'var(--text-muted)';
-    return `<button class="fv-cust-color${sel}" style="background:${bg}" title="${colorNames[i]}" onclick="this.closest('.fv-cust-popup').dataset.color='${c}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-color').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')"></button>`;
-  }).join('');
+    const sel=e===curEmoji?' fv-cust-sel':'';
+    return `<button class="fv-cust-btn${sel}" data-emoji="${e}" onclick="_custSelectEmoji(this)">${e}</button>`;
+  }).join('')+`<button class="fv-cust-btn fv-cust-none${!curEmoji?' fv-cust-sel':''}" data-emoji="" onclick="_custSelectEmoji(this)">✕</button>`;
+  const fileChips=curFiles.map((f,i)=>`<div class="fv-cust-file-chip"><span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span></div>`).join('');
 
   const popup=document.createElement('div');
   popup.className='fv-cust-popup';
   popup.dataset.emoji=curEmoji;
-  popup.dataset.color=curColor;
+  popup.dataset.folder=folder;
   popup.innerHTML=`
     <div class="fv-cust-overlay" onclick="this.parentElement.remove()"></div>
     <div class="fv-cust-modal">
-      <h3>Customize "${esc(folder)}"</h3>
+      <h3>Customize Folder</h3>
+      <div class="fv-cust-section">
+        <label>Folder Name</label>
+        <input class="fv-cust-input" id="fvCustName" type="text" value="${esc(curName)}" placeholder="Folder name..." maxlength="50">
+      </div>
       <div class="fv-cust-section">
         <label>Icon</label>
         <div class="fv-cust-grid">${emojiGrid}</div>
       </div>
       <div class="fv-cust-section">
-        <label>Color</label>
-        <div class="fv-cust-grid">${colorGrid}</div>
+        <label>Custom Instructions</label>
+        <textarea class="fv-cust-textarea" id="fvCustInstructions" placeholder="Describe what this folder is for. The AI will use these instructions for all chats in this folder...">${esc(curInstructions)}</textarea>
+        <div class="fv-cust-hint">These instructions will be included in every chat within this folder.</div>
+        <div class="fv-cust-file-row">
+          <button class="fv-cust-file-btn" onclick="_custUploadFile()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload context file
+          </button>
+          <input type="file" id="fvCustFileInput" style="display:none" onchange="_custHandleFile(this)" multiple accept=".txt,.md,.json,.pdf,.png,.jpg,.jpeg,.webp">
+        </div>
+        <div class="fv-cust-files-list" id="fvCustFilesList">${fileChips}</div>
+        <button class="fv-cust-enhance-btn" onclick="_custEnhanceInstructions(this)">
+          <span>✨</span> Enhance with AI
+        </button>
       </div>
       <div class="fv-cust-footer">
         <button class="fv-cust-cancel" onclick="this.closest('.fv-cust-popup').remove()">Cancel</button>
@@ -1240,19 +1276,74 @@ async function customizeFolder(folder){
       </div>
     </div>`;
   document.body.appendChild(popup);
+  document.getElementById('fvCustName').focus();
+}
+function _custSelectEmoji(btn){
+  btn.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));
+  btn.classList.add('fv-cust-sel');
+  btn.closest('.fv-cust-popup').dataset.emoji=btn.dataset.emoji;
+}
+function _custUploadFile(){
+  document.getElementById('fvCustFileInput')?.click();
+}
+function _custHandleFile(input){
+  const list=document.getElementById('fvCustFilesList');
+  if(!list||!input.files)return;
+  for(const f of input.files){
+    const chip=document.createElement('div');
+    chip.className='fv-cust-file-chip';
+    chip.dataset.fileName=f.name;
+    // Read file content for context
+    const reader=new FileReader();
+    reader.onload=()=>{chip.dataset.fileData=reader.result;};
+    if(f.type.startsWith('image/'))reader.readAsDataURL(f);
+    else reader.readAsText(f);
+    chip.innerHTML=`<span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span>`;
+    list.appendChild(chip);
+  }
+  input.value='';
+}
+async function _custEnhanceInstructions(btn){
+  const textarea=document.getElementById('fvCustInstructions');
+  const text=textarea?.value?.trim();
+  if(!text){showToast('Write some instructions first','info');return;}
+  btn.disabled=true;
+  btn.innerHTML='<span class="spinner"></span> Enhancing...';
+  try{
+    const r=await apiFetch('/api/folders/enhance-instructions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instructions:text})});
+    const d=await r.json();
+    if(d.enhanced){textarea.value=d.enhanced;showToast('Instructions enhanced','success');}
+    else{showToast(d.error||'Enhancement failed','error');}
+  }catch{showToast('Enhancement failed','error');}
+  btn.disabled=false;
+  btn.innerHTML='<span>✨</span> Enhance with AI';
 }
 
-function saveFolderCustomize(btn){
+async function saveFolderCustomize(btn){
   const popup=btn.closest('.fv-cust-popup');
-  const folder=_activeFolderView;
-  if(!folder){popup.remove();return;}
+  const oldFolder=popup.dataset.folder;
+  if(!oldFolder){popup.remove();return;}
   const emoji=popup.dataset.emoji||'';
-  const color=popup.dataset.color||'';
-  setFolderMeta(folder,{emoji,color});
+  const newName=(document.getElementById('fvCustName')?.value||'').trim()||oldFolder;
+  const instructions=(document.getElementById('fvCustInstructions')?.value||'').trim();
+  // Collect uploaded files
+  const fileChips=[...document.querySelectorAll('#fvCustFilesList .fv-cust-file-chip')];
+  const instructionFiles=fileChips.map(c=>({name:c.dataset.fileName||c.querySelector('span')?.textContent||'file',data:c.dataset.fileData||''})).filter(f=>f.name);
+  setFolderMeta(oldFolder,{emoji,instructions,instructionFiles});
+  // Handle rename
+  if(newName!==oldFolder){
+    renameFolderMeta(oldFolder,newName);
+    const chats=allChats.filter(c=>c.folder===oldFolder);
+    for(const c of chats){
+      await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:newName})});
+    }
+    await refreshChats();
+    _activeFolderView=newName;
+  }
   popup.remove();
   renderChatList();
-  openFolderView(folder);
-  showToast('Folder customized.','success');
+  if(_activeFolderView) openFolderView(_activeFolderView);
+  showToast('Folder saved.','success');
 }
 
 function loadCachedChats(){
@@ -1322,7 +1413,9 @@ async function handleGoogleCred(resp){
       localStorage.removeItem('gyro_guest_id');
     }
     theme=d.user.theme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
-    applyTheme(false); onboardingChecked=false; showApp();
+    applyTheme(false); onboardingChecked=false;
+    localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
+    showApp();
   }catch(e){document.getElementById('loginErr').textContent='Google auth failed'}
 }
 
@@ -1335,6 +1428,7 @@ async function guestLogin(){
     if(d.ok){
       isGuest=true;curUser={name:'Guest',email:'',plan:'guest'};
       if(d.guest_id) localStorage.setItem('gyro_guest_id',d.guest_id);
+      localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
       showApp();
     }
     else document.getElementById('loginErr').textContent=d.error||'Guest login failed';
@@ -1348,6 +1442,10 @@ async function signOut(){
   localStorage.removeItem('gyro_uid');
   localStorage.removeItem('gyro_remember');
   localStorage.removeItem('gyro_guest_id');
+  localStorage.removeItem(CHAT_CACHE_KEY);
+  localStorage.removeItem(FOLDER_META_KEY);
+  localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
+  try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
   curUser=null;curChat=null;allChats=[];isGuest=false;
   onboardingChecked=false;
   hideSetupReminder();
@@ -1598,6 +1696,7 @@ function renderChatList(filter=''){
       html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();showMoveMenu(this,'${c.id}')" title="Move to folder">📁</button><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
+  html+='<div class="sb-drag-root-zone" style="display:none">Drop here to remove from folder</div>';
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
   // ── Drag-to-folder: wire up after render ──
   _initSidebarDrag(el);
@@ -1619,30 +1718,51 @@ function _initSidebarDrag(container){
     chatEl.classList.add('sb-drag-active');
     e.dataTransfer.effectAllowed='move';
     e.dataTransfer.setData('text/plain',_dragChatId);
+    // Show root drop zone for removing from folders
+    const rootZone=container.querySelector('.sb-drag-root-zone');
+    if(rootZone){
+      const chat=allChats.find(c=>c.id===_dragChatId);
+      if(chat&&chat.folder)rootZone.style.display='block';
+    }
   });
   container.addEventListener('dragend',e=>{
     _dragChatId=null;
     container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
+    const rootZone=container.querySelector('.sb-drag-root-zone');
+    if(rootZone){rootZone.style.display='none';rootZone.classList.remove('sb-drag-over');}
   });
   container.addEventListener('dragover',e=>{
     if(!_dragChatId)return;
     e.preventDefault();
     e.dataTransfer.dropEffect='move';
     const folderEl=e.target.closest('.sb-folder[data-folder]');
+    const rootZone=e.target.closest('.sb-drag-root-zone');
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
     if(folderEl)folderEl.classList.add('sb-drag-over');
+    if(rootZone)rootZone.classList.add('sb-drag-over');
   });
   container.addEventListener('dragleave',e=>{
     const folderEl=e.target.closest('.sb-folder[data-folder]');
     if(folderEl)folderEl.classList.remove('sb-drag-over');
+    const rootZone=e.target.closest('.sb-drag-root-zone');
+    if(rootZone)rootZone.classList.remove('sb-drag-over');
   });
   container.addEventListener('drop',e=>{
     e.preventDefault();
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
     container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
+    const rootZone=container.querySelector('.sb-drag-root-zone');
+    if(rootZone){rootZone.style.display='none';rootZone.classList.remove('sb-drag-over');}
     const folderEl=e.target.closest('.sb-folder[data-folder]');
-    if(!_dragChatId||!folderEl)return;
+    const isRootDrop=e.target.closest('.sb-drag-root-zone');
+    if(!_dragChatId)return;
+    if(isRootDrop){
+      moveChat(_dragChatId,'');
+      _dragChatId=null;
+      return;
+    }
+    if(!folderEl){_dragChatId=null;return;}
     const targetFolder=folderEl.dataset.folder;
     const chat=allChats.find(c=>c.id===_dragChatId);
     if(chat&&chat.folder!==targetFolder){
@@ -1687,10 +1807,7 @@ async function newFolder(){
   const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
   if(!n?.trim())return;
   const name=n.trim();
-  // Just create the folder entry in meta and add one empty chat to register the folder on the server
-  // Actually - we just need at least one chat with that folder. Create no chat; use a placeholder approach.
-  // To make the folder appear even with 0 chats, we store it in folderMeta and render it in sidebar.
-  setFolderMeta(name,{emoji:'📁',color:''});
+  setFolderMeta(name,{emoji:'📁'});
   renderChatList();
   openFolderView(name);
   showToast('Folder created.','success');
@@ -1706,8 +1823,10 @@ function toggleFolderMenu(btn,folder){
   const menu=document.createElement('div');
   menu.className='sf-menu';
   menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="customizeFolder('${folder.replace(/'/g,"\\'")}')">Customize</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
-  btn.parentElement.style.position='relative';
-  btn.parentElement.appendChild(menu);
+  document.body.appendChild(menu);
+  const rect=btn.getBoundingClientRect();
+  menu.style.top=rect.bottom+4+'px';
+  menu.style.left=Math.min(rect.left,window.innerWidth-160)+'px';
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -1728,8 +1847,10 @@ function showMoveMenu(btn,chatId){
   if(curFolder) items+=`<button onclick="moveChat('${chatId}','')">🚫 Remove from folder</button>`;
   if(!items) items='<div style="padding:8px 12px;color:var(--text-muted);font-size:11px">No folders yet</div>';
   menu.innerHTML=items;
-  btn.closest('.sb-chat').style.position='relative';
-  btn.closest('.sb-chat').appendChild(menu);
+  document.body.appendChild(menu);
+  const rect=btn.getBoundingClientRect();
+  menu.style.top=rect.bottom+4+'px';
+  menu.style.left=Math.min(rect.left,window.innerWidth-160)+'px';
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -4402,6 +4523,12 @@ async function sendMessage(opts){
     if(_editInputArea)_editInputArea.classList.remove('edit-mode');
     const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
+    // Inject folder instructions if chat is in a folder
+    const _chatObj=allChats.find(c=>c.id===targetChatId);
+    if(_chatObj&&_chatObj.folder){
+      const _fMeta=getFolderMeta(_chatObj.folder);
+      if(_fMeta.instructions)_bodyObj.folder_instructions=_fMeta.instructions;
+    }
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(_bodyObj),signal:controller.signal});
 
@@ -5613,7 +5740,11 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
+  if(role==='user'&&text){
+    // Don't show edit for image-only messages (no text, only files)
+    const hasTextContent=text.trim().length>0;
+    if(hasTextContent)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
+  }
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -6504,6 +6635,7 @@ async function resetData(){
     localStorage.removeItem(ONB_DISMISS_KEY);
     localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
     localStorage.removeItem(CHAT_CACHE_KEY);
+    localStorage.removeItem(FOLDER_META_KEY);
     try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
     closeM('settingsModal');
     curChat=null;curUser=null;
@@ -6608,12 +6740,60 @@ function switchFileTab(tab,btn){
   document.querySelectorAll('.fb-tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.fb-panel').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  document.getElementById(tab==='chat'?'fbChat':'fbWorkspace').classList.add('active');
-  if(tab==='chat')refreshChatFiles();else refreshWorkspaceFiles();
+  const panelMap={workspace:'fbWorkspace',chat:'fbChat',chats:'fbChats'};
+  document.getElementById(panelMap[tab]||'fbWorkspace').classList.add('active');
+  if(tab==='chat')refreshChatFiles();
+  else if(tab==='chats')refreshChatsTab();
+  else refreshWorkspaceFiles();
 }
 async function refreshFileBrowser(){
   refreshWorkspaceFiles();
   refreshChatFiles();
+}
+function refreshChatsTab(){
+  const el=document.getElementById('fbChats');
+  if(!el)return;
+  const folders={};const noFolder=[];
+  const folderMeta=_loadFolderMeta();
+  // Include empty folders from meta
+  for(const fld of Object.keys(folderMeta)){
+    if(fld)folders[fld]=[];
+  }
+  for(const c of allChats){
+    const fld=c.folder||'';
+    if(fld){if(!folders[fld])folders[fld]=[];folders[fld].push(c);}
+    else noFolder.push(c);
+  }
+  if(!allChats.length&&!Object.keys(folders).length){
+    el.innerHTML='<div class="fbc-empty">No chats yet.<br>Start a conversation to see it here.</div>';
+    return;
+  }
+  let html='';
+  // Folders first
+  const sortedFolders=Object.keys(folders).sort();
+  for(const fld of sortedFolders){
+    const chats=folders[fld];
+    const fIcon=getFolderIcon(fld);
+    html+=`<div class="fbc-folder">`;
+    html+=`<div class="fbc-folder-hd" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fbc-arrow">▾</span><span class="fbc-icon">${fIcon}</span> ${esc(fld)}<span class="fbc-count">${chats.length}</span></div>`;
+    html+=`<div class="fbc-folder-body">`;
+    for(const c of chats){
+      const msgCount=c.messages?.length||0;
+      html+=`<div class="fbc-chat" onclick="openChat('${esc(c.id)}');closeFileBrowser()"><span class="fbc-chat-icon">💬</span><span class="fbc-chat-title">${esc(c.title||'Untitled')}</span><span class="fbc-chat-count">${msgCount} msg${msgCount!==1?'s':''}</span><span class="fbc-chat-arrow">→</span></div>`;
+    }
+    if(!chats.length)html+=`<div class="fbc-empty" style="padding:8px 28px">Empty folder</div>`;
+    html+=`</div></div>`;
+  }
+  // Unfiled chats
+  if(noFolder.length){
+    html+=`<div class="fbc-folder"><div class="fbc-folder-hd" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fbc-arrow">▾</span><span class="fbc-icon">💬</span> Unfiled<span class="fbc-count">${noFolder.length}</span></div><div class="fbc-folder-body">`;
+    for(const c of noFolder){
+      const msgCount=c.messages?.length||0;
+      html+=`<div class="fbc-chat" onclick="openChat('${esc(c.id)}');closeFileBrowser()"><span class="fbc-chat-icon">💬</span><span class="fbc-chat-title">${esc(c.title||'Untitled')}</span><span class="fbc-chat-count">${msgCount} msg${msgCount!==1?'s':''}</span><span class="fbc-chat-arrow">→</span></div>`;
+    }
+    html+=`</div></div>`;
+  }
+  el.innerHTML=html;
 }
 function _fbFileIcon(ext){
   const icons={
@@ -7398,21 +7578,101 @@ async function canvasPresetEdit(type){
   const instruction=presetMap[type]||type;
   const lang=document.getElementById('canvasLang').textContent||'text';
   document.getElementById('canvasStatus').textContent='AI is editing...';
+  // Show streaming overlay
+  const wrap=document.querySelector('.canvas-editor-wrap');
+  let overlay=wrap?.querySelector('.canvas-streaming-overlay');
+  if(!overlay&&wrap){
+    overlay=document.createElement('div');
+    overlay.className='canvas-streaming-overlay';
+    overlay.innerHTML='<span class="spinner"></span> AI is editing...';
+    wrap.prepend(overlay);
+  }
+  editor.classList.add('streaming');
   try{
     const r=await apiFetch('/api/canvas/apply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content,instruction,language:lang})});
-    const d=await r.json();
-    if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');return;}
-    editor.value=d.content||'';
-    const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
-    if(tab)tab.content=editor.value;
-    updateCanvasStats();
-    document.getElementById('canvasStatus').textContent='Edit applied';
-    showToast('Canvas updated','success');
+      body:JSON.stringify({content,instruction,language:lang,stream:true})});
+    if(!r.ok){
+      const d=await r.json();
+      document.getElementById('canvasStatus').textContent='Edit failed';
+      showToast(d.error||'Edit failed','error');
+      editor.classList.remove('streaming');
+      overlay?.remove();
+      return;
+    }
+    const ct=r.headers.get('content-type')||'';
+    if(ct.includes('text/event-stream')||ct.includes('application/x-ndjson')){
+      // Streaming response
+      const reader=r.body.getReader();
+      const decoder=new TextDecoder();
+      let accumulated='';
+      let buffer='';
+      editor.value='';
+      editor.classList.remove('streaming');
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        buffer+=decoder.decode(value,{stream:true});
+        const lines=buffer.split('\n');
+        buffer=lines.pop()||'';
+        for(const line of lines){
+          const trimmed=line.trim();
+          if(!trimmed)continue;
+          try{
+            const chunk=JSON.parse(trimmed);
+            if(chunk.text){
+              accumulated+=chunk.text;
+              editor.value=accumulated;
+              editor.scrollTop=editor.scrollHeight;
+            }
+            if(chunk.done){
+              // Final
+            }
+          }catch{}
+        }
+      }
+      // Process remaining buffer
+      if(buffer.trim()){
+        try{
+          const chunk=JSON.parse(buffer.trim());
+          if(chunk.text){accumulated+=chunk.text;editor.value=accumulated;}
+        }catch{}
+      }
+      const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
+      if(tab)tab.content=editor.value;
+      updateCanvasStats();
+      document.getElementById('canvasStatus').textContent='Edit applied';
+      showToast('Canvas updated','success');
+    }else{
+      // Non-streaming fallback
+      const d=await r.json();
+      if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');editor.classList.remove('streaming');overlay?.remove();return;}
+      // Animate the text change with a typing effect
+      const newContent=d.content||'';
+      editor.classList.remove('streaming');
+      editor.value='';
+      let i=0;
+      const chunkSize=Math.max(1,Math.floor(newContent.length/60));
+      const typeInterval=setInterval(()=>{
+        const end=Math.min(i+chunkSize,newContent.length);
+        editor.value=newContent.slice(0,end);
+        editor.scrollTop=editor.scrollHeight;
+        i=end;
+        if(i>=newContent.length){
+          clearInterval(typeInterval);
+          const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
+          if(tab)tab.content=editor.value;
+          updateCanvasStats();
+          document.getElementById('canvasStatus').textContent='Edit applied';
+          showToast('Canvas updated','success');
+        }
+      },16);
+    }
   }catch(e){
     document.getElementById('canvasStatus').textContent='Edit failed';
     showToast('AI edit failed','error');
   }
+  editor.classList.remove('streaming');
+  overlay?.remove();
 }
 
 // ─── Canvas run / preview ─────────────────────────
