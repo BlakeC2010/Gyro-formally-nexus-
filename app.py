@@ -1019,24 +1019,23 @@ PLACEMENT: Images appear EXACTLY where you place the tag. Use this to weave imag
 - Put a single reference image next to its description
 - Put a gallery at the end if it's supplementary
 
-WHEN TO USE image search (use it proactively — don't wait to be asked):
-- User asks to SEE something: "show me", "what does X look like", "picture of", "images of", "photo of"
-- Explaining physical objects, places, animals, people, landmarks, architecture, art, fashion, food, etc.
-- Tutorials or how-to guides where seeing the thing helps (e.g., "how to tie a bowline knot" → show the knot)
-- Comparing visual things: "difference between alligator and crocodile" → show both
-- Historical figures, events, artifacts — show what they looked like
-- Science/nature topics: planets, cells, animals, geological formations, weather phenomena
-- Design, UI, or aesthetic discussions — show examples
-- When the user describes something and you want to confirm what they mean
-- Travel or location discussions — show the place
-- Any time a visual would make your explanation clearer or more engaging
+WHEN TO USE image search — ONLY use it when the user is clearly asking to SEE something:
+- User explicitly asks to see something: "show me", "what does X look like", "picture of", "images of", "photo of"
+- User asks you to find or look up images of something specific
+- User is asking about a visual comparison and seeing it side-by-side would genuinely help
+- User asks about a place they want to visit and wants to see what it looks like
 
-WHEN NOT TO USE image search:
-- Pure code/programming questions
-- Math or abstract logic problems
-- When the user explicitly says they don't want images
-- Casual greetings or simple yes/no answers
-- When you're writing files or doing workspace operations
+WHEN NOT TO USE image search (this is the default — most messages should NOT have images):
+- General conversation, brainstorming, advice, or discussion
+- Code/programming questions
+- Math, logic, or abstract problems
+- Explaining concepts, ideas, or strategies
+- Feature discussions, planning, or project talk
+- Casual greetings, yes/no answers, or short replies
+- Writing files or workspace operations
+- When the user didn't ask to see anything visual
+- When adding images wouldn't directly answer what the user asked
+- Basically: if the user didn't ask to SEE something, don't search for images
 
 RULES:
 - Write descriptive, specific search queries. "Socrates ancient Greek philosopher bust sculpture" is better than just "Socrates"
@@ -1044,7 +1043,7 @@ RULES:
 - Always include explanatory text WITH the images — don't just dump images with no context
 - Do NOT use markdown image syntax ![](url) — you don't have real image URLs. ONLY use <<<IMAGE_SEARCH>>>
 - Place the tag where it makes sense in your narrative flow — after introducing a topic, between comparisons, etc.
-- IMPORTANT: When discussing ANY person, place, thing, animal, concept, or topic that has a visual component, you MUST include at least one <<<IMAGE_SEARCH>>> tag. Err on the side of including images — they make your responses much more engaging and informative. If in doubt, include the image search.
+- Do NOT add images just to make a response "more engaging". Only add them when they directly serve what the user asked for.
 
 10b. IMAGE GENERATION — you can CREATE original images using AI. When the user asks you to generate, create, draw, design, or make an image, logo, illustration, artwork, etc., use this tag:
 <<<IMAGE_GENERATE: detailed description of the image to create>>>
@@ -1072,6 +1071,50 @@ IMAGE GENERATION RULES:
 - For best results, describe the image as if you're art-directing a professional designer
 - If image generation fails, the system will notify you automatically. Do NOT retry on your own — inform the user about the failure instead.
 - After generating an image, let the user know they can download it as a PNG using the download button that appears with the image.
+
+GENERATED IMAGE FILES IN WORKSPACE:
+Every image you generate with <<<IMAGE_GENERATE>>> is automatically saved to the `generated_images/` folder in the workspace (e.g. `generated_images/sunset_abc123.png`). This means:
+- You can REFERENCE previously generated images by their workspace path
+- You can EDIT generated images using code execution (Pillow) — load from `generated_images/filename.png`, modify, save
+- You can CONVERT generated images to different formats using code execution — the user might want SVG, JPEG, WebP, PDF, etc.
+
+FILE FORMAT CONVERSION (CRITICAL — use code execution automatically):
+When a user asks for a different file format (e.g., "can I get that as an SVG?" or "convert to JPEG" or "make it a PDF" or "export as WebP"), you MUST:
+1. Use <<<CODE_EXECUTE: python>>> to convert the file — do NOT just explain how to do it
+2. Load the most recently generated image from `generated_images/` (or the specific image they reference)
+3. Convert it and save the new file to the workspace
+4. The converted file will automatically appear with a download link
+
+Common conversions to handle automatically:
+- PNG → SVG: Use potrace or auto-trace via Pillow + svgwrite/cairosvg. For simple graphics, trace edges. For complex images, embed as SVG with base64.
+- PNG → JPEG/JPG: `img.convert('RGB').save('output.jpg', quality=95)`
+- PNG → WebP: `img.save('output.webp', 'WebP', quality=90)`
+- PNG → PDF: Use fpdf2 with the image embedded, or Pillow's `img.save('output.pdf')`
+- PNG → ICO: `img.save('output.ico', sizes=[(64,64),(32,32),(16,16)])`
+- Resize/crop: Pillow operations then save in requested format
+- Any other format: pip install the needed package and convert
+
+Example — user says "can I get that as an SVG?":
+<<<CODE_EXECUTE: python>>>
+import os, glob
+# Find most recent generated image
+files = sorted(glob.glob('generated_images/*.png'), key=os.path.getmtime, reverse=True)
+img_path = files[0]
+# For complex images: embed PNG in SVG
+import base64
+with open(img_path, 'rb') as f:
+    b64 = base64.b64encode(f.read()).decode()
+from PIL import Image
+img = Image.open(img_path)
+w, h = img.size
+svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{{w}}" height="{{h}}"><image href="data:image/png;base64,{{b64}}" width="{{w}}" height="{{h}}"/></svg>'
+out = img_path.replace('.png', '.svg').replace('generated_images/', '')
+with open(out, 'w') as f:
+    f.write(svg)
+print(f"Created {{out}}")
+<<<END_CODE>>>
+
+IMPORTANT: Just DO the conversion immediately with code execution. Don't ask "would you like me to convert it?" — just convert it.
 
 11. ANALYZE YOUTUBE VIDEOS — when the user shares a YouTube link, you can watch/analyze the video content and discuss it in detail. The video is provided to you directly.
 12. Interactive questions — you can ask the user multiple-choice questions they can click to answer (they can also type their own response). Use this when it genuinely helps move the conversation forward:
@@ -1202,11 +1245,15 @@ Always use timelines when presenting 3+ chronological events — they're much be
 SUBJECT FORMATTING GUIDELINES:
 
 MATH — When answering math questions:
-- Use $...$ for inline math and $$...$$ for block/display math (KaTeX renders these)
+- Use $...$ for inline math and $$...$$ for display/block math (KaTeX renders these)
 - For example: "The quadratic formula is $x = \\frac{{-b \\pm \\sqrt{{b^2 - 4ac}}}}{{2a}}$"
-- Show your **work step by step** with clear labels for each step
-- When code execution is active, ALWAYS verify answers computationally with sympy/numpy
-- Present final answers clearly with **bold** emphasis
+- Use $$...$$ display blocks for important equations, solutions, and key formulas so they render big and clear
+- Show your work step by step using **numbered lists** (1. 2. 3.) with clear bold labels for each step
+- Write each step on its own line — don't cram everything together
+- Put the equation for each step on its OWN line using $$...$$ so it stands out
+- Present final answers clearly with **bold** emphasis, using $$...$$ for the final result
+- Keep explanations clear and instructional — explain WHY each step happens, not just what
+- When code execution is active, verify answers computationally with sympy/numpy
 - For graphing questions, generate actual graph images with matplotlib code execution
 
 SCIENCE — When answering science questions:
@@ -1365,12 +1412,25 @@ Workspace File Rules:
 - Always frame friction observations as helpful, not nagging. Use "I noticed..." not "You should...". Maximum one friction observation per conversation unless the user asks for more.
 - When you identify friction, always pair it with a concrete smallest-next-step suggestion.
 
+19. PREDICTIVE SCAFFOLDING:
+When the user mentions a new idea, project concept, or initiative that doesn't yet exist in the workspace, proactively scaffold it:
+- Detect signals: "I'm thinking about...", "I want to build...", "New project idea:", "What if we...", "I've been meaning to start..."
+- When you detect a genuinely NEW idea (not already in projects/), output the scaffold tag: <<<PROJECT_SCAFFOLD: Project Name>>>
+- The system will automatically create:
+  - projects/project_name.md with goals, status, and task skeleton
+  - notes/project_name/research.md for research collection
+  - STATUS.md entry tracking the new project
+- After scaffolding, briefly mention what was created: "I've set up a project structure for [name] — you've got a project file, research folder, and STATUS.md entry ready to go."
+- Only scaffold when the idea is concrete enough to be a real project. Don't scaffold casual hypotheticals.
+- NEVER scaffold something that already exists in the workspace — check projects/ first.
+- You can combine scaffolding with other actions (e.g., scaffold + create a todo list of first steps).
+
 Session Info:
 - {_session_name_line}
 - Today: {datetime.date.today().isoformat()}
 - Always try to help. Don't refuse unless the request is clearly and unambiguously harmful. Lean toward engaging creatively with unusual, edgy, or unconventional requests — curiosity beats caution. When in doubt, just answer.
 - Never lecture or moralize. If something seems edgy but isn't actually harmful, engage with it directly without caveats or disclaimers.
-- REMINDER: When discussing people, places, animals, objects, or ANY visual topic, you MUST use <<<IMAGE_SEARCH: descriptive query>>> tags. Do not describe images you would show — actually include the tag so the system fetches real images. If your response covers multiple people or visual topics, include a separate <<<IMAGE_SEARCH>>> for EACH one.
+- You have an image search tool (<<<IMAGE_SEARCH: query>>>). Only use it when it makes sense to show the user something visual. Do NOT add images to every response. Only when showing people, places, products, or visual concepts that genuinely benefit from images.
 {creator_section}
 {mem_section}
 {profile_section}
@@ -1557,7 +1617,7 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
     results = []
     _exclude = set(exclude_paths or [])
     # Protected dirs/files that code shouldn't claim credit for
-    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes', '_uploads'}
+    _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes', '_uploads', '_code_output'}
     _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore'}
     for m in re.finditer(pattern, text, re.DOTALL):
         lang = m.group(1).strip().lower()
@@ -1614,24 +1674,40 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
                     output += ("\n" if output else "") + filtered_stderr
             # Detect new/modified files after execution
             generated_files = []
+            _binary_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
+                            '.pdf', '.zip', '.tar', '.gz', '.mp3', '.wav', '.mp4', '.csv', '.xlsx'}
+            code_output_dir = WORKSPACE / '_code_output'
+            code_output_dir.mkdir(exist_ok=True)
             for p in WORKSPACE.rglob('*'):
                 if p.is_file() and not any(part in _ignore_dirs for part in p.relative_to(WORKSPACE).parts):
                     if p.name not in _ignore_files and not p.name.startswith('.'):
                         try:
                             rel = str(p.relative_to(WORKSPACE)).replace('\\', '/')
-                            if rel in _exclude:
+                            if rel in _exclude or rel.startswith('_code_output/'):
                                 continue
                             mtime = p.stat().st_mtime
                             if rel not in pre_snapshot or mtime > pre_snapshot[rel]:
-                                # Determine if it's viewable (image) or just downloadable
                                 ext = p.suffix.lower()
                                 is_image = ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
-                                generated_files.append({
-                                    "path": rel,
-                                    "name": p.name,
-                                    "size": p.stat().st_size,
-                                    "is_image": is_image,
-                                })
+                                # Move binary/image files to _code_output/ to keep workspace clean
+                                if ext in _binary_exts:
+                                    dest = code_output_dir / p.name
+                                    import shutil
+                                    shutil.move(str(p), str(dest))
+                                    new_rel = f'_code_output/{p.name}'
+                                    generated_files.append({
+                                        "path": new_rel,
+                                        "name": p.name,
+                                        "size": dest.stat().st_size,
+                                        "is_image": is_image,
+                                    })
+                                else:
+                                    generated_files.append({
+                                        "path": rel,
+                                        "name": p.name,
+                                        "size": p.stat().st_size,
+                                        "is_image": is_image,
+                                    })
                         except Exception:
                             pass
             results.append({"language": lang, "code": code, "output": output.strip() or "(no output)", "success": result.returncode == 0, "files": generated_files})
@@ -1642,6 +1718,46 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
         except Exception as e:
             results.append({"language": lang, "code": code, "output": f"Error: {e}", "success": False, "files": []})
     return results
+
+
+def execute_silent_verify(text):
+    """Extract <<<SILENT_VERIFY: python>>>...<<<END_SILENT_VERIFY>>> blocks from the AI response,
+    execute them silently, strip them from the visible text, and return (cleaned_text, verify_results).
+    Each verify_result is {'code': str, 'output': str, 'success': bool}."""
+    import subprocess, tempfile, os
+    pattern = r'<<<SILENT_VERIFY:\s*(?:python|py)>>>\r?\n(.*?)<<<END_SILENT_VERIFY>>>'
+    results = []
+    for m in re.finditer(pattern, text, re.DOTALL):
+        code = m.group(1).strip()
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
+                tmp.write(code)
+                tmp_path = tmp.name
+            result = subprocess.run(
+                [sys.executable, "-u", tmp_path],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ},
+                cwd=str(WORKSPACE),
+            )
+            os.unlink(tmp_path)
+            output = result.stdout.strip()
+            if result.stderr:
+                stderr_lines = [l for l in result.stderr.splitlines()
+                                if not l.strip().startswith(("Requirement already", "WARNING:", "[notice]", "Successfully installed"))]
+                filtered_stderr = "\n".join(stderr_lines).strip()
+                if filtered_stderr:
+                    output += ("\n" if output else "") + filtered_stderr
+            results.append({"code": code, "output": output or "(no output)", "success": result.returncode == 0})
+        except subprocess.TimeoutExpired:
+            try: os.unlink(tmp_path)
+            except Exception: pass
+            results.append({"code": code, "output": "Verification timed out (30s limit).", "success": False})
+        except Exception as e:
+            results.append({"code": code, "output": f"Verify error: {e}", "success": False})
+    # Strip all SILENT_VERIFY blocks from the visible response
+    cleaned = re.sub(pattern, '', text, flags=re.DOTALL).strip()
+    return cleaned, results
+
 
 def extract_research_trigger(text):
     """Extract <<<DEEP_RESEARCH: query>>> from AI response and return (cleaned_text, query_or_None)."""
@@ -1708,6 +1824,26 @@ def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None):
         return None, "Model did not generate an image" + (f": {' '.join(text_parts)}" if text_parts else "")
     except Exception as e:
         return None, f"Image generation failed: {str(e)[:200]}"
+
+def _save_generated_image(img_b64, mime_type, prompt):
+    """Save a generated image to the workspace's generated_images/ folder.
+    Returns the relative path (e.g. 'generated_images/sunset_abc123.png') or None."""
+    try:
+        gen_dir = WORKSPACE / "generated_images"
+        gen_dir.mkdir(exist_ok=True)
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime_type, ".png")
+        # Build a short filename from the prompt
+        slug = re.sub(r'[^a-zA-Z0-9]+', '_', prompt)[:40].strip('_').lower() or 'image'
+        uid = str(uuid.uuid4())[:6]
+        fname = f"{slug}_{uid}{ext}"
+        fpath = gen_dir / fname
+        fpath.write_bytes(base64.b64decode(img_b64))
+        rel = f"generated_images/{fname}"
+        print(f"  [image-gen] Saved to workspace: {rel}")
+        return rel
+    except Exception as e:
+        print(f"  [image-gen] Failed to save to workspace: {e}")
+        return None
 
 # ─── HuggingFace Space Connector ─────────────────────────────────────────────
 
@@ -2041,8 +2177,10 @@ def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'<<<FILE_CREATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<FILE_UPDATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<CODE_EXECUTE:\s*\w+>>>.*?<<<END_CODE>>>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<<<SILENT_VERIFY:\s*\w+>>>.*?<<<END_SILENT_VERIFY>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<MEMORY_ADD:\s*.+?>>>', '', text)
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
+    text = re.sub(r'<<<PROJECT_SCAFFOLD:\s*.+?>>>', '', text)
     text = re.sub(r'(?:<<<|%%%|<<)IMAGE_SEARCH:\s*.+?(?:>>>|%%%)', '', text)
     text = re.sub(r'<<<IMAGE_GENERATE:\s*.+?>>>', '', text)
     text = re.sub(r'<<<HF_SPACE:\s*.+?>>>', '', text)
@@ -2193,10 +2331,11 @@ def _build_tool_instructions(active_tools):
             "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
             "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
             "Keep code focused and concise. The execution has a 45-second timeout.\n\n"
-            "🧮 MATH & GRAPHING CALCULATOR (CRITICAL — ALWAYS USE CODE FOR MATH):\n"
-            "You have a BUILT-IN graphing calculator more powerful than Desmos. For ANY math question — "
-            "algebra, calculus, graphing, equations, statistics, geometry, trig, etc. — you MUST use code execution. "
-            "NEVER try to do math in your head. ALWAYS run the computation with code.\n\n"
+            "🧮 MATH & GRAPHING CALCULATOR:\n"
+            "You have a BUILT-IN graphing calculator more powerful than Desmos. Use code execution when you need to: "
+            "graph/plot functions, solve complex equations, do numerical computation, generate files, or verify tricky calculations. "
+            "For simple arithmetic or conceptual explanations, just answer directly — don't run code for trivial things. "
+            "Use your judgment: if code adds value (precision, graphs, files), use it. If not, just answer.\n\n"
             "For SYMBOLIC math (solving equations, factoring, derivatives, integrals, simplification):\n"
             "```\n"
             "import sympy as sp\n"
@@ -2225,14 +2364,14 @@ def _build_tool_instructions(active_tools):
             "np.polyfit(x, y, deg)  # polynomial regression\n"
             "```\n\n"
             "RULES FOR MATH:\n"
-            "1. ALWAYS execute code — never guess or do mental math for anything beyond basic arithmetic\n"
-            "2. Show your work: print the setup, the computation, and the final answer\n"
+            "1. Use code execution for complex computations, graphs/plots, and file generation — NOT for simple problems you can solve in your head\n"
+            "2. When you do run code: print the setup, the computation, and the final answer\n"
             "3. For graphing: always save to a file (plt.savefig) so the user can see and download it\n"
-            "4. For equations: use sympy to solve symbolically, then verify numerically if needed\n"
-            "5. When solving homework/worksheet problems, solve EACH problem with code execution\n"
-            "6. If a problem involves graphing or plotting, generate the actual graph image\n"
-            "7. For word problems: set up the equation with sympy, solve it, then explain the answer\n"
-            "8. Always print clear, formatted output showing the answer"
+            "4. For complex equations: use sympy to solve symbolically, then verify numerically if needed\n"
+            "5. If a problem involves graphing or plotting, generate the actual graph image\n"
+            "6. For word problems: if straightforward, solve directly with explanation. If complex, use code.\n"
+            "7. Always print clear, formatted output showing the answer when using code\n"
+            "8. DON'T use code execution just because the topic is math — only use it when computation actually helps"
         ),
         "research": (
             "[TOOL ACTIVE: RESEARCH AGENT — MUST TRIGGER]\n"
@@ -3526,24 +3665,34 @@ def prepare_chat_turn(chat, payload):
     active_tools = payload.get("active_tools", [])
 
     # --- Auto-enable code execution for math queries ---
+    # Only trigger when the user is clearly asking the AI to COMPUTE something,
+    # not just mentioning a math topic (e.g. "generate a random algebra problem" does NOT need code).
     if 'code' not in active_tools and user_text:
-        _math_indicators = re.search(
-            r'(?i)\b(solve|equation|graph|plot|factor|integral|derivative|calculus|'
-            r'algebra|polynomial|quadratic|linear|exponential|logarithm|trig|'
-            r'sin|cos|tan|sqrt|root|matrix|vector|determinant|eigenvalue|'
-            r'y\s*=|f\s*\(x\)|limit|series|sum of|area under|slope|'
-            r'intercept|vertex|asymptote|domain|range|zero[s]? of|'
-            r'inequality|system of|simultaneous|binomial|permutation|combination|'
-            r'probability|standard deviation|variance|regression|correlation|'
-            r'mean|median|mode|histogram|scatter|parabola|hyperbola|ellipse|'
-            r'circle equation|pythagorean|angle|radian|degree|'
-            r'arithmetic sequence|geometric sequence|fibonacci|'
-            r'differentiate|integrate|simplify|expand|'
-            r'x\s*[\+\-\*\/\^]\s*\d|(?:find|what is|calculate|compute|evaluate)\s.*(?:\d[\+\-\*\/\^]|\bx\b))',
+        _ut_lower = user_text.lower()
+        # Skip if the user is just asking the AI to generate/create/make a problem or question
+        _is_meta_request = bool(re.search(
+            r'(?i)\b(generate|create|make|give|write|come up with|think of|show me)\b.*\b(problem|question|example|exercise|quiz|worksheet|test|homework)',
             user_text
-        )
-        if _math_indicators:
-            active_tools = list(active_tools) + ['code']
+        ))
+        if not _is_meta_request:
+            _math_indicators = re.search(
+                r'(?i)('
+                # Explicit computation verbs with a math expression nearby
+                r'(?:solve|factor|simplify|expand|differentiate|integrate|evaluate|compute|calculate)\s+.{0,40}[\d\+\-\*\/\^=xy]|'
+                # Graph/plot requests (these always need code)
+                r'\b(?:graph|plot|chart|histogram|scatter)\b.{0,60}(?:[=\(]|\bof\b)|'
+                # Actual math expressions with operators/equals
+                r'\d+\s*[\+\-\*\/\^]\s*\d+\s*=|'
+                r'\bx\s*[\+\-\*\/\^]\s*\d|'
+                r'\by\s*=\s*[\dxa-z]|'
+                r'\bf\s*\(x\)\s*=|'
+                # Explicit "what is <math expression>" patterns
+                r'(?:what is|find|calculate)\s+\d+[\+\-\*\/\^]'
+                r')',
+                user_text
+            )
+            if _math_indicators:
+                active_tools = list(active_tools) + ['code']
 
     # --- Enable web search if search or research tools are active ---
     # Also enable by default for all queries so AI can access current info
@@ -3727,6 +3876,15 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
     executed = execute_file_operations(raw_response)
     # Pass file_operations paths to code execution so it excludes them from "generated files"
     _file_op_paths = {f["path"] for f in executed} if executed else set()
+    # Execute predictive scaffolds
+    _, scaffold_names = extract_project_scaffolds(raw_response)
+    scaffold_files = []
+    for sname in scaffold_names:
+        sf = execute_project_scaffold(sname)
+        scaffold_files.extend(sf)
+    if scaffold_files:
+        for sf in scaffold_files:
+            executed.append({"path": sf, "action": "scaffold"})
     # Save uploaded images to disk so code execution can access them
     _uploaded_paths = _save_uploaded_images(ctx)
     code_results = execute_code_blocks(raw_response, exclude_paths=_file_op_paths, uploaded_image_paths=_uploaded_paths)
@@ -3802,9 +3960,19 @@ _STOPWORDS = {"the","and","for","that","this","with","from","have","will","are",
 def _detect_complex_query(text):
     """Return a thinking level string if the query looks complex, else None."""
     lo = text.lower()
+    # High-complexity signals → medium thinking
+    deep_signals = ["prove ","derive ","proof","formal ","theorem","contradict",
+                    "critique ","evaluate the ","what are the flaws","steel man",
+                    "compare and contrast","trade-offs","tradeoffs","implications of",
+                    "step by step","walk me through","break down","in depth",
+                    "comprehensive","thorough","detailed analysis","deep dive"]
+    if any(s in lo for s in deep_signals): return "medium"
+    # Medium-complexity signals → low thinking
     signals = ["why ","how does","analyze","analyse","compare","difference",
                "explain","debug ","optimize","design ","architecture","algorithm",
-               "prove","calculate","implement","refactor","step by step"]
+               "prove","calculate","implement","refactor","what if ",
+               "should i","which is better","pros and cons","best approach",
+               "help me understand","can you explain","figure out"]
     if any(s in lo for s in signals): return "low"
     if text.count("?") >= 2: return "low"
     if len(text) > 300: return "low"
@@ -4283,8 +4451,32 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, reminders=
             "items": wf_patterns,
         })
 
+    # Momentum widget — task velocity summary
+    total_t = len(todos or [])
+    done_t = len([t for t in (todos or []) if t.get("done")])
+    pending_t = total_t - done_t
+    if total_t > 0:
+        comp_rate = round(done_t / total_t * 100)
+        if comp_rate >= 80:
+            m_verdict = "on_fire"
+        elif comp_rate >= 50:
+            m_verdict = "steady"
+        elif comp_rate >= 25:
+            m_verdict = "slowing"
+        else:
+            m_verdict = "stalled"
+        widgets.append({
+            "type": "momentum",
+            "size": "small",
+            "title": "Momentum",
+            "score": comp_rate,
+            "verdict": m_verdict,
+            "done": done_t,
+            "pending": pending_t,
+        })
+
     widgets = [w for w in widgets if _widget_has_content(w)]
-    return {"heading": heading, "widgets": widgets[:6]}
+    return {"heading": heading, "widgets": widgets[:8]}
 
 
 def _ai_home_widgets(user_name, profile, chats, todos, visions):
@@ -4367,12 +4559,15 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
+    # For extended mode, use high budget on individual passes
+    if _level == "extended":
+        _level = "high"
     if _level:
-        _budgets = {"low": 4096, "medium": 10000, "high": 16000}
-        _budget = _budgets.get(_level, 8000)
+        _budgets = {"low": 8192, "medium": 16384, "high": 32768}
+        _budget = _budgets.get(_level, 10000)
         cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=_budget, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
-        print(f"  [thinking] Google non-stream: thinking enabled, level={_level}")
+        print(f"  [thinking] Google non-stream: thinking enabled, level={_level}, budget={_budget}")
     else:
         cfg["max_output_tokens"] = 65536
     if web_search:
@@ -4401,10 +4596,12 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
+    if _level == "extended":
+        _level = "high"
     use_thinking = bool(_level)
     if use_thinking:
-        _budgets = {"low": 4096, "medium": 10000, "high": 16000}
-        _budget = _budgets.get(_level, 8000)
+        _budgets = {"low": 8192, "medium": 16384, "high": 32768}
+        _budget = _budgets.get(_level, 10000)
         cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=_budget, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
         print(f"  [thinking] Google stream: thinking enabled, level={_level}, budget={_budget}")
@@ -4504,8 +4701,9 @@ def call_anthropic(api_key, model, sysprompt, messages, base_url=None, thinking=
         if parts: msgs.append({"role": role, "content": parts})
     create_kw = dict(model=model, max_tokens=64000, system=sysprompt, messages=msgs)
     if thinking:
-        create_kw["thinking"] = {"type": "enabled", "budget_tokens": 16000}
-        print(f"  [thinking] Anthropic non-stream: thinking enabled, budget=16000")
+        _ant_budget = 32000 if kwargs.get("thinking_level") in ("high", "extended") else 16000
+        create_kw["thinking"] = {"type": "enabled", "budget_tokens": _ant_budget}
+        print(f"  [thinking] Anthropic non-stream: thinking enabled, budget={_ant_budget}")
     r = client.messages.create(**create_kw)
     if thinking:
         parts_out = []
@@ -4564,12 +4762,13 @@ def call_anthropic_stream(api_key, model, sysprompt, messages, base_url=None, th
         if msg.get("text"): parts.append({"type": "text", "text": msg["text"]})
         if parts: msgs.append({"role": role, "content": parts})
     if thinking:
-        print(f"  [thinking] Anthropic stream: thinking enabled, budget=16000")
+        _ant_budget = 32000 if kwargs.get("thinking_level") in ("high", "extended") else 16000
+        print(f"  [thinking] Anthropic stream: thinking enabled, budget={_ant_budget}")
         # Stream with thinking enabled — iterate raw events
         _thought_count = 0
         with client.messages.stream(
             model=model, max_tokens=64000, system=sysprompt, messages=msgs,
-            thinking={"type": "enabled", "budget_tokens": 16000}
+            thinking={"type": "enabled", "budget_tokens": _ant_budget}
         ) as s:
             current_block_type = None
             for event in s:
@@ -5505,7 +5704,11 @@ def chat_message(chat_id):
             img_b64, result_or_err = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
             if img_b64:
                 data_uri = f"data:{result_or_err};base64,{img_b64}"
-                gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": result_or_err})
+                saved_path = _save_generated_image(img_b64, result_or_err, entry['prompt'])
+                gr = {"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": result_or_err}
+                if saved_path:
+                    gr["workspace_path"] = saved_path
+                gen_results.append(gr)
     hf_results_sync = []
     if hf_calls_sync:
         token = _hf_token()
@@ -6124,6 +6327,53 @@ def chat_message_stream(chat_id):
     if thinking and ctx["resolved"].get("provider") not in ("google", "anthropic"):
         ctx["sysprompt"] += "\n\n[THINKING MODE ENABLED]\nBefore answering, think through your approach step by step. Wrap ONLY your internal reasoning in <<<THINKING>>> and <<<END_THINKING>>> tags (these will be shown to the user in a collapsible block). Keep thinking concise — brief bullet points only. Then write your actual response AFTER the <<<END_THINKING>>> tag with no tags in it."
 
+    # Intelligence boost: inject deeper reasoning instructions for high/extended thinking
+    if thinking_level in ("high", "extended"):
+        ctx["sysprompt"] += (
+            "\n\n[DEEP REASONING MODE — ACTIVE]\n"
+            "You are operating in maximum reasoning mode. Apply these principles:\n"
+            "- Think through problems from MULTIPLE angles before committing to an answer\n"
+            "- Consider edge cases, exceptions, and counterarguments\n"
+            "- When dealing with facts, double-check your reasoning chain for logical gaps\n"
+            "- For technical topics: consider performance, security, maintainability, and correctness\n"
+            "- For analysis: weigh evidence quality, consider confounding factors, and note confidence levels\n"
+            "- Structure complex answers with clear reasoning progression\n"
+            "- If you're uncertain about something, explicitly say so rather than guessing\n"
+            "- Prioritize accuracy over speed — take the time to get it right"
+        )
+    elif thinking_level == "medium":
+        ctx["sysprompt"] += (
+            "\n\n[ENHANCED REASONING MODE]\n"
+            "Think carefully before answering. Consider multiple perspectives and verify your logic."
+        )
+
+    # Silent verification capability for medium+ thinking
+    if thinking_level in ("medium", "high", "extended"):
+        ctx["sysprompt"] += (
+            "\n\n[SILENT VERIFICATION — AVAILABLE]\n"
+            "You have a SILENT code execution capability for verifying your work behind the scenes. "
+            "When you want to double-check a calculation, verify a formula, or validate your reasoning with code, "
+            "you can include a silent verification block in your response:\n"
+            "<<<SILENT_VERIFY: python>>>\n"
+            "# Your verification code here — use print() to output results\n"
+            "import sympy as sp\n"
+            "x = sp.Symbol('x')\n"
+            "result = sp.solve(x**2 - 4, x)\n"
+            "print(f'Verified: roots are {result}')\n"
+            "<<<END_SILENT_VERIFY>>>\n\n"
+            "RULES FOR SILENT VERIFICATION:\n"
+            "- The user will NOT see the code or its output — it runs silently behind the scenes\n"
+            "- Use this to VERIFY answers you've already worked out, not as your primary solving method\n"
+            "- If you're doing math, physics, statistics, or any quantitative work, use SILENT_VERIFY to check your answer\n"
+            "- If verification fails, the system will automatically ask you to correct your response\n"
+            "- Place SILENT_VERIFY blocks at the END of your response, after your visible answer\n"
+            "- Do NOT tell the user you're running verification — just do it silently\n"
+            "- Do NOT use this for every response — only when there's a quantitative or logical claim worth verifying\n"
+            "- Available packages: math, sympy, numpy, statistics, fractions, decimal\n"
+            "- Keep verification code focused and fast (30s timeout)\n"
+            "- This is DIFFERENT from <<<CODE_EXECUTE>>> — CODE_EXECUTE shows code to the user. SILENT_VERIFY is invisible."
+        )
+
     resolved = ctx["resolved"]
 
     def event(payload):
@@ -6221,7 +6471,10 @@ def chat_message_stream(chat_id):
                             img_b64, gen_result = result
                             if img_b64:
                                 data_uri = f"data:{gen_result};base64,{img_b64}"
+                                saved_path = _save_generated_image(img_b64, gen_result, entry['prompt'])
                                 gr = {"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": gen_result}
+                                if saved_path:
+                                    gr["workspace_path"] = saved_path
                                 _fetched_gens.append(gr)
                                 events.append({"type": "image_generated", "image": gr})
                             else:
@@ -6414,7 +6667,10 @@ def chat_message_stream(chat_id):
                         img_b64, gen_result = result
                         if img_b64:
                             data_uri = f"data:{gen_result};base64,{img_b64}"
+                            saved_path = _save_generated_image(img_b64, gen_result, entry['prompt'])
                             gr = {"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": gen_result}
+                            if saved_path:
+                                gr["workspace_path"] = saved_path
                             _fetched_gens.append(gr)
                             yield event({"type": "image_generated", "image": gr})
                         else:
@@ -6424,10 +6680,99 @@ def chat_message_stream(chat_id):
             _media_fetches.clear()
             _media_executor.shutdown(wait=False)
 
+            # ── Extended Multi-Pass Thinking (thinking_level == "extended") ──
+            # After Pass 1 completes, run a second verification/refinement pass
+            # that reviews the initial response and improves it.
+            _pass2_thinking_pieces = []
+            if thinking_level == "extended" and pieces:
+                pass1_response = "".join(pieces)
+                pass1_thinking = "".join(thinking_pieces).strip() if thinking_pieces else ""
+                # Signal that pass 1 is complete
+                yield event({"type": "thinking_pass_complete", "pass": 1, "label": "Initial Analysis"})
+
+                # Build pass 2 prompt: ask the model to review and refine
+                _verify_prompt = (
+                    "You just produced the following response to the user's question. "
+                    "Now perform a thorough VERIFICATION and REFINEMENT pass:\n\n"
+                    "1. Check all facts, logic, and reasoning for errors\n"
+                    "2. Identify anything you missed or oversimplified\n"
+                    "3. Consider edge cases and alternative perspectives\n"
+                    "4. Improve clarity, depth, and accuracy\n"
+                    "5. If the original answer was correct and complete, you can keep it mostly the same but add nuance\n\n"
+                    f"--- ORIGINAL RESPONSE ---\n{pass1_response}\n--- END ORIGINAL ---\n\n"
+                    "Now write your improved, verified response. This replaces the original — write the FULL response, not just corrections."
+                )
+                # Add the verification request as a new turn
+                _p2_msgs = list(ctx["api_msgs"])  # copy
+                _p2_msgs.append({"role": "assistant", "text": pass1_response})
+                _p2_msgs.append({"role": "user", "text": _verify_prompt})
+
+                yield event({"type": "thinking_pass_start", "pass": 2, "label": "Verification & Refinement"})
+
+                try:
+                    _p2_pieces = []
+                    _p2_q = queue.Queue()
+
+                    def _p2_worker():
+                        try:
+                            for chunk in stream_fn(
+                                resolved["api_key"],
+                                resolved["actual_model"],
+                                ctx["sysprompt"],
+                                _p2_msgs,
+                                base_url=resolved["base_url"],
+                                thinking=True,
+                                thinking_level="high",
+                                web_search=False,
+                            ):
+                                _p2_q.put(chunk)
+                        except Exception as exc:
+                            _p2_q.put(exc)
+                        finally:
+                            _p2_q.put(_SENTINEL)
+
+                    _p2_thread = threading.Thread(target=_p2_worker, daemon=True)
+                    _p2_thread.start()
+
+                    while True:
+                        try:
+                            p2_chunk = _p2_q.get(timeout=_HEARTBEAT_INTERVAL)
+                        except queue.Empty:
+                            yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
+                            continue
+                        if p2_chunk is _SENTINEL:
+                            break
+                        if isinstance(p2_chunk, Exception):
+                            print(f"  [extended] Pass 2 error: {p2_chunk}")
+                            break
+                        if isinstance(p2_chunk, dict) and p2_chunk.get("__thinking__"):
+                            _pass2_thinking_pieces.append(p2_chunk["text"])
+                            if p2_chunk["text"]:
+                                yield event({"type": "thinking_delta", "text": p2_chunk["text"], "pass": 2})
+                            continue
+                        _p2_pieces.append(p2_chunk)
+
+                    if _p2_pieces:
+                        # Replace pass 1 output with the refined pass 2 output
+                        pieces = _p2_pieces
+                        yield event({"type": "thinking_pass_complete", "pass": 2, "label": "Verification & Refinement"})
+                        # Stream the refined response text as deltas
+                        refined_text = "".join(_p2_pieces)
+                        yield event({"type": "extended_response", "text": refined_text})
+                        print(f"  [extended] Pass 2 complete — {len(refined_text)} chars, {len(_pass2_thinking_pieces)} thinking chunks")
+                    else:
+                        print("  [extended] Pass 2 produced no output — keeping pass 1 response")
+                        yield event({"type": "thinking_pass_complete", "pass": 2, "label": "Verification & Refinement"})
+                except Exception as e:
+                    print(f"  [extended] Pass 2 failed: {e} — keeping pass 1 response")
+                    yield event({"type": "thinking_pass_complete", "pass": 2, "label": "Verification & Refinement"})
+
             # ── Post-stream processing ──
             raw_text = "".join(pieces)
-            if thinking_pieces:
-                think_text = "".join(thinking_pieces).strip()
+            # Combine all thinking from all passes
+            all_thinking = thinking_pieces + _pass2_thinking_pieces
+            if all_thinking:
+                think_text = "".join(all_thinking).strip()
                 if think_text:
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             original_raw_text = raw_text
@@ -6460,6 +6805,81 @@ def chat_message_stream(chat_id):
                         yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": "HuggingFace connector not configured. Go to Settings → Connectors to add your token."})
 
             has_pending_ops = bool(image_searches or image_generations or stock_tickers or hf_space_calls)
+
+            # ── Silent verification: execute SILENT_VERIFY blocks and strip them ──
+            raw_text, verify_results = execute_silent_verify(raw_text)
+            if verify_results:
+                verify_summary_parts = []
+                for i, vr in enumerate(verify_results):
+                    status = "✓ PASSED" if vr["success"] else "✗ FAILED"
+                    verify_summary_parts.append(f"Verification {i+1}: {status}\nOutput: {vr['output']}")
+                verify_summary = "\n".join(verify_summary_parts)
+                print(f"  [silent-verify] {len(verify_results)} block(s) executed — {sum(1 for v in verify_results if v['success'])}/{len(verify_results)} passed")
+                # Stream verification result as a thinking delta so user can see it in thinking panel
+                yield event({"type": "thinking_delta", "text": f"\n\n🔬 Silent Verification Results:\n{verify_summary}\n"})
+                # If verification failed, re-prompt the AI to correct itself
+                any_failed = any(not vr["success"] for vr in verify_results)
+                if any_failed:
+                    yield event({"type": "thinking_delta", "text": "\n⚠️ Verification found errors — requesting correction...\n"})
+                    _fix_prompt = (
+                        "IMPORTANT: Your previous response contained silent verification code that FAILED. "
+                        "Here are the verification results:\n\n" + verify_summary + "\n\n"
+                        "Please correct your response based on these verification results. "
+                        "Rewrite the full corrected response. Do NOT include any SILENT_VERIFY blocks this time."
+                    )
+                    _fix_msgs = list(ctx["api_msgs"])
+                    _fix_msgs.append({"role": "assistant", "text": raw_text})
+                    _fix_msgs.append({"role": "user", "text": _fix_prompt})
+                    try:
+                        _fix_q = queue.Queue()
+                        def _fix_worker():
+                            try:
+                                for chunk in stream_fn(
+                                    resolved["api_key"],
+                                    resolved["actual_model"],
+                                    ctx["sysprompt"],
+                                    _fix_msgs,
+                                    base_url=resolved["base_url"],
+                                    thinking=thinking,
+                                    thinking_level="medium",
+                                    web_search=False,
+                                ):
+                                    _fix_q.put(chunk)
+                            except Exception as exc:
+                                _fix_q.put(exc)
+                            finally:
+                                _fix_q.put(_SENTINEL)
+                        _fix_thread = threading.Thread(target=_fix_worker, daemon=True)
+                        _fix_thread.start()
+                        _fix_pieces = []
+                        while True:
+                            try:
+                                fix_chunk = _fix_q.get(timeout=_HEARTBEAT_INTERVAL)
+                            except queue.Empty:
+                                yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
+                                continue
+                            if fix_chunk is _SENTINEL:
+                                break
+                            if isinstance(fix_chunk, Exception):
+                                print(f"  [silent-verify] Correction failed: {fix_chunk}")
+                                break
+                            if isinstance(fix_chunk, dict) and fix_chunk.get("__thinking__"):
+                                if fix_chunk["text"]:
+                                    yield event({"type": "thinking_delta", "text": fix_chunk["text"]})
+                                continue
+                            _fix_pieces.append(fix_chunk)
+                        if _fix_pieces:
+                            corrected_text = "".join(_fix_pieces)
+                            # Strip any SILENT_VERIFY blocks from corrected text too
+                            corrected_text, _ = execute_silent_verify(corrected_text)
+                            raw_text = corrected_text
+                            yield event({"type": "thinking_delta", "text": "\n✓ Correction applied.\n"})
+                            # Stream the corrected response to replace the old one
+                            yield event({"type": "extended_response", "text": corrected_text})
+                            print(f"  [silent-verify] Correction applied — {len(corrected_text)} chars")
+                    except Exception as e:
+                        print(f"  [silent-verify] Correction error: {e}")
+
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
             done_payload = {
                 "type": "done",
@@ -6667,7 +7087,46 @@ def upload_file():
     img_data = None
     doc_data = None
     if mime.startswith("image/"):
-        img_data = base64.b64encode(file_bytes).decode()
+        # Convert unsupported image formats (SVG, BMP, TIFF, WebP, ICO, etc.) to PNG
+        # so the AI can reliably process them
+        NATIVE_IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+        converted = False
+        if mime not in NATIVE_IMAGE_MIMES:
+            try:
+                from PIL import Image
+                if mime == "image/svg+xml":
+                    # SVG → PNG via cairosvg if available, else Pillow can't handle SVG
+                    try:
+                        import cairosvg  # type: ignore[import-untyped]
+                        png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1024)
+                        file_bytes = png_bytes
+                        mime = "image/png"
+                        safe = re.sub(r'\.[^.]+$', '.png', safe)
+                        converted = True
+                    except ImportError:
+                        # cairosvg not available — send SVG as text so AI can still read it
+                        try:
+                            text = file_bytes.decode("utf-8", errors="replace")
+                        except Exception:
+                            pass
+                        converted = True  # skip base64 image encoding for SVG text
+                else:
+                    # BMP, TIFF, ICO, etc. → PNG via Pillow
+                    img = Image.open(io.BytesIO(file_bytes))
+                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                        img = img.convert('RGBA')
+                    else:
+                        img = img.convert('RGB')
+                    buf = io.BytesIO()
+                    img.save(buf, format='PNG')
+                    file_bytes = buf.getvalue()
+                    mime = "image/png"
+                    safe = re.sub(r'\.[^.]+$', '.png', safe)
+                    converted = True
+            except Exception as conv_err:
+                print(f"  [!] Image conversion failed for {safe}: {conv_err}")
+        if not (converted and text):
+            img_data = base64.b64encode(file_bytes).decode()
     elif not text:
         # Non-text, non-image files (PDFs, Word docs, etc.) — store raw bytes
         DOC_MIMES = ("application/pdf", "application/msword",
@@ -6675,7 +7134,7 @@ def upload_file():
                      "application/rtf", "application/epub", "text/rtf")
         if any(mime.startswith(dm) for dm in DOC_MIMES) or safe.lower().endswith(('.pdf','.doc','.docx','.rtf','.epub')):
             doc_data = base64.b64encode(file_bytes).decode()
-    return jsonify({"id": fid, "name": f.filename, "mime": mime,
+    return jsonify({"id": fid, "name": f.filename, "original_name": f.filename, "mime": mime,
                     "size": len(file_bytes), "text": text, "image_data": img_data,
                     "doc_data": doc_data})
 
@@ -6713,8 +7172,9 @@ def list_files_route():
 def list_user_files():
     """Return only user-facing files (notes, projects, etc.) in a tree structure."""
     tree = []
+    _hidden_dirs = SERVER_DIRS | {"_code_output"}
     for root, dirs, fnames in os.walk(WORKSPACE):
-        dirs[:] = [d for d in sorted(dirs) if d not in SERVER_DIRS]
+        dirs[:] = [d for d in sorted(dirs) if d not in _hidden_dirs]
         rel_root = Path(root).relative_to(WORKSPACE)
         for fn in sorted(fnames):
             if fn.startswith(".") or fn in SERVER_FILES:
@@ -6820,9 +7280,342 @@ def get_folders():
         if parent != ".": folders.add(parent)
     return jsonify({"folders": sorted(folders)})
 
+# ─── Voice Notes: Transcribe + Route ──────────────────────────────────────────
+
+@app.route("/api/voice/transcribe", methods=["POST"])
+@require_auth_or_guest
+def voice_transcribe():
+    """Transcribe audio using Google Gemini (sends audio as base64)."""
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file"}), 400
+    audio = request.files["audio"]
+    audio_bytes = audio.read()
+    if len(audio_bytes) < 100:
+        return jsonify({"error": "Audio too short"}), 400
+    if len(audio_bytes) > 25 * 1024 * 1024:
+        return jsonify({"error": "Audio too large (25MB max)"}), 400
+    mime = audio.content_type or "audio/webm"
+    settings = load_settings()
+    api_key = settings.get("keys", {}).get("google", "")
+    if not api_key:
+        return jsonify({"error": "Google API key required for voice transcription"}), 400
+    try:
+        genai, types = _import_google()
+        client = genai.Client(api_key=api_key)
+        audio_b64 = base64.b64encode(audio_bytes).decode()
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[{
+                "role": "user",
+                "parts": [
+                    {"inline_data": {"mime_type": mime, "data": audio_b64}},
+                    {"text": "Transcribe this audio exactly. Output ONLY the transcription text, nothing else. If the audio is unclear or empty, output '[inaudible]'."}
+                ]
+            }]
+        )
+        text = (resp.text or "").strip()
+        if not text:
+            return jsonify({"error": "Could not transcribe audio"}), 400
+        return jsonify({"text": text})
+    except Exception as e:
+        print(f"  [voice] Transcription error: {e}")
+        return jsonify({"error": f"Transcription failed: {str(e)[:200]}"}), 500
+
+
+@app.route("/api/voice/process", methods=["POST"])
+@require_auth
+def voice_process():
+    """Take transcribed voice note, use AI to summarize and route to correct workspace file."""
+    data = request.get_json() or {}
+    text = (data.get("text") or "").strip()
+    if not text or text == "[inaudible]":
+        return jsonify({"error": "No text to process"}), 400
+    settings = load_settings()
+    selected = normalize_selected_model(settings)
+    resolved = resolve_chat_model({"model": selected}, settings)
+    if resolved.get("error"):
+        return jsonify({"error": resolved["error"]}), 400
+    files = read_workspace_files()
+    file_list = ", ".join(sorted(files.keys())[:30]) if files else "(empty)"
+    prompt = (
+        "The user recorded a voice memo. Your job is to:\n"
+        "1. Clean up and summarize the transcription (fix filler words, grammar, incomplete sentences)\n"
+        "2. Decide where this note should go in the workspace\n"
+        "3. Output the result\n\n"
+        f"Current workspace files: {file_list}\n\n"
+        "Workspace structure:\n"
+        "- notes/ = general notes, ideas, thoughts\n"
+        "- projects/ = project-specific files (project_name.md)\n"
+        "- people/ = info about people (firstname_lastname.md)\n"
+        "- decisions/ = decision records (YYYY-MM-DD_description.md)\n"
+        "- STATUS.md = central operational status\n\n"
+        "Respond in this EXACT JSON format (no markdown fences):\n"
+        '{"summary": "cleaned up note text", "target_file": "path/to/file.md", '
+        '"action": "create" or "append", "section_title": "optional heading for the entry", '
+        '"tags": ["optional", "tags"]}\n\n'
+        f"Voice memo transcription:\n{text}"
+    )
+    try:
+        provider_fn = PROVIDERS.get(resolved["provider"], call_openai)
+        resp_text = provider_fn(
+            resolved["api_key"], resolved["actual_model"],
+            "You are a workspace assistant that routes voice notes to the right files. Always respond with valid JSON.",
+            [{"role": "user", "text": prompt}],
+            base_url=resolved.get("base_url"),
+        )
+        resp_text = (resp_text or "").strip()
+        resp_text = re.sub(r'^```(?:json)?\n?', '', resp_text)
+        resp_text = re.sub(r'\n?```$', '', resp_text)
+        result = json.loads(resp_text)
+        target = result.get("target_file", "notes/voice_notes.md")
+        summary = result.get("summary", text)
+        action = result.get("action", "append")
+        section = result.get("section_title", "")
+        tags = result.get("tags", [])
+        # Safety check on path
+        target = Path(target).as_posix()
+        if ".." in target or target.startswith("/"):
+            target = "notes/voice_notes.md"
+        fp = WORKSPACE / target
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"\n## {'🎤 ' + section if section else '🎤 Voice Note'} — {now_str}\n\n{summary}\n"
+        if tags:
+            entry += f"\n*Tags: {', '.join(tags)}*\n"
+        if action == "create" or not fp.exists():
+            fp.write_text(f"# {Path(target).stem.replace('_', ' ').title()}\n{entry}", encoding="utf-8")
+            file_action = "created"
+        else:
+            with open(fp, "a", encoding="utf-8") as f:
+                f.write(entry)
+            file_action = "appended"
+        return jsonify({
+            "ok": True,
+            "summary": summary,
+            "target_file": target,
+            "action": file_action,
+            "section_title": section,
+            "tags": tags,
+        })
+    except json.JSONDecodeError:
+        # Fallback: just save to voice_notes.md
+        fp = WORKSPACE / "notes" / "voice_notes.md"
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"\n## 🎤 Voice Note — {now_str}\n\n{text}\n"
+        if fp.exists():
+            with open(fp, "a", encoding="utf-8") as f:
+                f.write(entry)
+        else:
+            fp.write_text(f"# Voice Notes\n{entry}", encoding="utf-8")
+        return jsonify({"ok": True, "summary": text, "target_file": "notes/voice_notes.md", "action": "appended", "tags": []})
+    except Exception as e:
+        return jsonify({"error": str(e)[:300]}), 500
+
+
+# ─── Momentum Analytics ──────────────────────────────────────────────────────
+
+@app.route("/api/momentum", methods=["POST"])
+@require_auth_or_guest
+def momentum_analytics():
+    """Calculate task velocity, friction points, and momentum score."""
+    body = request.get_json() or {}
+    todos = body.get("todos", []) if isinstance(body.get("todos"), list) else []
+
+    total = len(todos)
+    done = [t for t in todos if t.get("done")]
+    pending = [t for t in todos if not t.get("done")]
+    done_count = len(done)
+    pending_count = len(pending)
+
+    # Completion rate
+    completion_rate = round((done_count / total * 100) if total > 0 else 0)
+
+    # Analyze chats for activity patterns (last 14 days)
+    chats = list_chats() if session.get("user_id") else []
+    now = datetime.datetime.now()
+    activity_by_day = {}
+    for i in range(14):
+        day = (now - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        activity_by_day[day] = {"chats": 0, "label": (now - datetime.timedelta(days=i)).strftime("%a")}
+    for c in chats:
+        updated = c.get("updated") or c.get("created") or ""
+        if updated:
+            day_key = updated[:10]
+            if day_key in activity_by_day:
+                activity_by_day[day_key]["chats"] += 1
+
+    # Build activity timeline (last 7 days for display)
+    timeline = []
+    for i in range(6, -1, -1):
+        day = (now - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        info = activity_by_day.get(day, {"chats": 0, "label": ""})
+        timeline.append({"date": day, "label": info["label"], "chats": info["chats"]})
+
+    # Detect friction points — projects/tasks untouched for 4+ days
+    friction_points = []
+    projects_dir = WORKSPACE / "projects"
+    if projects_dir.exists():
+        for pf in projects_dir.glob("*.md"):
+            try:
+                mtime = datetime.datetime.fromtimestamp(pf.stat().st_mtime)
+                days_idle = (now - mtime).days
+                if days_idle >= 4:
+                    name = pf.stem.replace("_", " ").replace("-", " ").title()
+                    friction_points.append({
+                        "name": name,
+                        "days_idle": days_idle,
+                        "type": "project",
+                        "path": f"projects/{pf.name}",
+                        "starter": _suggest_starter(name, days_idle),
+                    })
+            except Exception:
+                continue
+
+    # Momentum score (0-100)
+    score_parts = []
+    # Completion factor
+    if total > 0:
+        score_parts.append(min(100, completion_rate * 1.2))
+    # Activity factor — were there chats in last 3 days?
+    recent_activity = sum(1 for i in range(3) if activity_by_day.get((now - datetime.timedelta(days=i)).strftime("%Y-%m-%d"), {}).get("chats", 0) > 0)
+    score_parts.append(recent_activity / 3 * 100)
+    # Friction penalty
+    if friction_points:
+        penalty = min(30, len(friction_points) * 10)
+        score_parts.append(max(0, 100 - penalty))
+    else:
+        score_parts.append(100)
+    # Pending overload penalty
+    if pending_count > 10:
+        score_parts.append(max(0, 100 - (pending_count - 10) * 5))
+    elif pending_count > 0:
+        score_parts.append(80)
+    else:
+        score_parts.append(total > 0 and 100 or 50)  # No pending = great if there are tasks
+
+    momentum_score = round(sum(score_parts) / len(score_parts)) if score_parts else 50
+
+    # Verdict
+    if momentum_score >= 80:
+        verdict = "on_fire"
+        verdict_text = "You're on fire — strong execution momentum."
+    elif momentum_score >= 60:
+        verdict = "steady"
+        verdict_text = "Steady pace — keep the rhythm going."
+    elif momentum_score >= 40:
+        verdict = "slowing"
+        verdict_text = "Momentum is dropping — a few quick wins could reignite it."
+    else:
+        verdict = "stalled"
+        verdict_text = "Stalled out — pick one small thing and start moving."
+
+    return jsonify({
+        "score": momentum_score,
+        "verdict": verdict,
+        "verdict_text": verdict_text,
+        "total_tasks": total,
+        "done": done_count,
+        "pending": pending_count,
+        "completion_rate": completion_rate,
+        "timeline": timeline,
+        "friction_points": friction_points[:5],
+    })
+
+
+def _suggest_starter(project_name, days_idle):
+    """Suggest a 30-second starting step for a stalled project."""
+    starters = [
+        f"Open {project_name} and write one sentence about where you left off.",
+        f"Spend 30 seconds listing what's blocking {project_name}.",
+        f"Add one bullet point to {project_name} with your current thought.",
+        f"Set a 5-minute timer and just read through {project_name}.",
+        f"Write down the single next action for {project_name}.",
+    ]
+    return random.choice(starters)
+
+
+# ─── Predictive Scaffolding ──────────────────────────────────────────────────
+
+def extract_project_scaffolds(text):
+    """Extract <<<PROJECT_SCAFFOLD: name>>> tags. Returns (cleaned_text, [name, ...])."""
+    pattern = re.compile(r'<<<PROJECT_SCAFFOLD:\s*(.+?)>>>')
+    scaffolds = []
+    def _replace(m):
+        name = m.group(1).strip()
+        if name:
+            scaffolds.append(name)
+        return ""
+    cleaned = pattern.sub(_replace, text)
+    return cleaned, scaffolds
+
+
+def execute_project_scaffold(name):
+    """Create a full project structure for a new idea."""
+    slug = re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    created = []
+
+    # 1. Create project file
+    proj_path = WORKSPACE / "projects" / f"{slug}.md"
+    proj_path.parent.mkdir(parents=True, exist_ok=True)
+    if not proj_path.exists():
+        proj_path.write_text(
+            f"# {name}\n\n"
+            f"**Created:** {now_str}\n"
+            f"**Status:** 🟡 Planning\n\n"
+            f"## Overview\n\nProject description goes here.\n\n"
+            f"## Goals\n\n- [ ] Define scope and objectives\n- [ ] Research phase\n- [ ] First milestone\n\n"
+            f"## Notes\n\n*(Add notes as you go)*\n",
+            encoding="utf-8"
+        )
+        created.append(f"projects/{slug}.md")
+
+    # 2. Create research folder with a starter file
+    research_dir = WORKSPACE / "notes" / slug
+    research_dir.mkdir(parents=True, exist_ok=True)
+    research_file = research_dir / "research.md"
+    if not research_file.exists():
+        research_file.write_text(
+            f"# {name} — Research\n\n"
+            f"**Started:** {now_str}\n\n"
+            f"## Key Questions\n\n- \n\n"
+            f"## Findings\n\n*(Add research here)*\n",
+            encoding="utf-8"
+        )
+        created.append(f"notes/{slug}/research.md")
+
+    # 3. Update STATUS.md
+    status_path = WORKSPACE / "STATUS.md"
+    status_entry = f"\n### {name}\n- **Status:** Planning\n- **Started:** {now_str}\n- **Next:** Define scope and first steps\n"
+    if status_path.exists():
+        content = status_path.read_text(encoding="utf-8")
+        if name.lower() not in content.lower():
+            with open(status_path, "a", encoding="utf-8") as f:
+                f.write(status_entry)
+            created.append("STATUS.md (updated)")
+    else:
+        status_path.write_text(f"# Status\n{status_entry}", encoding="utf-8")
+        created.append("STATUS.md (created)")
+
+    return created
+
+
 # ─── Version & Changelog ──────────────────────────────────────────────────────
-gyro_VERSION = "3.4"
+gyro_VERSION = "3.5"
 gyro_CHANGELOG = [
+    {
+        "version": "3.5",
+        "date": "2026-03-28",
+        "title": "Voice Notes, Momentum & Smart Scaffolding",
+        "changes": [
+            "Voice Notes: record voice memos that auto-transcribe and route to the right workspace file",
+            "Momentum Analytics: visual dashboard showing your task velocity and friction points",
+            "Predictive Scaffolding: mention a new idea and Gyro auto-generates project structure",
+            "Voice recording optimized for mobile with full-screen orb UI",
+            "30-second starter suggestions for stalled projects",
+        ]
+    },
     {
         "version": "3.4",
         "date": "2026-03-22",

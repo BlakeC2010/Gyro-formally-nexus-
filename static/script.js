@@ -176,14 +176,8 @@ function stopStreaming(){
 
 function editMsg(btn){
   const msgEl=btn.closest('.msg');
-  if(msgEl.querySelector('.msg-edit-area'))return; // already editing
   const originalText=msgEl.dataset.text||'';
 
-  // Save original innerHTML so we can restore on cancel
-  const originalHTML=msgEl.innerHTML;
-
-  // Find the text content area — could be a .upf-full pre, or direct text node, etc.
-  // We'll overlay an edit UI on the message itself
   const area=document.getElementById('chatArea');
   const allMsgs=[...area.querySelectorAll('.msg')];
 
@@ -194,55 +188,76 @@ function editMsg(btn){
     if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
   }
 
-  // Build inline edit UI — keep files/images at top, replace text with textarea
+  // Extract existing file data from the message's image previews
+  const _editFiles=[];
   const filesEl=msgEl.querySelector('.msg-user-files');
-  const filesHTML=filesEl?filesEl.outerHTML:'';
+  if(filesEl){
+    filesEl.querySelectorAll('.user-file-preview').forEach(fp=>{
+      const img=fp.querySelector('img');
+      if(img&&img.src&&img.src.startsWith('data:')){
+        const m=img.src.match(/^data:([^;]+);base64,(.+)$/);
+        if(m){_editFiles.push({name:img.alt||'image',mime:m[1],data:m[2],text:'',doc_data:''});}
+      }else{
+        const span=fp.querySelector('span');
+        if(span){_editFiles.push({name:span.textContent||'file',mime:'application/octet-stream',data:'',text:'',doc_data:''});}
+      }
+    });
+  }
 
-  msgEl.innerHTML=filesHTML+
-    `<div class="msg-edit-area">`+
-    `<textarea class="msg-edit-input" id="_msgEditInput">${esc(originalText)}</textarea>`+
-    `<div class="msg-edit-actions">`+
-    `<button class="msg-edit-save" id="_msgEditSave">Send Edit</button>`+
-    `<button class="msg-edit-cancel" id="_msgEditCancel">Cancel</button>`+
-    `</div></div>`;
+  // Store edit state globally so sendMessage can use it
+  window._editTruncateAt=backendIndex;
+  window._editMsgEl=msgEl;
+  window._editAllMsgs=allMsgs;
+  window._editFiles=_editFiles;
 
-  const editInput=document.getElementById('_msgEditInput');
-  editInput.focus();
-  // Auto-resize textarea
-  editInput.style.height='auto';
-  editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
-  editInput.addEventListener('input',()=>{
-    editInput.style.height='auto';
-    editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
-  });
+  // Populate the main prompt bar
+  const input=document.getElementById('msgInput');
+  input.value=originalText;
+  autoResize(input);
+  input.focus();
 
-  // Cancel — restore original message
-  document.getElementById('_msgEditCancel').addEventListener('click',()=>{
-    msgEl.innerHTML=originalHTML;
-  });
+  // Re-attach any files from the original message
+  if(_editFiles.length){
+    pendingFiles.push(..._editFiles);
+    renderPF();
+  }
 
-  // Save — send the edited message
-  document.getElementById('_msgEditSave').addEventListener('click',()=>{
-    const newText=editInput.value.trim();
-    if(!newText)return;
+  // Show edit mode banner
+  let banner=document.getElementById('editModeBanner');
+  if(!banner){
+    banner=document.createElement('div');
+    banner.id='editModeBanner';
+    banner.className='edit-mode-banner';
+    const inputArea=document.querySelector('.input-area');
+    inputArea.insertBefore(banner,inputArea.firstChild);
+  }
+  const preview=originalText.length>80?originalText.slice(0,80)+'…':originalText;
+  banner.innerHTML=`<span class="edit-banner-icon">✎</span><span class="edit-banner-text">Editing message</span><span class="edit-banner-preview">${esc(preview)}</span><button class="edit-banner-cancel" onclick="cancelEditMode()">✕ Cancel</button>`;
+  banner.style.display='flex';
+  document.querySelector('.input-area').classList.add('edit-mode');
+}
 
-    // Remove this message and all subsequent messages
-    let toRemove=[];
-    let found=false;
-    for(const el of allMsgs){
-      if(el===msgEl)found=true;
-      if(found)toRemove.push(el);
+function cancelEditMode(){
+  const banner=document.getElementById('editModeBanner');
+  if(banner)banner.style.display='none';
+  document.querySelector('.input-area').classList.remove('edit-mode');
+  // Clear the prompt bar
+  const input=document.getElementById('msgInput');
+  input.value='';
+  autoResize(input);
+  // Remove any files we added from the edit
+  if(window._editFiles){
+    for(const ef of window._editFiles){
+      const idx=pendingFiles.indexOf(ef);
+      if(idx>=0)pendingFiles.splice(idx,1);
     }
-    toRemove.forEach(el=>el.remove());
-
-    // Set truncation index and send
-    window._editTruncateAt=backendIndex;
-    const input=document.getElementById('msgInput');
-    input.value=newText;
-    autoResize(input);
-    // Trigger send
-    sendMessage();
-  });
+    renderPF();
+  }
+  // Clean up
+  delete window._editTruncateAt;
+  delete window._editMsgEl;
+  delete window._editAllMsgs;
+  delete window._editFiles;
 }
 
 function retryMsg(btn){
@@ -817,6 +832,53 @@ function renderHomeWidget(w){
         +`</div>`;
     }).join('');
     return `<div class="${cls} wl-reminder-widget"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-reminder-list">${body}</div></div>`;
+  }
+  if(type==='momentum'){
+    const score=w.score||0;
+    const verdict=w.verdict||'steady';
+    const done=w.done||0;
+    const pending=w.pending||0;
+    const total=done+pending;
+    const timeline=Array.isArray(w.timeline)?w.timeline:[];
+    const friction=Array.isArray(w.friction_points)?w.friction_points:[];
+    const verdictIcons={on_fire:'🔥',steady:'⚡',slowing:'🐢',stalled:'❄️'};
+    const verdictColors={on_fire:'var(--green)',steady:'var(--accent)',slowing:'var(--yellow, #e6a700)',stalled:'var(--red)'};
+    const icon=verdictIcons[verdict]||'⚡';
+    const color=verdictColors[verdict]||'var(--accent)';
+    // Score ring
+    const pct=Math.min(100,Math.max(0,score));
+    const circumference=2*Math.PI*36;
+    const dashOffset=circumference*(1-pct/100);
+    let body=`<div class="wl-momentum-top">`
+      +`<div class="wl-momentum-ring">`
+      +`<svg viewBox="0 0 80 80" width="80" height="80">`
+      +`<circle cx="40" cy="40" r="36" fill="none" stroke="var(--border-subtle)" stroke-width="6"/>`
+      +`<circle cx="40" cy="40" r="36" fill="none" stroke="${color}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}" transform="rotate(-90 40 40)"/>`
+      +`</svg>`
+      +`<div class="wl-momentum-score-lbl">${icon}<br>${pct}</div>`
+      +`</div>`
+      +`<div class="wl-momentum-stats">`
+      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--green)">${done}</span><span class="wl-ms-label">Done</span></div>`
+      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--yellow, #e6a700)">${pending}</span><span class="wl-ms-label">Pending</span></div>`
+      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--text-secondary)">${total}</span><span class="wl-ms-label">Total</span></div>`
+      +`</div></div>`;
+    // Activity bars (if timeline provided)
+    if(timeline.length){
+      const maxChats=Math.max(1,...timeline.map(t=>t.chats||0));
+      const bars=timeline.map(t=>{
+        const h=Math.max(4,((t.chats||0)/maxChats)*40);
+        return `<div class="wl-momentum-bar-col"><div class="wl-momentum-bar" style="height:${h}px;background:${color}"></div><div class="wl-momentum-bar-lbl">${esc(t.label||'')}</div></div>`;
+      }).join('');
+      body+=`<div class="wl-momentum-chart"><div class="wl-momentum-chart-lbl">Activity</div><div class="wl-momentum-bars">${bars}</div></div>`;
+    }
+    // Friction points
+    if(friction.length){
+      const fp=friction.map(f=>`<div class="wl-momentum-friction"><strong>${esc(f.name||'')}</strong> — idle ${f.days_idle||'?'}d<div class="wl-momentum-starter">${esc(f.starter||'')}</div></div>`).join('');
+      body+=`<div class="wl-momentum-friction-section"><div class="wl-momentum-chart-lbl">Friction Points</div>${fp}</div>`;
+    }
+    // Open full momentum dashboard button
+    body+=`<button class="wl-momentum-expand" onclick="openMomentumDashboard()">View full dashboard →</button>`;
+    return `<div class="${cls} wl-momentum-widget"><div class="wl-widget-hd">${title}</div>${subtitle}${body}</div>`;
   }
   return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Ready when you are.')}</div></div>`;
 }
@@ -2024,19 +2086,20 @@ function refreshModeMenuUI(){
   const track=document.querySelector('.think-track');
   const slider=document.getElementById('thinkSlider');
   const desc=document.getElementById('thinkDesc');
-  const descs={off:'Auto-detects when deeper reasoning is needed',low:'Light reasoning for simple analysis',medium:'Balanced depth for most tasks',high:'Maximum reasoning power for complex problems'};
+  const descs={off:'Auto-detects when deeper reasoning is needed',low:'Light reasoning for simple analysis',medium:'Balanced depth for most tasks',high:'Maximum reasoning power for complex problems',extended:'Multi-pass deep thinking — analyzes, then verifies & refines'};
   const lvl=thinkingLevel||'off';
+  const numOpts=opts.length||5;
   let idx=0;
   opts.forEach((b,i)=>{const a=b.dataset.lvl===lvl;b.classList.toggle('active',a);if(a)idx=i;});
   if(track)track.dataset.active=lvl;
-  if(slider)slider.style.left=`calc(${idx*25}% + 3px)`;
+  if(slider)slider.style.left=`calc(${idx*(100/numOpts)}% + 3px)`;
   if(desc)desc.textContent=descs[lvl]||'';
 }
 
 function setThinkingLevel(lvl){
   thinkingLevel=lvl;
   refreshModeMenuUI();
-  const labels={off:'Thinking off',low:'Low reasoning',medium:'Medium reasoning',high:'Max reasoning'};
+  const labels={off:'Thinking off',low:'Low reasoning',medium:'Medium reasoning',high:'Max reasoning',extended:'Extended multi-pass thinking'};
   showToast(labels[lvl]||`Thinking: ${lvl}`, lvl==='off'?'info':'success');
 }
 
@@ -2050,35 +2113,102 @@ document.addEventListener('click',e=>{
 });
 
 // ─── File Upload ──────────────────────────────────
+// Convert unsupported image files to PNG client-side before uploading
+function _convertImageToPng(file){
+  return new Promise((resolve)=>{
+    const mime=file.type||'';
+    // SVG → render on canvas → PNG
+    if(mime==='image/svg+xml'||file.name.toLowerCase().endsWith('.svg')){
+      const reader=new FileReader();
+      reader.onload=()=>{
+        const svgText=reader.result;
+        const img=new Image();
+        const blob=new Blob([svgText],{type:'image/svg+xml;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        img.onload=()=>{
+          const c=document.createElement('canvas');
+          c.width=Math.min(img.naturalWidth||800,2048);
+          c.height=Math.min(img.naturalHeight||800,2048);
+          if(c.width===0||c.height===0){c.width=800;c.height=800;}
+          const ctx=c.getContext('2d');
+          ctx.drawImage(img,0,0,c.width,c.height);
+          c.toBlob(pngBlob=>{
+            URL.revokeObjectURL(url);
+            if(pngBlob){
+              const pngFile=new File([pngBlob],file.name.replace(/\.svg$/i,'.png'),{type:'image/png'});
+              resolve(pngFile);
+            }else{resolve(file);}
+          },'image/png');
+        };
+        img.onerror=()=>{URL.revokeObjectURL(url);resolve(file);};
+        img.src=url;
+      };
+      reader.onerror=()=>resolve(file);
+      reader.readAsText(file);
+      return;
+    }
+    // BMP, TIFF, ICO, etc. → canvas → PNG
+    const NON_NATIVE=['image/bmp','image/tiff','image/x-icon','image/vnd.microsoft.icon','image/x-ms-bmp'];
+    if(NON_NATIVE.includes(mime)||/\.(bmp|tiff?|ico)$/i.test(file.name)){
+      const reader=new FileReader();
+      reader.onload=()=>{
+        const img=new Image();
+        img.onload=()=>{
+          const c=document.createElement('canvas');
+          c.width=img.naturalWidth;c.height=img.naturalHeight;
+          const ctx=c.getContext('2d');
+          ctx.drawImage(img,0,0);
+          c.toBlob(pngBlob=>{
+            if(pngBlob){
+              const pngFile=new File([pngBlob],file.name.replace(/\.[^.]+$/,'.png'),{type:'image/png'});
+              resolve(pngFile);
+            }else{resolve(file);}
+          },'image/png');
+        };
+        img.onerror=()=>resolve(file);
+        img.src=reader.result;
+      };
+      reader.onerror=()=>resolve(file);
+      reader.readAsDataURL(file);
+      return;
+    }
+    resolve(file);
+  });
+}
+
 function handleFiles(input){
-  for(const file of input.files){
+  for(const origFile of input.files){
     // Add a loading placeholder immediately so user sees the file
     const idx=pendingFiles.length;
-    pendingFiles.push({name:file.name,mime:file.type||'application/octet-stream',data:'',text:'',doc_data:'',_loading:true});
+    pendingFiles.push({name:origFile.name,mime:origFile.type||'application/octet-stream',data:'',text:'',doc_data:'',_loading:true});
     renderPF();
     _uploadsInFlight++;
-    const reader=new FileReader();
-    reader.onload=async()=>{
-      const form=new FormData();form.append('file',file);
-      try{
-        const r=await fetch('/api/upload',{method:'POST',body:form});
-        const d=await r.json();
-        // Find and update the placeholder (match by name + _loading)
-        const ph=pendingFiles.find(f=>f._loading&&f.name===file.name);
-        if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
-        renderPF();
-      }catch(e){
-        console.error('Upload failed',e);
-        // Remove the placeholder on failure
-        const pi=pendingFiles.findIndex(f=>f._loading&&f.name===file.name);
-        if(pi>=0)pendingFiles.splice(pi,1);
-        renderPF();
-      }finally{
-        _uploadsInFlight=Math.max(0,_uploadsInFlight-1);
-        _checkUploadsComplete();
-      }
-    };
-    reader.readAsArrayBuffer(file);
+    // Convert unsupported images first, then upload
+    _convertImageToPng(origFile).then(file=>{
+      const reader=new FileReader();
+      reader.onload=async()=>{
+        const form=new FormData();form.append('file',file);
+        try{
+          const r=await fetch('/api/upload',{method:'POST',body:form});
+          const d=await r.json();
+          // Find and update the placeholder (match by name + _loading)
+          // Always keep the original filename for display, even if converted internally
+          const ph=pendingFiles.find(f=>f._loading&&f.name===origFile.name);
+          if(ph){ph.name=origFile.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
+          renderPF();
+        }catch(e){
+          console.error('Upload failed',e);
+          // Remove the placeholder on failure
+          const pi=pendingFiles.findIndex(f=>f._loading&&f.name===origFile.name);
+          if(pi>=0)pendingFiles.splice(pi,1);
+          renderPF();
+        }finally{
+          _uploadsInFlight=Math.max(0,_uploadsInFlight-1);
+          _checkUploadsComplete();
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
   }
   input.value='';
 }
@@ -2145,6 +2275,32 @@ function initDropzone(){
     fileInput.files=e.dataTransfer.files;
     handleFiles(fileInput);
     showToast('Files added.','success');
+  });
+  // Copy handler: preserve LaTeX source when copying KaTeX-rendered math
+  document.addEventListener('copy',e=>{
+    const sel=window.getSelection();
+    if(!sel||sel.isCollapsed)return;
+    // Only intercept if selection contains rendered KaTeX
+    const range=sel.getRangeAt(0);
+    const container=document.createElement('div');
+    container.appendChild(range.cloneContents());
+    const katexEls=container.querySelectorAll('.katex');
+    if(!katexEls.length)return;
+    // Replace each KaTeX element with its LaTeX source
+    katexEls.forEach(k=>{
+      const ann=k.querySelector('annotation[encoding="application/x-tex"]');
+      if(ann){
+        const isDisplay=!!k.closest('.katex-display')||(k.parentElement&&k.parentElement.classList.contains('katex-display'));
+        const tex=ann.textContent||'';
+        const wrap=isDisplay?'$$'+tex+'$$':'$'+tex+'$';
+        k.replaceWith(document.createTextNode(wrap));
+      }
+    });
+    const plainText=container.textContent||container.innerText||'';
+    if(plainText){
+      e.preventDefault();
+      e.clipboardData.setData('text/plain',plainText);
+    }
   });
   document.addEventListener('paste',e=>{
     const items=e.clipboardData?.items;if(!items)return;
@@ -2636,6 +2792,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const thC=document.getElementById('_raThinkC'+ev.step);
             if(thC){
               thC.innerHTML=_fmtThink(stepThinking);
+              renderMathInElementSafe(thC);
               const _ltpBody=thC.parentElement;
               if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
             }
@@ -3191,6 +3348,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const thC=document.getElementById('_saThinkC'+ev.step);
             if(thC){
               thC.innerHTML=_fmtThink(stepThinking);
+              renderMathInElementSafe(thC);
               const _ltpBody=thC.parentElement;
               if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
             }
@@ -3805,6 +3963,8 @@ function stripMetaBlocks(text){
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'')
+    .replace(/<<<SILENT_VERIFY:\s*\w+>>>[\s\S]*?(<<<END_SILENT_VERIFY>>>|$)/g,'')
+    .replace(/<<<PROJECT_SCAFFOLD:\s*.+?>>>/g,'')
     .trim();
 }
 
@@ -3866,6 +4026,9 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_STOCK_RATINGS&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*$/,'');
+  // Strip SILENT_VERIFY blocks (invisible to user)
+  html=html.replace(/&lt;&lt;&lt;SILENT_VERIFY:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_SILENT_VERIFY&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;SILENT_VERIFY:\s*\w+&gt;&gt;&gt;[\s\S]*$/,''); // unclosed
   // Completed CODE_EXECUTE blocks — show code + executing indicator
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
@@ -4188,10 +4351,9 @@ async function sendMessage(opts){
     // Silent/auto-reprompt: minimal indicator, no "Thinking..." animation
     msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
   }else{
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div></div></div>';
   }
   if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
-  if(!_silent)startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
   let _renderScheduled=false;
@@ -4222,6 +4384,22 @@ async function sendMessage(opts){
 
     const _truncateAt=window._editTruncateAt;
     delete window._editTruncateAt;
+    // If this is an edit-mode send, remove the edited message + all subsequent messages from DOM
+    if(_truncateAt!=null&&window._editMsgEl&&window._editAllMsgs){
+      let found=false;
+      for(const el of window._editAllMsgs){
+        if(el===window._editMsgEl)found=true;
+        if(found&&el.parentNode)el.remove();
+      }
+    }
+    // Clean up edit mode state & banner
+    delete window._editMsgEl;
+    delete window._editAllMsgs;
+    delete window._editFiles;
+    const _editBanner=document.getElementById('editModeBanner');
+    if(_editBanner)_editBanner.style.display='none';
+    const _editInputArea=document.querySelector('.input-area');
+    if(_editInputArea)_editInputArea.classList.remove('edit-mode');
     const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4262,6 +4440,11 @@ async function sendMessage(opts){
     const decoder=new TextDecoder();
     let buffer='',fullText='',thinkText='',isThinking=false;
     let _genFailures=[];
+    // ── Multi-pass extended thinking state ──
+    let _thinkingPass=1;           // Current thinking pass number
+    let _thinkPasses={};           // {passNum: {text, panel, textEl, label}}
+    let _pass2ThinkText='';        // Thinking text for pass 2
+    let _isExtended=thinkingLevel==='extended';
     // ── Mid-stream media loading state ──
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
@@ -4328,22 +4511,40 @@ async function sendMessage(opts){
       }
       return 'your question';
     }
-    function ensureThinkPanel(){
-      if(thinkPanel)return;
+    function ensureThinkPanel(passNum){
+      passNum=passNum||1;
+      // If we already have a panel for this pass, reuse it
+      if(_thinkPasses[passNum]&&_thinkPasses[passNum].panel){
+        thinkPanel=_thinkPasses[passNum].panel;
+        thinkTextEl=_thinkPasses[passNum].textEl;
+        return;
+      }
+      if(passNum===1&&thinkPanel)return;
       const ta=contentEl.querySelector('.think-active');
       if(ta)ta.remove();
       stopThinkingPhrases();
-      thinkPanel=document.createElement('div');
-      thinkPanel.className='live-think-panel ltp-collapsed';
-      thinkPanel.innerHTML='<div class="ltp-header" style="cursor:pointer"><span class="ltp-icon">💭</span><span class="ltp-label">Considering your question</span><span class="ltp-chevron">▾</span><span class="ltp-dots"><span></span><span></span><span></span></span></div><div class="ltp-body"><div class="ltp-text"></div></div>';
-      const hdr=thinkPanel.querySelector('.ltp-header');
-      const body=thinkPanel.querySelector('.ltp-body');
-      hdr.onclick=()=>{
-        thinkPanel.classList.toggle('ltp-collapsed');
-      };
-      contentEl.innerHTML='';
-      contentEl.appendChild(thinkPanel);
-      thinkTextEl=thinkPanel.querySelector('.ltp-text');
+      const panel=document.createElement('div');
+      const passLabel=_isExtended?(passNum===1?'Pass 1: Initial Analysis':'Pass 2: Verification & Refinement'):'';
+      panel.className='live-think-panel ltp-collapsed'+(passNum>1?' ltp-pass-'+passNum:'');
+      if(_isExtended)panel.dataset.pass=passNum;
+      const headerLabel=_isExtended&&passNum>1?'Verifying & refining…':'Considering your question';
+      panel.innerHTML='<div class="ltp-header" style="cursor:pointer">'
+        +'<span class="ltp-icon">'+(passNum>1?'🔍':'💭')+'</span>'
+        +(_isExtended?'<span class="ltp-pass-badge">Pass '+passNum+'</span>':'')
+        +'<span class="ltp-label">'+headerLabel+'</span>'
+        +'<span class="ltp-chevron">▾</span>'
+        +'<span class="ltp-dots"><span></span><span></span><span></span></span>'
+        +'</div><div class="ltp-body"><div class="ltp-text"></div></div>';
+      const hdr=panel.querySelector('.ltp-header');
+      hdr.onclick=()=>{panel.classList.toggle('ltp-collapsed');};
+      if(passNum===1){
+        contentEl.innerHTML='';
+      }
+      contentEl.appendChild(panel);
+      const textEl=panel.querySelector('.ltp-text');
+      _thinkPasses[passNum]={text:'',panel:panel,textEl:textEl,label:passLabel};
+      thinkPanel=panel;
+      thinkTextEl=textEl;
     }
 
     while(true){
@@ -4363,22 +4564,106 @@ async function sendMessage(opts){
             continue;
           }else if(data.type==='thinking_delta'){
             _lastMeaningfulEvent=Date.now();
-            if(!isThinking)console.log('[gyro] thinking_delta received — thinking panel activating');
+            const dPass=data.pass||1;
+            if(!isThinking)console.log(`[gyro] thinking_delta received (pass ${dPass}) — thinking panel activating`);
             isThinking=true;
-            thinkText+=data.text;
-            if(canRender()){
-              ensureThinkPanel();
-              thinkTextEl.innerHTML=_fmtThink(thinkText);
-              const _ltpBody=thinkTextEl.parentElement;
-              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
-              // Continuously update the collapsed label with the latest thinking topic
-              if(thinkText.length>15){
-                const subj=_extractThinkSubject(thinkText);
-                if(subj!==_lastThinkLabel){
-                  _lastThinkLabel=subj;
-                  const lbl=thinkPanel.querySelector('.ltp-label');
-                  if(lbl)lbl.textContent=subj;
+            if(dPass===2){
+              _pass2ThinkText+=data.text;
+              if(canRender()){
+                ensureThinkPanel(2);
+                thinkTextEl.innerHTML=_fmtThink(_pass2ThinkText);
+                renderMathInElementSafe(thinkTextEl);
+                const _ltpBody=thinkTextEl.parentElement;
+                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+                if(_pass2ThinkText.length>15){
+                  const subj=_extractThinkSubject(_pass2ThinkText);
+                  if(subj!==_lastThinkLabel){
+                    _lastThinkLabel=subj;
+                    const lbl=thinkPanel.querySelector('.ltp-label');
+                    if(lbl)lbl.textContent=subj;
+                  }
                 }
+                _autoScroll();
+              }
+            }else{
+              thinkText+=data.text;
+              if(canRender()){
+                ensureThinkPanel(1);
+                thinkTextEl.innerHTML=_fmtThink(thinkText);
+                renderMathInElementSafe(thinkTextEl);
+                const _ltpBody=thinkTextEl.parentElement;
+                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+                if(thinkText.length>15){
+                  const subj=_extractThinkSubject(thinkText);
+                  if(subj!==_lastThinkLabel){
+                    _lastThinkLabel=subj;
+                    const lbl=thinkPanel.querySelector('.ltp-label');
+                    if(lbl)lbl.textContent=subj;
+                  }
+                }
+                _autoScroll();
+              }
+            }
+          }else if(data.type==='thinking_pass_complete'){
+            _lastMeaningfulEvent=Date.now();
+            const pNum=data.pass||1;
+            console.log(`[gyro] thinking pass ${pNum} complete: ${data.label||''}`);
+            const passInfo=_thinkPasses[pNum];
+            if(passInfo&&passInfo.panel){
+              passInfo.panel.classList.add('ltp-done','ltp-collapsed');
+              const dots=passInfo.panel.querySelector('.ltp-dots');
+              if(dots)dots.remove();
+              const lbl=passInfo.panel.querySelector('.ltp-label');
+              if(lbl){
+                const thTxt=pNum===2?_pass2ThinkText:thinkText;
+                const subj=_extractThinkSubject(thTxt);
+                lbl.textContent=pNum===1?'Thought about '+subj:'Verified: '+subj;
+              }
+              const body=passInfo.panel.querySelector('.ltp-body');
+              if(body){body.style.maxHeight='0';body.style.padding='0';}
+            }
+            if(pNum===1&&_isExtended){
+              // Clear the streamed response so pass 2 can replace it
+              fullText='';
+              const respArea=contentEl.querySelector('.stream-response-area');
+              if(respArea)respArea.remove();
+            }
+            _thinkingPass=pNum+1;
+          }else if(data.type==='thinking_pass_start'){
+            _lastMeaningfulEvent=Date.now();
+            const pNum=data.pass||2;
+            console.log(`[gyro] thinking pass ${pNum} starting: ${data.label||''}`);
+            _thinkingPass=pNum;
+            isThinking=true;
+            ensureThinkPanel(pNum);
+            _autoScroll();
+          }else if(data.type==='extended_response'){
+            _lastMeaningfulEvent=Date.now();
+            // Replace full text with the refined response from pass 2
+            fullText=data.text;
+            if(canRender()){
+              // Close pass 2 thinking panel
+              if(_thinkPasses[2]&&_thinkPasses[2].panel){
+                const p2=_thinkPasses[2].panel;
+                p2.classList.add('ltp-done','ltp-collapsed');
+                const dots=p2.querySelector('.ltp-dots');
+                if(dots)dots.remove();
+                const body=p2.querySelector('.ltp-body');
+                if(body){body.style.maxHeight='0';body.style.padding='0';}
+              }
+              isThinking=false;
+              // Ensure response area exists
+              let respDiv=contentEl.querySelector('.stream-response-area');
+              if(!respDiv){
+                respDiv=document.createElement('div');
+                respDiv.className='stream-response-area';
+                contentEl.appendChild(respDiv);
+              }
+              if(devRawMode){
+                respDiv.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'</pre>';
+              }else{
+                respDiv.innerHTML=fmtLive(fullText);
+                renderMathInElementSafe(respDiv);
               }
               _autoScroll();
             }
@@ -4447,15 +4732,15 @@ async function sendMessage(opts){
             clearInterval(_stallTimer);
             // Immediately mark chat as not running so UI updates (stop button → send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
-            // Collapse live thinking panel if present
-            if(thinkPanel){
-              thinkPanel.classList.add('ltp-done');
-              if(!thinkPanel.classList.contains('ltp-collapsed'))thinkPanel.classList.add('ltp-collapsed');
-              const dotsEl=thinkPanel.querySelector('.ltp-dots');
+            // Collapse ALL live thinking panels
+            contentEl.querySelectorAll('.live-think-panel').forEach(p=>{
+              p.classList.add('ltp-done');
+              if(!p.classList.contains('ltp-collapsed'))p.classList.add('ltp-collapsed');
+              const dotsEl=p.querySelector('.ltp-dots');
               if(dotsEl)dotsEl.remove();
-              const body=thinkPanel.querySelector('.ltp-body');
+              const body=p.querySelector('.ltp-body');
               if(body){body.style.maxHeight='0';body.style.padding='0';}
-            }
+            });
             // Remove ALL thinking/loading indicators
             contentEl.querySelectorAll('.think-active,.live-think-panel:not(.ltp-done),.thinking').forEach(el=>{
               el.classList.add('ltp-done');
@@ -4473,8 +4758,11 @@ async function sendMessage(opts){
             }
             // Always strip thinking tags from display reply
             displayReply=displayReply.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'').replace(/<<<\/?THINKING\/?>>>/g,'').replace(/<<<\/?END_THINKING\/?>>>/g,'').trim();
-            // Render think block from live stream or from reply
-            if(thinkText){
+            // Render think blocks — multiple passes for extended mode
+            if(_isExtended&&(thinkText||_pass2ThinkText)){
+              if(thinkText)finalHTML+=renderThinkBlock(thinkText,{pass:1,label:'Pass 1: Initial Analysis'});
+              if(_pass2ThinkText)finalHTML+=renderThinkBlock(_pass2ThinkText,{pass:2,label:'Pass 2: Verification & Refinement'});
+            }else if(thinkText){
               finalHTML+=renderThinkBlock(thinkText);
             } else if(_replyThinkText){
               finalHTML+=renderThinkBlock(_replyThinkText);
@@ -4595,7 +4883,9 @@ async function sendMessage(opts){
             if(!devRawMode&&data.generated_images?.length){
               for(const gi of data.generated_images){
                 const giPrompt=esc(gi.prompt);
-                const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
+                const giWsPath=gi.workspace_path||'';
+                const giSaved=giWsPath?`<span class="img-gen-saved" title="Saved to ${esc(giWsPath)}">💾 Saved to workspace</span>`:'';
+                const genHTML=`<div class="img-gen-result"${giWsPath?` data-workspace-path="${esc(giWsPath)}"`:''}><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div>${giSaved}<button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
                 const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
                 const before=finalHTML;
                 finalHTML=finalHTML.replace(re,genHTML);
@@ -4831,7 +5121,9 @@ async function sendMessage(opts){
               // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
               const safePrompt=esc(data.image.prompt);
-              const html=`<div class="img-gen-result">`
+              const wsPath=data.image.workspace_path||'';
+              const savedBadge=wsPath?`<span class="img-gen-saved" title="Saved to ${esc(wsPath)}">💾 Saved to workspace</span>`:'';
+              const html=`<div class="img-gen-result"${wsPath?` data-workspace-path="${esc(wsPath)}"`:''}>`
                 +`<div class="img-gen-header">`
                 +`<span class="img-gen-icon">🎨</span>`
                 +`<span class="img-gen-title">Generated Image</span>`
@@ -4842,6 +5134,7 @@ async function sendMessage(opts){
                 +`<img src="${data.image.url}" alt="${safePrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')">`
                 +`<div class="img-gen-footer">`
                 +`<div class="img-gen-prompt">${safePrompt}</div>`
+                +savedBadge
                 +`<button class="img-gen-dl-full" onclick="downloadGenFromEl(this)">`
                 +`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
                 +` Download PNG</button>`
@@ -5042,6 +5335,7 @@ async function sendMessage(opts){
     }
   }catch(e){
     if(e.name==='AbortError'){
+      clearInterval(_stallTimer);
       stopThinkingPhrases();
       if(canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
     }else{
@@ -5061,6 +5355,7 @@ async function sendMessage(opts){
       if(canRender())contentEl.innerHTML=`<div style="color:var(--red)">Connection error: ${esc(errDetail)}${retryHint}<br><small>Your network may be blocking streaming responses. Try refreshing the page.</small></div>`;
     }
   }finally{
+    clearInterval(_stallTimer);
     // ── Handle stream ending without a done event (connection drop, timeout, etc.) ──
     if(!_doneReceived&&canRender()){
       stopThinkingPhrases();
@@ -5084,8 +5379,17 @@ async function sendMessage(opts){
         recoveryHTML+='<div style="color:var(--text-muted);font-style:italic;padding:8px 0">Response was interrupted. Try sending your message again.</div>';
       }
       contentEl.innerHTML=recoveryHTML;
+      // Remove all streaming indicators — cursors, executing status, active dots
       contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
-      setStatus('Response interrupted — try again.');
+      contentEl.querySelectorAll('.stream-code-exec-status').forEach(el=>el.remove());
+      contentEl.querySelectorAll('.think-active').forEach(el=>el.remove());
+      contentEl.querySelectorAll('.dots').forEach(el=>el.remove());
+      // Change "Writing ... code..." headers to "Code (stopped)"
+      contentEl.querySelectorAll('.stream-code-exec-header').forEach(el=>{
+        if(el.textContent.includes('Writing'))el.innerHTML='<span class="sp-icon">⚙️</span> Code (stopped)';
+        else if(el.textContent.includes('Running'))el.innerHTML='<span class="sp-icon">⚙️</span> Code (stopped)';
+      });
+      setStatus('Generation stopped.');
     }
     const cur=runningStreams.get(targetChatId);
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
@@ -5103,7 +5407,10 @@ function _fmtThink(raw){
   return t;
 }
 
-function renderThinkBlock(thinkText){
+function renderThinkBlock(thinkText,opts){
+  opts=opts||{};
+  const passNum=opts.pass||0;
+  const passLabel=opts.label||'';
   const lines=thinkText.split('\n').filter(l=>l.trim());
   // Use last meaningful line as the summary topic
   let summary='your question';
@@ -5114,8 +5421,14 @@ function renderThinkBlock(thinkText){
       break;
     }
   }
-  return `<div class="think-block" onclick="this.classList.toggle('expanded')">
-    <div class="think-header"><span>💭</span> <span>Thought about ${esc(summary)}</span> <span class="think-chevron">▾</span></div>
+  const icon=passNum===2?'🔍':'💭';
+  const prefix=passNum===2?'Verified: ':passNum===1?'Thought about ':'Thought about ';
+  const passBadge=passLabel?`<span class="think-pass-tag">${esc(passLabel)}</span>`:'';
+  const passClass=passNum?` think-pass-${passNum}`:'';
+  const blockId='_thkblk'+Math.random().toString(36).slice(2,8);
+  setTimeout(()=>{const el=document.getElementById(blockId);if(el)renderMathInElementSafe(el);},0);
+  return `<div class="think-block${passClass}" id="${blockId}" onclick="this.classList.toggle('expanded')">
+    <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">▾</span></div>
     <div class="think-content">${_fmtThink(thinkText)}</div>
   </div>`;
 }
@@ -5254,7 +5567,9 @@ function addMsg(role,text,files,extra={}){
   if(!devRawMode&&extra.generated_images?.length){
     for(const gi of extra.generated_images){
       const giUrl=esc(gi.url);const giPrompt=esc(gi.prompt);
-      const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenImage('${giUrl}','${giPrompt}')" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${giUrl}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenImage('${giUrl}','${giPrompt}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
+      const giWsPath=gi.workspace_path||'';
+      const giSaved=giWsPath?`<span class="img-gen-saved" title="Saved to ${esc(giWsPath)}">💾 Saved to workspace</span>`:'';
+      const genHTML=`<div class="img-gen-result"${giWsPath?` data-workspace-path="${esc(giWsPath)}"`:''}><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenImage('${giUrl}','${giPrompt}')" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${giUrl}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div>${giSaved}<button class="img-gen-dl-full" onclick="downloadGenImage('${giUrl}','${giPrompt}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
       const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
       const before=html;
       html=html.replace(re,genHTML);
@@ -5453,7 +5768,7 @@ function addMsg(role,text,files,extra={}){
 
 function addThinking(){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
-  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div> gyro is thinking...';
+  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div>';
   area.appendChild(div);area.scrollTop=area.scrollHeight;return div;
 }
 
@@ -5727,6 +6042,7 @@ function addSubtask(listId,parentId){
 function fmt(text){
   if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
   t=t.replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'');
+  t=t.replace(/<<<SILENT_VERIFY:\s*\w+>>>[\s\S]*?<<<END_SILENT_VERIFY>>>/g,'');
   t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
   // Timeline blocks: ```timeline\ndate | title | description\n```
@@ -6299,6 +6615,21 @@ async function refreshFileBrowser(){
   refreshWorkspaceFiles();
   refreshChatFiles();
 }
+function _fbFileIcon(ext){
+  const icons={
+    md:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
+    txt:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
+    json:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#e6a700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M10 12l-2 2 2 2"/><path d="M14 12l2 2-2 2"/></svg>`,
+    png:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
+    pdf:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
+    yaml:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="11" y2="13"/><line x1="8" y1="17" x2="14" y2="17"/></svg>`,
+  };
+  icons.yml=icons.yaml;icons.jpg=icons.png;icons.jpeg=icons.png;icons.gif=icons.png;icons.webp=icons.png;icons.svg=icons.png;icons.bmp=icons.png;icons.ico=icons.png;
+  return icons[ext]||icons.txt;
+}
+function _fbFolderIcon(){
+  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+}
 async function refreshWorkspaceFiles(){
   const el=document.getElementById('fbWorkspace');
   if(!el)return;
@@ -6306,22 +6637,48 @@ async function refreshWorkspaceFiles(){
     const r=await fetch('/api/user-files');
     const d=await r.json();
     const files=d.files||[];
-    if(!files.length){el.innerHTML='<div class="fb-empty">No files yet. The AI will create files here as you work.</div>';return;}
+    if(!files.length){el.innerHTML='<div class="fb-empty"><div class="fb-empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" opacity=".4"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>No workspace files yet<br><span style="opacity:.6">Files created by the AI will appear here</span></div>';return;}
     const folders={};
     files.forEach(f=>{const fld=f.folder||'';if(!folders[fld])folders[fld]=[];folders[fld].push(f);});
+    // Sort files within each folder by name
+    Object.values(folders).forEach(arr=>arr.sort((a,b)=>a.name.localeCompare(b.name)));
     let html='';
-    const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
-    for(const fld of sortedFolders){
-      if(!folders[fld])continue;
-      if(fld){
-        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon" style="color:var(--accent)">▸</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
-      }
-      for(const f of folders[fld]){
+    // Root files first
+    if(folders['']){
+      for(const f of folders['']){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
-        const icon=ext==='md'?'◆':ext==='json'?'◇':ext==='txt'?'▪':ext==='yaml'||ext==='yml'?'▫':'▪';
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">${icon}</span><span class="fb-file-name">${esc(f.name)}</span><span class="fb-file-size">${formatFileSize(f.size)}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete">✕</button></div>`;
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
+          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
+          +`<span class="fb-file-name">${esc(f.name)}</span>`
+          +`<span class="fb-file-ext">.${esc(ext)}</span>`
+          +`<span class="fb-file-size">${formatFileSize(f.size)}</span>`
+          +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
+          +`</div>`;
       }
-      if(fld)html+=`</div></div>`;
+    }
+    // Then folders
+    const sortedFolders=Object.keys(folders).filter(f=>f).sort();
+    for(const fld of sortedFolders){
+      const items=folders[fld];
+      html+=`<div class="fb-folder">`
+        +`<div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')">`
+        +`<span class="fb-folder-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`
+        +`<span class="fb-folder-icon">${_fbFolderIcon()}</span>`
+        +`<span class="fb-folder-name">${esc(fld)}</span>`
+        +`<span class="fb-folder-count">${items.length}</span>`
+        +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
+        +`</div><div class="fb-folder-body">`;
+      for(const f of items){
+        const ext=(f.name.split('.').pop()||'').toLowerCase();
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
+          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
+          +`<span class="fb-file-name">${esc(f.name)}</span>`
+          +`<span class="fb-file-ext">.${esc(ext)}</span>`
+          +`<span class="fb-file-size">${formatFileSize(f.size)}</span>`
+          +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
+          +`</div>`;
+      }
+      html+=`</div></div>`;
     }
     el.innerHTML=html;
   }catch{el.innerHTML='<div class="fb-empty">Could not load files.</div>';}
@@ -6348,13 +6705,23 @@ async function refreshChatFiles(){
       html+='<div class="fb-section-title">Generated Files</div>';
       for(const f of genFiles){
         const name=f.path.split('/').pop()||f.path;
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">◆</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
+        const ext=(name.split('.').pop()||'').toLowerCase();
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
+          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
+          +`<span class="fb-file-name">${esc(name)}</span>`
+          +`<span class="fb-file-ext">${esc(f.action)}</span>`
+          +`</div>`;
       }
     }
     if(uploads.length){
       html+='<div class="fb-section-title">Uploaded Files</div>';
       for(const u of uploads){
-        html+=`<div class="fb-file"><span class="fb-file-icon">▪</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
+        const uext=(u.name.split('.').pop()||'').toLowerCase();
+        html+=`<div class="fb-file">`
+          +`<span class="fb-file-icon">${_fbFileIcon(uext)}</span>`
+          +`<span class="fb-file-name">${esc(u.name)}</span>`
+          +`<span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span>`
+          +`</div>`;
       }
     }
     if(!html)html='<div class="fb-empty">No files in this chat yet.</div>';
@@ -6512,11 +6879,230 @@ document.addEventListener('DOMContentLoaded',()=>{
   }));
 });
 
-// ─── Voice (stub) ─────────────────────────────────
+// ─── Voice Recording & Transcription ──────────────
+let _voiceRecording = false;
+let _voiceMediaRecorder = null;
+let _voiceChunks = [];
+let _voiceTranscript = '';
+
 function toggleTTS(){}
 function speak(){}
-function toggleMic(){}
-function closeOrb(){}
+
+function toggleMic() {
+  if (_voiceRecording) {
+    stopVoiceRecording();
+  } else {
+    startVoiceRecording();
+  }
+}
+
+async function startVoiceRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _voiceChunks = [];
+    _voiceTranscript = '';
+    // Use webm for broad browser support
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+    _voiceMediaRecorder = new MediaRecorder(stream, { mimeType });
+    _voiceMediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) _voiceChunks.push(e.data);
+    };
+    _voiceMediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      handleVoiceRecordingDone();
+    };
+    _voiceMediaRecorder.start(250); // collect chunks every 250ms
+    _voiceRecording = true;
+    // Open orb overlay
+    const orbOv = document.getElementById('orbOv');
+    const orb = document.getElementById('orb');
+    const orbLbl = document.getElementById('orbLbl');
+    const orbTxt = document.getElementById('orbTxt');
+    const orbActions = document.getElementById('orbActions');
+    const orbStatus = document.getElementById('orbStatus');
+    orbOv.classList.add('open');
+    orb.className = 'orb listening';
+    orbLbl.textContent = 'LISTENING';
+    orbTxt.textContent = 'Recording... tap the orb to stop';
+    orbActions.style.display = 'none';
+    orbStatus.textContent = '';
+    // Mic button pulse
+    const btn = document.getElementById('btnMic');
+    if (btn) btn.classList.add('recording');
+    // Tap orb to stop
+    orb.onclick = () => stopVoiceRecording();
+  } catch (err) {
+    console.error('Mic access denied:', err);
+    showToast('Microphone access denied', 'error');
+  }
+}
+
+function stopVoiceRecording() {
+  if (_voiceMediaRecorder && _voiceMediaRecorder.state !== 'inactive') {
+    _voiceMediaRecorder.stop();
+  }
+  _voiceRecording = false;
+  const btn = document.getElementById('btnMic');
+  if (btn) btn.classList.remove('recording');
+  const orb = document.getElementById('orb');
+  orb.className = 'orb thinking';
+  document.getElementById('orbLbl').textContent = 'TRANSCRIBING';
+  document.getElementById('orbTxt').textContent = 'Processing audio...';
+  orb.onclick = null;
+}
+
+async function handleVoiceRecordingDone() {
+  if (_voiceChunks.length === 0) {
+    closeOrb();
+    return;
+  }
+  const blob = new Blob(_voiceChunks, { type: _voiceMediaRecorder.mimeType || 'audio/webm' });
+  if (blob.size < 100) {
+    closeOrb();
+    showToast('Recording too short', 'error');
+    return;
+  }
+  // Send to server for transcription
+  const formData = new FormData();
+  formData.append('audio', blob, 'voice.webm');
+  try {
+    const resp = await fetch('/api/voice/transcribe', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('orbTxt').textContent = data.error;
+      document.getElementById('orbLbl').textContent = 'ERROR';
+      document.getElementById('orb').className = 'orb';
+      setTimeout(() => closeOrb(), 2000);
+      return;
+    }
+    _voiceTranscript = data.text || '';
+    // Show transcript and action buttons
+    document.getElementById('orb').className = 'orb';
+    document.getElementById('orbLbl').textContent = 'TRANSCRIBED';
+    document.getElementById('orbTxt').textContent = _voiceTranscript;
+    document.getElementById('orbActions').style.display = 'flex';
+  } catch (err) {
+    document.getElementById('orbTxt').textContent = 'Transcription failed';
+    document.getElementById('orb').className = 'orb';
+    setTimeout(() => closeOrb(), 2000);
+  }
+}
+
+function voiceSendAsChat() {
+  if (!_voiceTranscript) return;
+  const input = document.getElementById('msgInput');
+  input.value = _voiceTranscript;
+  autoResize(input);
+  closeOrb();
+  sendMessage();
+}
+
+async function voiceSaveNote() {
+  if (!_voiceTranscript) return;
+  const orbStatus = document.getElementById('orbStatus');
+  orbStatus.textContent = 'Routing to workspace...';
+  document.getElementById('orbActions').style.display = 'none';
+  try {
+    const resp = await fetch('/api/voice/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: _voiceTranscript }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      orbStatus.textContent = 'Error: ' + data.error;
+      setTimeout(() => closeOrb(), 2500);
+      return;
+    }
+    orbStatus.textContent = `✓ Saved to ${data.target_file}`;
+    showToast(`Voice note saved to ${data.target_file}`, 'success');
+    setTimeout(() => closeOrb(), 1800);
+  } catch (err) {
+    orbStatus.textContent = 'Failed to save';
+    setTimeout(() => closeOrb(), 2000);
+  }
+}
+
+function closeOrb() {
+  const orbOv = document.getElementById('orbOv');
+  orbOv.classList.remove('open');
+  // Clean up recording if still active
+  if (_voiceRecording) {
+    _voiceRecording = false;
+    if (_voiceMediaRecorder && _voiceMediaRecorder.state !== 'inactive') {
+      _voiceMediaRecorder.stop();
+    }
+    const btn = document.getElementById('btnMic');
+    if (btn) btn.classList.remove('recording');
+  }
+  _voiceTranscript = '';
+  _voiceChunks = [];
+}
+
+// ─── Momentum Dashboard ──────────────────────────
+async function openMomentumDashboard() {
+  const state = loadProductivityState();
+  const todos = state.todos || [];
+  try {
+    const resp = await fetch('/api/momentum', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ todos }),
+    });
+    const data = await resp.json();
+    if (data.error) { showToast(data.error, 'error'); return; }
+    // Render as a full-page modal-style overlay
+    let html = `<div class="momentum-dash-inner">`;
+    html += `<div class="momentum-dash-header"><h2>Momentum Dashboard</h2><button class="momentum-dash-close" onclick="this.closest('.momentum-dash').remove()">✕</button></div>`;
+    // Score hero
+    const verdictIcons = { on_fire: '🔥', steady: '⚡', slowing: '🐢', stalled: '❄️' };
+    const verdictColors = { on_fire: 'var(--green)', steady: 'var(--accent)', slowing: 'var(--yellow, #e6a700)', stalled: 'var(--red)' };
+    const icon = verdictIcons[data.verdict] || '⚡';
+    const color = verdictColors[data.verdict] || 'var(--accent)';
+    const pct = Math.min(100, Math.max(0, data.score || 0));
+    const circ = 2 * Math.PI * 54;
+    const off = circ * (1 - pct / 100);
+    html += `<div class="momentum-hero">`
+      + `<div class="momentum-ring-lg">`
+      + `<svg viewBox="0 0 120 120" width="120" height="120">`
+      + `<circle cx="60" cy="60" r="54" fill="none" stroke="var(--border-subtle)" stroke-width="8"/>`
+      + `<circle cx="60" cy="60" r="54" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${off}" transform="rotate(-90 60 60)"/>`
+      + `</svg><div class="momentum-ring-label">${icon}<br><span>${pct}</span></div></div>`
+      + `<div class="momentum-verdict">${esc(data.verdict_text || '')}</div>`
+      + `<div class="momentum-stats-row">`
+      + `<div class="momentum-stat-card"><div class="msc-num" style="color:var(--green)">${data.done || 0}</div><div class="msc-label">Completed</div></div>`
+      + `<div class="momentum-stat-card"><div class="msc-num" style="color:var(--yellow, #e6a700)">${data.pending || 0}</div><div class="msc-label">Pending</div></div>`
+      + `<div class="momentum-stat-card"><div class="msc-num">${data.completion_rate || 0}%</div><div class="msc-label">Rate</div></div>`
+      + `</div></div>`;
+    // Timeline
+    if (data.timeline && data.timeline.length) {
+      const maxC = Math.max(1, ...data.timeline.map(t => t.chats || 0));
+      const bars = data.timeline.map(t => {
+        const h = Math.max(4, ((t.chats || 0) / maxC) * 60);
+        return `<div class="md-bar-col"><div class="md-bar" style="height:${h}px;background:${color}"></div><div class="md-bar-lbl">${esc(t.label || '')}</div></div>`;
+      }).join('');
+      html += `<div class="momentum-section"><h3>7-Day Activity</h3><div class="md-bars">${bars}</div></div>`;
+    }
+    // Friction
+    if (data.friction_points && data.friction_points.length) {
+      const fp = data.friction_points.map(f =>
+        `<div class="md-friction-item"><div class="md-friction-name">${esc(f.name || '')} — <span class="md-friction-idle">${f.days_idle || '?'}d idle</span></div><div class="md-friction-starter">${esc(f.starter || '')}</div></div>`
+      ).join('');
+      html += `<div class="momentum-section"><h3>Friction Points</h3>${fp}</div>`;
+    }
+    html += `</div>`;
+    // Remove existing dashboard if open
+    const existing = document.querySelector('.momentum-dash');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'momentum-dash';
+    overlay.innerHTML = html;
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  } catch (err) {
+    showToast('Failed to load momentum data', 'error');
+  }
+}
 
 // ─── Guest Limit (stub) ───────────────────────────
 function showGuestLimit(){}
@@ -6640,9 +7226,7 @@ async function refreshCanvasFiles(){
       if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ ${esc(fld)}</div><div>`;
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
-        const isImg=['png','jpg','jpeg','gif','webp','svg','bmp','ico'].includes(ext);
-        const icon=isImg?'🖼':ext==='md'?'◆':ext==='pdf'?'📄':'▪';
-        html+=`<div class="cfp-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="cfp-icon">${icon}</span><span class="cfp-name">${esc(f.name)}</span></div>`;
+        html+=`<div class="cfp-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="cfp-icon">${_fbFileIcon(ext)}</span><span class="cfp-name">${esc(f.name)}</span></div>`;
       }
       if(fld) html+='</div>';
     }
