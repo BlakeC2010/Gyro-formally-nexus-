@@ -7116,7 +7116,7 @@ def enhance_folder_instructions():
             f"User's description:\n{instructions}"
         )
         r = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-flash-lite-latest",
             contents=prompt,
         )
         enhanced = r.text.strip() if r.text else ""
@@ -7372,7 +7372,7 @@ def voice_transcribe():
         client = genai.Client(api_key=api_key)
         audio_b64 = base64.b64encode(audio_bytes).decode()
         resp = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-flash-lite-latest",
             contents=[{
                 "role": "user",
                 "parts": [
