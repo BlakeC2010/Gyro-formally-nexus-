@@ -7094,16 +7094,16 @@ def gen_image():
 
 
 @app.route("/api/folders/enhance-instructions", methods=["POST"])
-@require_auth
+@require_auth_or_guest
 def enhance_folder_instructions():
     d = request.get_json() or {}
     instructions = (d.get("instructions") or "").strip()
     if not instructions:
         return jsonify({"error": "No instructions provided."}), 400
-    settings = load_settings()
-    api_key = settings.get("keys", {}).get("google", "")
+    settings = load_settings() if session.get("user_id") else {"keys": {}}
+    api_key = settings.get("keys", {}).get("google", "") or _load_server_key("google")
     if not api_key:
-        return jsonify({"error": "Google API key required."}), 400
+        return jsonify({"error": "No API key available."}), 400
     try:
         genai, types = _import_google()
         client = genai.Client(api_key=api_key)

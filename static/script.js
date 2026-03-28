@@ -1160,54 +1160,51 @@ function openFolderView(folder){
   const meta=getFolderMeta(folder);
   const fIcon=meta.emoji||'📁';
   const instructions=meta.instructions||'';
+  const ef=esc(folder).replace(/'/g,"\\'");
+
+  // Prompt-style action cards (same grid as main homepage)
+  const actionCards=`
+    <div class="wl-action-card" onclick="createChat('${ef}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation</span></div>
+    <div class="wl-action-card" onclick="customizeFolder('${ef}')"><span class="wl-ac-icon">⚙️</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Icon, name & instructions</span></div>
+    <div class="wl-action-card" onclick="renameFolderFromView('${ef}')"><span class="wl-ac-icon">✏️</span><span class="wl-ac-label">Rename</span><span class="wl-ac-sub">Change folder name</span></div>
+    <div class="wl-action-card" onclick="deleteFolderAndChats('${ef}')"><span class="wl-ac-icon" style="color:var(--red)">🗑</span><span class="wl-ac-label">Delete</span><span class="wl-ac-sub">Remove folder & chats</span></div>`;
+
+  // Build data widgets
+  const widgets=[];
 
   // Recent chats widget
-  const recentChats=chats.slice(0,6);
-  const chatListHtml=recentChats.length?recentChats.map(c=>{
-    const msgCount=c.messages?.length||0;
-    const preview=msgCount?`${msgCount} message${msgCount!==1?'s':''}`:'Empty chat';
-    return `<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
-      +`<span class="fv-chat-icon">💬</span>`
-      +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${preview}</div></div>`
-      +`<span class="fv-chat-arrow">→</span></div>`;
-  }).join('')
-    :'<div class="fv-empty">No chats yet. Start one below.</div>';
+  if(chats.length){
+    const items=chats.slice(0,4).map(c=>({id:c.id,title:c.title||'Untitled'}));
+    widgets.push(renderHomeWidget({type:'recent',size:'medium',title:`Chats (${chats.length})`,items}));
+  }
 
-  // Build folder-specific todo widget from chats
+  // Folder instructions preview widget
+  if(instructions){
+    widgets.push(renderHomeWidget({type:'motivation',size:'medium',title:'Custom Instructions',text:instructions.length>200?instructions.slice(0,200)+'…':instructions}));
+  }
+
+  // Folder-specific todo widget
   const state=loadProductivityState();
   const allTodos=(state.todos||[]).filter(t=>!t.done);
   const folderTodos=allTodos.filter(t=>{
     const chatId=(t.id||'').split('_')[1]||'';
     return chats.some(c=>c.id===chatId);
   }).slice(0,5);
-  const todoWidget=folderTodos.length?renderHomeWidget({type:'todos',size:'medium',title:'Folder Tasks',items:folderTodos}):'';
+  if(folderTodos.length){
+    widgets.push(renderHomeWidget({type:'todos',size:'medium',title:'Folder Tasks',items:folderTodos}));
+  }
 
-  // Quick actions for this folder
-  const quickActions=`<div class="wl-action-grid">
-    <div class="wl-action-card" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation in this folder</span></div>
-    <div class="wl-action-card" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')"><span class="wl-ac-icon">⚙</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Customize icon, instructions</span></div>
-  </div>`;
+  const dataSection=widgets.length?`<div class="wl-data-section"><div class="wl-section-label">Folder overview</div><div class="wl-grid">${widgets.join('')}</div></div>`:'';
 
-  // Folder instructions preview
-  const instrPreview=instructions?`<div class="wl-widget wl-size-medium"><div class="wl-widget-hd">Custom Instructions</div><div class="wl-focus-copy" style="font-size:12px;opacity:.8">${esc(instructions.length>200?instructions.slice(0,200)+'…':instructions)}</div></div>`:'';
-
-  area.innerHTML=`<div class="folder-view">
-    <div class="fv-hero">
-      <div class="fv-hero-icon" style="background:var(--accent-dim);color:var(--accent)">${fIcon}</div>
-      <h1 class="fv-title">${esc(folder)}</h1>
-      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}${instructions?' · Custom instructions active':''}</p>
+  area.innerHTML=`<div class="welcome">
+    <div class="wl-hero">
+      <h1 class="welcome-greeting">${fIcon} ${esc(folder)}</h1>
+      <p class="welcome-sub">${chats.length} chat${chats.length!==1?'s':''}${instructions?' · Custom instructions active':''}</p>
     </div>
-    <div class="fv-actions">
-      <button class="fv-action-btn fv-action-primary" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New Chat
-      </button>
-      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">⚙ Settings</button>
-      <button class="fv-action-btn fv-action-danger" onclick="deleteFolderAndChats('${esc(folder).replace(/'/g,"\\'")}')">🗑 Delete</button>
+    <div class="wl-prompts-section">
+      <div class="wl-prompts-grid">${actionCards}</div>
     </div>
-    ${instrPreview||todoWidget?`<div class="wl-data-section" style="width:100%;margin-bottom:20px"><div class="wl-grid">${instrPreview}${todoWidget}</div></div>`:''}
-    <div style="width:100%;margin-bottom:16px"><div class="wl-widget-hd" style="padding:0 4px">${chats.length>6?`Recent Chats (${chats.length} total)`:'Chats'}</div></div>
-    <div class="fv-chat-list">${chatListHtml}</div>
+    ${dataSection}
   </div>`;
   renderChatList();
 }
@@ -1308,17 +1305,16 @@ function _custHandleFile(input){
 async function _custEnhanceInstructions(btn){
   const textarea=document.getElementById('fvCustInstructions');
   const text=textarea?.value?.trim();
-  if(!text){showToast('Write some instructions first','info');return;}
+  if(!text){btn.textContent='⚠ Write instructions first';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);return;}
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span> Enhancing...';
   try{
     const r=await apiFetch('/api/folders/enhance-instructions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instructions:text})});
     const d=await r.json();
-    if(d.enhanced){textarea.value=d.enhanced;showToast('Instructions enhanced','success');}
-    else{showToast(d.error||'Enhancement failed','error');}
-  }catch{showToast('Enhancement failed','error');}
+    if(d.enhanced){textarea.value=d.enhanced;btn.innerHTML='<span>✓</span> Enhanced!';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);}
+    else{btn.textContent='⚠ '+(d.error||'Enhancement failed');setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
+  }catch{btn.textContent='⚠ Enhancement failed';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
   btn.disabled=false;
-  btn.innerHTML='<span>✨</span> Enhance with AI';
 }
 
 async function saveFolderCustomize(btn){
