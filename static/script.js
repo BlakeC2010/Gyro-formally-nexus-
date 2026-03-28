@@ -176,19 +176,13 @@ function stopStreaming(){
 
 function editMsg(btn){
   const msgEl=btn.closest('.msg');
+  if(msgEl.querySelector('.msg-edit-area'))return; // already editing
   const originalText=msgEl.dataset.text||'';
 
-  const area=document.getElementById('chatArea');
-  const allMsgs=[...area.querySelectorAll('.msg')];
+  // Save original innerHTML so we can restore on cancel
+  const originalHTML=msgEl.innerHTML;
 
-  // Count backend index for truncation
-  let backendIndex=0;
-  for(let i=0;i<allMsgs.length;i++){
-    if(allMsgs[i]===msgEl)break;
-    if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
-  }
-
-  // Extract existing file data from the message's image previews
+  // Extract existing file data from the message's image previews so we can preserve them
   const _editFiles=[];
   const filesEl=msgEl.querySelector('.msg-user-files');
   if(filesEl){
@@ -204,60 +198,135 @@ function editMsg(btn){
     });
   }
 
-  // Store edit state globally so sendMessage can use it
-  window._editTruncateAt=backendIndex;
-  window._editMsgEl=msgEl;
-  window._editAllMsgs=allMsgs;
-  window._editFiles=_editFiles;
+  // Find the text content area — could be a .upf-full pre, or direct text node, etc.
+  // We'll overlay an edit UI on the message itself
+  const area=document.getElementById('chatArea');
+  const allMsgs=[...area.querySelectorAll('.msg')];
 
-  // Populate the main prompt bar
-  const input=document.getElementById('msgInput');
-  input.value=originalText;
-  autoResize(input);
-  input.focus();
-
-  // Re-attach any files from the original message
-  if(_editFiles.length){
-    pendingFiles.push(..._editFiles);
-    renderPF();
+  // Count backend index for truncation
+  let backendIndex=0;
+  for(let i=0;i<allMsgs.length;i++){
+    if(allMsgs[i]===msgEl)break;
+    if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
   }
 
-  // Show edit mode banner
-  let banner=document.getElementById('editModeBanner');
-  if(!banner){
-    banner=document.createElement('div');
-    banner.id='editModeBanner';
-    banner.className='edit-mode-banner';
-    const inputArea=document.querySelector('.input-area');
-    inputArea.insertBefore(banner,inputArea.firstChild);
-  }
-  const preview=originalText.length>80?originalText.slice(0,80)+'…':originalText;
-  banner.innerHTML=`<span class="edit-banner-icon">✎</span><span class="edit-banner-text">Editing message</span><span class="edit-banner-preview">${esc(preview)}</span><button class="edit-banner-cancel" onclick="cancelEditMode()">✕ Cancel</button>`;
-  banner.style.display='flex';
-  document.querySelector('.input-area').classList.add('edit-mode');
-}
+  // Build file preview chips for existing files
+  const _editFileChips=()=>_editFiles.map((f,i)=>{
+    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:'📄';
+    return `<div class="file-chip">${t} ${esc(f.name)} <button class="fc-x" onclick="window._editRemoveFile(${i})">✕</button></div>`;
+  }).join('');
 
-function cancelEditMode(){
-  const banner=document.getElementById('editModeBanner');
-  if(banner)banner.style.display='none';
-  document.querySelector('.input-area').classList.remove('edit-mode');
-  // Clear the prompt bar
-  const input=document.getElementById('msgInput');
-  input.value='';
-  autoResize(input);
-  // Remove any files we added from the edit
-  if(window._editFiles){
-    for(const ef of window._editFiles){
-      const idx=pendingFiles.indexOf(ef);
-      if(idx>=0)pendingFiles.splice(idx,1);
+  // Render the edit UI with file preview, file/tool buttons, and textarea
+  const filesHTML=`<div class="file-preview" id="_editFilePreview">${_editFileChips()}</div>`;
+
+  msgEl.innerHTML=filesHTML+
+    `<div class="msg-edit-area">`+
+    `<textarea class="msg-edit-input" id="_msgEditInput">${esc(originalText)}</textarea>`+
+    `<div class="msg-edit-toolbar">`+
+    `<button class="msg-edit-tool-btn" onclick="document.getElementById('_editFileInput').click()" title="Attach file">📎</button>`+
+    `<input type="file" id="_editFileInput" multiple style="display:none" onchange="window._editHandleFiles(this)">`+
+    `<button class="msg-edit-tool-btn" onclick="window._editToggleToolMenu()" title="Tools">🔧</button>`+
+    `<div class="msg-edit-tool-menu" id="_editToolMenu" style="display:none">`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('canvas');window._editCloseToolMenu()">✏️ Canvas</div>`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('search');window._editCloseToolMenu()">🔍 Google Search</div>`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('research');window._editCloseToolMenu()">🔬 Research Agent</div>`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('code');window._editCloseToolMenu()">💻 Code Execution</div>`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('imagegen');window._editCloseToolMenu()">🎨 Image Generation</div>`+
+    `</div>`+
+    `</div>`+
+    `<div class="msg-edit-actions">`+
+    `<button class="msg-edit-save" id="_msgEditSave">Send Edit</button>`+
+    `<button class="msg-edit-cancel" id="_msgEditCancel">Cancel</button>`+
+    `</div></div>`;
+
+  // Edit file management functions
+  window._editRemoveFile=(idx)=>{
+    _editFiles.splice(idx,1);
+    const el=document.getElementById('_editFilePreview');
+    if(el)el.innerHTML=_editFileChips();
+  };
+  window._editHandleFiles=(input)=>{
+    for(const origFile of input.files){
+      const placeholderIdx=_editFiles.length;
+      _editFiles.push({name:origFile.name,mime:origFile.type||'application/octet-stream',data:'',text:'',doc_data:'',_loading:true});
+      const el=document.getElementById('_editFilePreview');
+      if(el)el.innerHTML=_editFileChips();
+      _convertImageToPng(origFile).then(file=>{
+        const form=new FormData();form.append('file',file);
+        fetch('/api/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
+          const ph=_editFiles.find(f=>f._loading&&f.name===origFile.name);
+          if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
+          const el2=document.getElementById('_editFilePreview');
+          if(el2)el2.innerHTML=_editFileChips();
+        }).catch(()=>{
+          const pi=_editFiles.findIndex(f=>f._loading&&f.name===origFile.name);
+          if(pi>=0)_editFiles.splice(pi,1);
+          const el2=document.getElementById('_editFilePreview');
+          if(el2)el2.innerHTML=_editFileChips();
+        });
+      });
     }
-    renderPF();
-  }
-  // Clean up
-  delete window._editTruncateAt;
-  delete window._editMsgEl;
-  delete window._editAllMsgs;
-  delete window._editFiles;
+    input.value='';
+  };
+  window._editToggleToolMenu=()=>{
+    const m=document.getElementById('_editToolMenu');
+    if(m)m.style.display=m.style.display==='none'?'flex':'none';
+  };
+  window._editCloseToolMenu=()=>{
+    const m=document.getElementById('_editToolMenu');
+    if(m)m.style.display='none';
+  };
+
+  const editInput=document.getElementById('_msgEditInput');
+  editInput.focus();
+  // Auto-resize textarea
+  editInput.style.height='auto';
+  editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
+  editInput.addEventListener('input',()=>{
+    editInput.style.height='auto';
+    editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
+  });
+
+  // Cancel — restore original message
+  document.getElementById('_msgEditCancel').addEventListener('click',()=>{
+    msgEl.innerHTML=originalHTML;
+    // Clean up window functions
+    delete window._editRemoveFile;delete window._editHandleFiles;
+    delete window._editToggleToolMenu;delete window._editCloseToolMenu;
+  });
+
+  // Save — send the edited message with preserved + new files
+  document.getElementById('_msgEditSave').addEventListener('click',()=>{
+    const newText=editInput.value.trim();
+    if(!newText&&!_editFiles.length)return;
+
+    // Re-attach files that came from the original message + any newly added files
+    const readyFiles=_editFiles.filter(f=>!f._loading);
+    if(readyFiles.length){
+      pendingFiles.push(...readyFiles);
+      renderPF();
+    }
+
+    // Remove this message and all subsequent messages
+    let toRemove=[];
+    let found=false;
+    for(const el of allMsgs){
+      if(el===msgEl)found=true;
+      if(found)toRemove.push(el);
+    }
+    toRemove.forEach(el=>el.remove());
+
+    // Set truncation index and send
+    window._editTruncateAt=backendIndex;
+    const input=document.getElementById('msgInput');
+    input.value=newText;
+    autoResize(input);
+    // Clean up window functions
+    delete window._editRemoveFile;delete window._editHandleFiles;
+    delete window._editToggleToolMenu;delete window._editCloseToolMenu;
+    // Trigger send
+    sendMessage();
+  });
 }
 
 function retryMsg(btn){
@@ -322,13 +391,11 @@ async function apiFetch(url, opts={}){
 }
 
 // ─── Session keep-alive ───────────────────────────
-async function _handleSessionLost(){
+function _handleSessionLost(){
   showToast('Session expired. Please sign in again.','info');
   curUser=null; curChat=null;
   document.getElementById('appPage').classList.remove('visible');
   document.getElementById('loginPage').style.display='flex';
-  googleInitDone=false;
-  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -835,53 +902,6 @@ function renderHomeWidget(w){
     }).join('');
     return `<div class="${cls} wl-reminder-widget"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-reminder-list">${body}</div></div>`;
   }
-  if(type==='momentum'){
-    const score=w.score||0;
-    const verdict=w.verdict||'steady';
-    const done=w.done||0;
-    const pending=w.pending||0;
-    const total=done+pending;
-    const timeline=Array.isArray(w.timeline)?w.timeline:[];
-    const friction=Array.isArray(w.friction_points)?w.friction_points:[];
-    const verdictIcons={on_fire:'🔥',steady:'⚡',slowing:'🐢',stalled:'❄️'};
-    const verdictColors={on_fire:'var(--green)',steady:'var(--accent)',slowing:'var(--yellow, #e6a700)',stalled:'var(--red)'};
-    const icon=verdictIcons[verdict]||'⚡';
-    const color=verdictColors[verdict]||'var(--accent)';
-    // Score ring
-    const pct=Math.min(100,Math.max(0,score));
-    const circumference=2*Math.PI*36;
-    const dashOffset=circumference*(1-pct/100);
-    let body=`<div class="wl-momentum-top">`
-      +`<div class="wl-momentum-ring">`
-      +`<svg viewBox="0 0 80 80" width="80" height="80">`
-      +`<circle cx="40" cy="40" r="36" fill="none" stroke="var(--border-subtle)" stroke-width="6"/>`
-      +`<circle cx="40" cy="40" r="36" fill="none" stroke="${color}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}" transform="rotate(-90 40 40)"/>`
-      +`</svg>`
-      +`<div class="wl-momentum-score-lbl">${icon}<br>${pct}</div>`
-      +`</div>`
-      +`<div class="wl-momentum-stats">`
-      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--green)">${done}</span><span class="wl-ms-label">Done</span></div>`
-      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--yellow, #e6a700)">${pending}</span><span class="wl-ms-label">Pending</span></div>`
-      +`<div class="wl-momentum-stat"><span class="wl-ms-num" style="color:var(--text-secondary)">${total}</span><span class="wl-ms-label">Total</span></div>`
-      +`</div></div>`;
-    // Activity bars (if timeline provided)
-    if(timeline.length){
-      const maxChats=Math.max(1,...timeline.map(t=>t.chats||0));
-      const bars=timeline.map(t=>{
-        const h=Math.max(4,((t.chats||0)/maxChats)*40);
-        return `<div class="wl-momentum-bar-col"><div class="wl-momentum-bar" style="height:${h}px;background:${color}"></div><div class="wl-momentum-bar-lbl">${esc(t.label||'')}</div></div>`;
-      }).join('');
-      body+=`<div class="wl-momentum-chart"><div class="wl-momentum-chart-lbl">Activity</div><div class="wl-momentum-bars">${bars}</div></div>`;
-    }
-    // Friction points
-    if(friction.length){
-      const fp=friction.map(f=>`<div class="wl-momentum-friction"><strong>${esc(f.name||'')}</strong> — idle ${f.days_idle||'?'}d<div class="wl-momentum-starter">${esc(f.starter||'')}</div></div>`).join('');
-      body+=`<div class="wl-momentum-friction-section"><div class="wl-momentum-chart-lbl">Friction Points</div>${fp}</div>`;
-    }
-    // Open full momentum dashboard button
-    body+=`<button class="wl-momentum-expand" onclick="openMomentumDashboard()">View full dashboard →</button>`;
-    return `<div class="${cls} wl-momentum-widget"><div class="wl-widget-hd">${title}</div>${subtitle}${body}</div>`;
-  }
   return `<div class="${cls}"><div class="wl-widget-hd">${title}</div>${subtitle}<div class="wl-focus-copy">${esc(w?.text||'Ready when you are.')}</div></div>`;
 }
 
@@ -1159,52 +1179,31 @@ function openFolderView(folder){
   document.getElementById('topTitle').textContent=folder;
   const meta=getFolderMeta(folder);
   const fIcon=meta.emoji||'📁';
-  const instructions=meta.instructions||'';
-  const ef=esc(folder).replace(/'/g,"\\'");
-
-  // Prompt-style action cards (same grid as main homepage)
-  const actionCards=`
-    <div class="wl-action-card" onclick="createChat('${ef}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation</span></div>
-    <div class="wl-action-card" onclick="customizeFolder('${ef}')"><span class="wl-ac-icon">⚙️</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Icon, name & instructions</span></div>
-    <div class="wl-action-card" onclick="renameFolderFromView('${ef}')"><span class="wl-ac-icon">✏️</span><span class="wl-ac-label">Rename</span><span class="wl-ac-sub">Change folder name</span></div>
-    <div class="wl-action-card" onclick="deleteFolderAndChats('${ef}')"><span class="wl-ac-icon" style="color:var(--red)">🗑</span><span class="wl-ac-label">Delete</span><span class="wl-ac-sub">Remove folder & chats</span></div>`;
-
-  // Build data widgets
-  const widgets=[];
-
-  // Recent chats widget
-  if(chats.length){
-    const items=chats.slice(0,4).map(c=>({id:c.id,title:c.title||'Untitled'}));
-    widgets.push(renderHomeWidget({type:'recent',size:'medium',title:`Chats (${chats.length})`,items}));
-  }
-
-  // Folder instructions preview widget
-  if(instructions){
-    widgets.push(renderHomeWidget({type:'motivation',size:'medium',title:'Custom Instructions',text:instructions.length>200?instructions.slice(0,200)+'…':instructions}));
-  }
-
-  // Folder-specific todo widget
-  const state=loadProductivityState();
-  const allTodos=(state.todos||[]).filter(t=>!t.done);
-  const folderTodos=allTodos.filter(t=>{
-    const chatId=(t.id||'').split('_')[1]||'';
-    return chats.some(c=>c.id===chatId);
-  }).slice(0,5);
-  if(folderTodos.length){
-    widgets.push(renderHomeWidget({type:'todos',size:'medium',title:'Folder Tasks',items:folderTodos}));
-  }
-
-  const dataSection=widgets.length?`<div class="wl-data-section"><div class="wl-section-label">Folder overview</div><div class="wl-grid">${widgets.join('')}</div></div>`:'';
-
-  area.innerHTML=`<div class="welcome">
-    <div class="wl-hero">
-      <h1 class="welcome-greeting">${fIcon} ${esc(folder)}</h1>
-      <p class="welcome-sub">${chats.length} chat${chats.length!==1?'s':''}${instructions?' · Custom instructions active':''}</p>
+  const fColor=meta.color||'var(--accent)';
+  const chatListHtml=chats.length?chats.map(c=>{
+    const preview=c.messages?.length?`${c.messages.length} messages`:'Empty chat';
+    return `<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
+      +`<span class="fv-chat-icon">💬</span>`
+      +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${preview}</div></div>`
+      +`<span class="fv-chat-arrow">→</span></div>`;
+  }).join('')
+    :'<div class="fv-empty">No chats yet. Start one below.</div>';
+  area.innerHTML=`<div class="folder-view">
+    <div class="fv-hero">
+      <div class="fv-hero-icon" style="background:${fColor}20;color:${fColor}">${fIcon}</div>
+      <h1 class="fv-title">${esc(folder)}</h1>
+      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}</p>
     </div>
-    <div class="wl-prompts-section">
-      <div class="wl-prompts-grid">${actionCards}</div>
+    <div class="fv-actions">
+      <button class="fv-action-btn fv-action-primary" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Chat
+      </button>
+      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">🎨 Customize</button>
+      <button class="fv-action-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Rename</button>
+      <button class="fv-action-btn fv-action-danger" onclick="deleteFolderAndChats('${esc(folder).replace(/'/g,"\\'")}')">🗑 Delete</button>
     </div>
-    ${dataSection}
+    <div class="fv-chat-list">${chatListHtml}</div>
   </div>`;
   renderChatList();
 }
@@ -1224,50 +1223,38 @@ async function renameFolderFromView(oldName){
 }
 
 async function customizeFolder(folder){
-  document.querySelector('.sf-menu')?.remove();
   const meta=getFolderMeta(folder);
-  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','💰','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊','🏋️','🍳','✈️','🎬','📱','🔒','🎓','❤️','🏆','🧠','💻'];
+  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','❤️','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊',''];
+  const colors=['','#bf6b3a','#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e91e63','#00bcd4','#ff5722'];
+  const colorNames=['Default','Orange','Red','Amber','Yellow','Green','Teal','Blue','Purple','Pink','Cyan','Deep Orange'];
   const curEmoji=meta.emoji||'📁';
-  const curName=folder;
-  const curInstructions=meta.instructions||'';
-  const curFiles=meta.instructionFiles||[];
+  const curColor=meta.color||'';
   const emojiGrid=emojis.map(e=>{
-    const sel=e===curEmoji?' fv-cust-sel':'';
-    return `<button class="fv-cust-btn${sel}" data-emoji="${e}" onclick="_custSelectEmoji(this)">${e}</button>`;
-  }).join('')+`<button class="fv-cust-btn fv-cust-none${!curEmoji?' fv-cust-sel':''}" data-emoji="" onclick="_custSelectEmoji(this)">✕</button>`;
-  const fileChips=curFiles.map((f,i)=>`<div class="fv-cust-file-chip"><span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span></div>`).join('');
+    const label=e||'None';
+    const sel=e===curEmoji||(e===''&&!curEmoji)?' fv-cust-sel':'';
+    return `<button class="fv-cust-btn${sel}" onclick="this.closest('.fv-cust-popup').dataset.emoji='${e}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')">${label}</button>`;
+  }).join('');
+  const colorGrid=colors.map((c,i)=>{
+    const sel=c===curColor||(c===''&&!curColor)?' fv-cust-sel':'';
+    const bg=c||'var(--text-muted)';
+    return `<button class="fv-cust-color${sel}" style="background:${bg}" title="${colorNames[i]}" onclick="this.closest('.fv-cust-popup').dataset.color='${c}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-color').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')"></button>`;
+  }).join('');
 
   const popup=document.createElement('div');
   popup.className='fv-cust-popup';
   popup.dataset.emoji=curEmoji;
-  popup.dataset.folder=folder;
+  popup.dataset.color=curColor;
   popup.innerHTML=`
     <div class="fv-cust-overlay" onclick="this.parentElement.remove()"></div>
     <div class="fv-cust-modal">
-      <h3>Customize Folder</h3>
-      <div class="fv-cust-section">
-        <label>Folder Name</label>
-        <input class="fv-cust-input" id="fvCustName" type="text" value="${esc(curName)}" placeholder="Folder name..." maxlength="50">
-      </div>
+      <h3>Customize "${esc(folder)}"</h3>
       <div class="fv-cust-section">
         <label>Icon</label>
         <div class="fv-cust-grid">${emojiGrid}</div>
       </div>
       <div class="fv-cust-section">
-        <label>Custom Instructions</label>
-        <textarea class="fv-cust-textarea" id="fvCustInstructions" placeholder="Describe what this folder is for. The AI will use these instructions for all chats in this folder...">${esc(curInstructions)}</textarea>
-        <div class="fv-cust-hint">These instructions will be included in every chat within this folder.</div>
-        <div class="fv-cust-file-row">
-          <button class="fv-cust-file-btn" onclick="_custUploadFile()">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            Upload context file
-          </button>
-          <input type="file" id="fvCustFileInput" style="display:none" onchange="_custHandleFile(this)" multiple accept=".txt,.md,.json,.pdf,.png,.jpg,.jpeg,.webp">
-        </div>
-        <div class="fv-cust-files-list" id="fvCustFilesList">${fileChips}</div>
-        <button class="fv-cust-enhance-btn" onclick="_custEnhanceInstructions(this)">
-          <span>✨</span> Enhance with AI
-        </button>
+        <label>Color</label>
+        <div class="fv-cust-grid">${colorGrid}</div>
       </div>
       <div class="fv-cust-footer">
         <button class="fv-cust-cancel" onclick="this.closest('.fv-cust-popup').remove()">Cancel</button>
@@ -1275,73 +1262,19 @@ async function customizeFolder(folder){
       </div>
     </div>`;
   document.body.appendChild(popup);
-  document.getElementById('fvCustName').focus();
-}
-function _custSelectEmoji(btn){
-  btn.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));
-  btn.classList.add('fv-cust-sel');
-  btn.closest('.fv-cust-popup').dataset.emoji=btn.dataset.emoji;
-}
-function _custUploadFile(){
-  document.getElementById('fvCustFileInput')?.click();
-}
-function _custHandleFile(input){
-  const list=document.getElementById('fvCustFilesList');
-  if(!list||!input.files)return;
-  for(const f of input.files){
-    const chip=document.createElement('div');
-    chip.className='fv-cust-file-chip';
-    chip.dataset.fileName=f.name;
-    // Read file content for context
-    const reader=new FileReader();
-    reader.onload=()=>{chip.dataset.fileData=reader.result;};
-    if(f.type.startsWith('image/'))reader.readAsDataURL(f);
-    else reader.readAsText(f);
-    chip.innerHTML=`<span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span>`;
-    list.appendChild(chip);
-  }
-  input.value='';
-}
-async function _custEnhanceInstructions(btn){
-  const textarea=document.getElementById('fvCustInstructions');
-  const text=textarea?.value?.trim();
-  if(!text){btn.textContent='⚠ Write instructions first';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);return;}
-  btn.disabled=true;
-  btn.innerHTML='<span class="spinner"></span> Enhancing...';
-  try{
-    const r=await apiFetch('/api/folders/enhance-instructions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instructions:text})});
-    const d=await r.json();
-    if(d.enhanced){textarea.value=d.enhanced;btn.innerHTML='<span>✓</span> Enhanced!';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);}
-    else{btn.textContent='⚠ '+(d.error||'Enhancement failed');setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
-  }catch{btn.textContent='⚠ Enhancement failed';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
-  btn.disabled=false;
 }
 
-async function saveFolderCustomize(btn){
+function saveFolderCustomize(btn){
   const popup=btn.closest('.fv-cust-popup');
-  const oldFolder=popup.dataset.folder;
-  if(!oldFolder){popup.remove();return;}
+  const folder=_activeFolderView;
+  if(!folder){popup.remove();return;}
   const emoji=popup.dataset.emoji||'';
-  const newName=(document.getElementById('fvCustName')?.value||'').trim()||oldFolder;
-  const instructions=(document.getElementById('fvCustInstructions')?.value||'').trim();
-  // Collect uploaded files
-  const fileChips=[...document.querySelectorAll('#fvCustFilesList .fv-cust-file-chip')];
-  const instructionFiles=fileChips.map(c=>({name:c.dataset.fileName||c.querySelector('span')?.textContent||'file',data:c.dataset.fileData||''})).filter(f=>f.name);
-  setFolderMeta(oldFolder,{emoji,instructions,instructionFiles});
-  // Handle rename
-  if(newName!==oldFolder){
-    renameFolderMeta(oldFolder,newName);
-    const chats=allChats.filter(c=>c.folder===oldFolder);
-    for(const c of chats){
-      await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:newName})});
-    }
-    await refreshChats();
-    _activeFolderView=newName;
-  }
+  const color=popup.dataset.color||'';
+  setFolderMeta(folder,{emoji,color});
   popup.remove();
   renderChatList();
-  if(_activeFolderView) openFolderView(_activeFolderView);
-  showToast('Folder saved.','success');
+  openFolderView(folder);
+  showToast('Folder customized.','success');
 }
 
 function loadCachedChats(){
@@ -1411,9 +1344,7 @@ async function handleGoogleCred(resp){
       localStorage.removeItem('gyro_guest_id');
     }
     theme=d.user.theme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
-    applyTheme(false); onboardingChecked=false;
-    localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
-    showApp();
+    applyTheme(false); onboardingChecked=false; showApp();
   }catch(e){document.getElementById('loginErr').textContent='Google auth failed'}
 }
 
@@ -1426,7 +1357,6 @@ async function guestLogin(){
     if(d.ok){
       isGuest=true;curUser={name:'Guest',email:'',plan:'guest'};
       if(d.guest_id) localStorage.setItem('gyro_guest_id',d.guest_id);
-      localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
       showApp();
     }
     else document.getElementById('loginErr').textContent=d.error||'Guest login failed';
@@ -1440,10 +1370,6 @@ async function signOut(){
   localStorage.removeItem('gyro_uid');
   localStorage.removeItem('gyro_remember');
   localStorage.removeItem('gyro_guest_id');
-  localStorage.removeItem(CHAT_CACHE_KEY);
-  localStorage.removeItem(FOLDER_META_KEY);
-  localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
-  try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
   curUser=null;curChat=null;allChats=[];isGuest=false;
   onboardingChecked=false;
   hideSetupReminder();
@@ -1451,7 +1377,6 @@ async function signOut(){
   document.getElementById('loginPage').style.display='flex';
   document.getElementById('loginErr').textContent='';
   googleInitDone=false;
-  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -1695,7 +1620,6 @@ function renderChatList(filter=''){
       html+=`<span class="ct">${esc(c.title)}</span><button class="cd" onclick="event.stopPropagation();showMoveMenu(this,'${c.id}')" title="Move to folder">📁</button><button class="cd" onclick="event.stopPropagation();renameChat('${c.id}')" title="Rename">✎</button><button class="cd" onclick="event.stopPropagation();delChat('${c.id}')">✕</button></div>`;
     }
   }
-  html+='<div class="sb-drag-root-zone" style="display:none">Drop here to remove from folder</div>';
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
   // ── Drag-to-folder: wire up after render ──
   _initSidebarDrag(el);
@@ -1717,51 +1641,30 @@ function _initSidebarDrag(container){
     chatEl.classList.add('sb-drag-active');
     e.dataTransfer.effectAllowed='move';
     e.dataTransfer.setData('text/plain',_dragChatId);
-    // Show root drop zone for removing from folders
-    const rootZone=container.querySelector('.sb-drag-root-zone');
-    if(rootZone){
-      const chat=allChats.find(c=>c.id===_dragChatId);
-      if(chat&&chat.folder)rootZone.style.display='block';
-    }
   });
   container.addEventListener('dragend',e=>{
     _dragChatId=null;
     container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
-    const rootZone=container.querySelector('.sb-drag-root-zone');
-    if(rootZone){rootZone.style.display='none';rootZone.classList.remove('sb-drag-over');}
   });
   container.addEventListener('dragover',e=>{
     if(!_dragChatId)return;
     e.preventDefault();
     e.dataTransfer.dropEffect='move';
     const folderEl=e.target.closest('.sb-folder[data-folder]');
-    const rootZone=e.target.closest('.sb-drag-root-zone');
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
     if(folderEl)folderEl.classList.add('sb-drag-over');
-    if(rootZone)rootZone.classList.add('sb-drag-over');
   });
   container.addEventListener('dragleave',e=>{
     const folderEl=e.target.closest('.sb-folder[data-folder]');
     if(folderEl)folderEl.classList.remove('sb-drag-over');
-    const rootZone=e.target.closest('.sb-drag-root-zone');
-    if(rootZone)rootZone.classList.remove('sb-drag-over');
   });
   container.addEventListener('drop',e=>{
     e.preventDefault();
     container.querySelectorAll('.sb-drag-over').forEach(el=>el.classList.remove('sb-drag-over'));
     container.querySelectorAll('.sb-drag-active').forEach(el=>el.classList.remove('sb-drag-active'));
-    const rootZone=container.querySelector('.sb-drag-root-zone');
-    if(rootZone){rootZone.style.display='none';rootZone.classList.remove('sb-drag-over');}
     const folderEl=e.target.closest('.sb-folder[data-folder]');
-    const isRootDrop=e.target.closest('.sb-drag-root-zone');
-    if(!_dragChatId)return;
-    if(isRootDrop){
-      moveChat(_dragChatId,'');
-      _dragChatId=null;
-      return;
-    }
-    if(!folderEl){_dragChatId=null;return;}
+    if(!_dragChatId||!folderEl)return;
     const targetFolder=folderEl.dataset.folder;
     const chat=allChats.find(c=>c.id===_dragChatId);
     if(chat&&chat.folder!==targetFolder){
@@ -1806,7 +1709,10 @@ async function newFolder(){
   const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
   if(!n?.trim())return;
   const name=n.trim();
-  setFolderMeta(name,{emoji:'📁'});
+  // Just create the folder entry in meta and add one empty chat to register the folder on the server
+  // Actually - we just need at least one chat with that folder. Create no chat; use a placeholder approach.
+  // To make the folder appear even with 0 chats, we store it in folderMeta and render it in sidebar.
+  setFolderMeta(name,{emoji:'📁',color:''});
   renderChatList();
   openFolderView(name);
   showToast('Folder created.','success');
@@ -1822,10 +1728,8 @@ function toggleFolderMenu(btn,folder){
   const menu=document.createElement('div');
   menu.className='sf-menu';
   menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="customizeFolder('${folder.replace(/'/g,"\\'")}')">Customize</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
-  document.body.appendChild(menu);
-  const rect=btn.getBoundingClientRect();
-  menu.style.top=rect.bottom+4+'px';
-  menu.style.left=Math.min(rect.left,window.innerWidth-160)+'px';
+  btn.parentElement.style.position='relative';
+  btn.parentElement.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -1846,10 +1750,8 @@ function showMoveMenu(btn,chatId){
   if(curFolder) items+=`<button onclick="moveChat('${chatId}','')">🚫 Remove from folder</button>`;
   if(!items) items='<div style="padding:8px 12px;color:var(--text-muted);font-size:11px">No folders yet</div>';
   menu.innerHTML=items;
-  document.body.appendChild(menu);
-  const rect=btn.getBoundingClientRect();
-  menu.style.top=rect.bottom+4+'px';
-  menu.style.left=Math.min(rect.left,window.innerWidth-160)+'px';
+  btn.closest('.sb-chat').style.position='relative';
+  btn.closest('.sb-chat').appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -2312,9 +2214,8 @@ function handleFiles(input){
           const r=await fetch('/api/upload',{method:'POST',body:form});
           const d=await r.json();
           // Find and update the placeholder (match by name + _loading)
-          // Always keep the original filename for display, even if converted internally
           const ph=pendingFiles.find(f=>f._loading&&f.name===origFile.name);
-          if(ph){ph.name=origFile.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
+          if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
           renderPF();
         }catch(e){
           console.error('Upload failed',e);
@@ -2395,32 +2296,6 @@ function initDropzone(){
     fileInput.files=e.dataTransfer.files;
     handleFiles(fileInput);
     showToast('Files added.','success');
-  });
-  // Copy handler: preserve LaTeX source when copying KaTeX-rendered math
-  document.addEventListener('copy',e=>{
-    const sel=window.getSelection();
-    if(!sel||sel.isCollapsed)return;
-    // Only intercept if selection contains rendered KaTeX
-    const range=sel.getRangeAt(0);
-    const container=document.createElement('div');
-    container.appendChild(range.cloneContents());
-    const katexEls=container.querySelectorAll('.katex');
-    if(!katexEls.length)return;
-    // Replace each KaTeX element with its LaTeX source
-    katexEls.forEach(k=>{
-      const ann=k.querySelector('annotation[encoding="application/x-tex"]');
-      if(ann){
-        const isDisplay=!!k.closest('.katex-display')||(k.parentElement&&k.parentElement.classList.contains('katex-display'));
-        const tex=ann.textContent||'';
-        const wrap=isDisplay?'$$'+tex+'$$':'$'+tex+'$';
-        k.replaceWith(document.createTextNode(wrap));
-      }
-    });
-    const plainText=container.textContent||container.innerText||'';
-    if(plainText){
-      e.preventDefault();
-      e.clipboardData.setData('text/plain',plainText);
-    }
   });
   document.addEventListener('paste',e=>{
     const items=e.clipboardData?.items;if(!items)return;
@@ -2912,7 +2787,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const thC=document.getElementById('_raThinkC'+ev.step);
             if(thC){
               thC.innerHTML=_fmtThink(stepThinking);
-              renderMathInElementSafe(thC);
               const _ltpBody=thC.parentElement;
               if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
             }
@@ -3468,7 +3342,6 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const thC=document.getElementById('_saThinkC'+ev.step);
             if(thC){
               thC.innerHTML=_fmtThink(stepThinking);
-              renderMathInElementSafe(thC);
               const _ltpBody=thC.parentElement;
               if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
             }
@@ -4083,8 +3956,6 @@ function stripMetaBlocks(text){
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'')
-    .replace(/<<<SILENT_VERIFY:\s*\w+>>>[\s\S]*?(<<<END_SILENT_VERIFY>>>|$)/g,'')
-    .replace(/<<<PROJECT_SCAFFOLD:\s*.+?>>>/g,'')
     .trim();
 }
 
@@ -4146,9 +4017,6 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_STOCK_RATINGS&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*$/,'');
-  // Strip SILENT_VERIFY blocks (invisible to user)
-  html=html.replace(/&lt;&lt;&lt;SILENT_VERIFY:\s*\w+&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_SILENT_VERIFY&gt;&gt;&gt;/g,'');
-  html=html.replace(/&lt;&lt;&lt;SILENT_VERIFY:\s*\w+&gt;&gt;&gt;[\s\S]*$/,''); // unclosed
   // Completed CODE_EXECUTE blocks — show code + executing indicator
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
@@ -4471,9 +4339,10 @@ async function sendMessage(opts){
     // Silent/auto-reprompt: minimal indicator, no "Thinking..." animation
     msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
   }else{
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div></div></div>';
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
   }
   if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
+  if(!_silent)startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
   let _renderScheduled=false;
@@ -4504,30 +4373,8 @@ async function sendMessage(opts){
 
     const _truncateAt=window._editTruncateAt;
     delete window._editTruncateAt;
-    // If this is an edit-mode send, remove the edited message + all subsequent messages from DOM
-    if(_truncateAt!=null&&window._editMsgEl&&window._editAllMsgs){
-      let found=false;
-      for(const el of window._editAllMsgs){
-        if(el===window._editMsgEl)found=true;
-        if(found&&el.parentNode)el.remove();
-      }
-    }
-    // Clean up edit mode state & banner
-    delete window._editMsgEl;
-    delete window._editAllMsgs;
-    delete window._editFiles;
-    const _editBanner=document.getElementById('editModeBanner');
-    if(_editBanner)_editBanner.style.display='none';
-    const _editInputArea=document.querySelector('.input-area');
-    if(_editInputArea)_editInputArea.classList.remove('edit-mode');
     const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
-    // Inject folder instructions if chat is in a folder
-    const _chatObj=allChats.find(c=>c.id===targetChatId);
-    if(_chatObj&&_chatObj.folder){
-      const _fMeta=getFolderMeta(_chatObj.folder);
-      if(_fMeta.instructions)_bodyObj.folder_instructions=_fMeta.instructions;
-    }
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(_bodyObj),signal:controller.signal});
 
@@ -4566,11 +4413,10 @@ async function sendMessage(opts){
     const decoder=new TextDecoder();
     let buffer='',fullText='',thinkText='',isThinking=false;
     let _genFailures=[];
-    // ── Multi-pass extended thinking state ──
-    let _thinkingPass=1;           // Current thinking pass number
-    let _thinkPasses={};           // {passNum: {text, panel, textEl, label}}
-    let _pass2ThinkText='';        // Thinking text for pass 2
-    let _isExtended=thinkingLevel==='extended';
+    // ── Multi-turn thinking state ──
+    let _thinkTurn=0;              // Current thinking turn number (incremented each time thinking restarts)
+    let _thinkTurns={};            // {turnNum: {panel, textEl, text}}
+    let _turnThinkText='';         // Current turn's thinking text
     // ── Mid-stream media loading state ──
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
@@ -4637,38 +4483,42 @@ async function sendMessage(opts){
       }
       return 'your question';
     }
-    function ensureThinkPanel(passNum){
-      passNum=passNum||1;
-      // If we already have a panel for this pass, reuse it
-      if(_thinkPasses[passNum]&&_thinkPasses[passNum].panel){
-        thinkPanel=_thinkPasses[passNum].panel;
-        thinkTextEl=_thinkPasses[passNum].textEl;
+    function ensureThinkPanel(turnNum){
+      turnNum=turnNum||1;
+      // If we already have a panel for this turn, reuse it
+      if(_thinkTurns[turnNum]&&_thinkTurns[turnNum].panel){
+        thinkPanel=_thinkTurns[turnNum].panel;
+        thinkTextEl=_thinkTurns[turnNum].textEl;
         return;
       }
-      if(passNum===1&&thinkPanel)return;
       const ta=contentEl.querySelector('.think-active');
       if(ta)ta.remove();
       stopThinkingPhrases();
       const panel=document.createElement('div');
-      const passLabel=_isExtended?(passNum===1?'Pass 1: Initial Analysis':'Pass 2: Verification & Refinement'):'';
-      panel.className='live-think-panel ltp-collapsed'+(passNum>1?' ltp-pass-'+passNum:'');
-      if(_isExtended)panel.dataset.pass=passNum;
-      const headerLabel=_isExtended&&passNum>1?'Verifying & refining…':'Considering your question';
+      panel.className='live-think-panel ltp-collapsed';
+      const headerLabel=turnNum>1?'Thinking deeper\u2026':'Considering your question';
       panel.innerHTML='<div class="ltp-header" style="cursor:pointer">'
-        +'<span class="ltp-icon">'+(passNum>1?'🔍':'💭')+'</span>'
-        +(_isExtended?'<span class="ltp-pass-badge">Pass '+passNum+'</span>':'')
+        +'<span class="ltp-icon">\uD83D\uDCAD</span>'
         +'<span class="ltp-label">'+headerLabel+'</span>'
-        +'<span class="ltp-chevron">▾</span>'
+        +'<span class="ltp-chevron">\u25BE</span>'
         +'<span class="ltp-dots"><span></span><span></span><span></span></span>'
         +'</div><div class="ltp-body"><div class="ltp-text"></div></div>';
       const hdr=panel.querySelector('.ltp-header');
       hdr.onclick=()=>{panel.classList.toggle('ltp-collapsed');};
-      if(passNum===1){
+      if(turnNum===1){
         contentEl.innerHTML='';
+        contentEl.appendChild(panel);
+      }else{
+        // Insert before the response area so thinking panels stack above response
+        const respArea=contentEl.querySelector('.stream-response-area');
+        if(respArea){
+          contentEl.insertBefore(panel,respArea);
+        }else{
+          contentEl.appendChild(panel);
+        }
       }
-      contentEl.appendChild(panel);
       const textEl=panel.querySelector('.ltp-text');
-      _thinkPasses[passNum]={text:'',panel:panel,textEl:textEl,label:passLabel};
+      _thinkTurns[turnNum]={panel:panel,textEl:textEl,text:''};
       thinkPanel=panel;
       thinkTextEl=textEl;
     }
@@ -4690,106 +4540,28 @@ async function sendMessage(opts){
             continue;
           }else if(data.type==='thinking_delta'){
             _lastMeaningfulEvent=Date.now();
-            const dPass=data.pass||1;
-            if(!isThinking)console.log(`[gyro] thinking_delta received (pass ${dPass}) — thinking panel activating`);
+            if(!isThinking){
+              // Starting a new thinking turn
+              _thinkTurn++;
+              _turnThinkText='';
+              console.log(`[gyro] thinking turn ${_thinkTurn} starting`);
+            }
             isThinking=true;
-            if(dPass===2){
-              _pass2ThinkText+=data.text;
-              if(canRender()){
-                ensureThinkPanel(2);
-                thinkTextEl.innerHTML=_fmtThink(_pass2ThinkText);
-                renderMathInElementSafe(thinkTextEl);
-                const _ltpBody=thinkTextEl.parentElement;
-                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
-                if(_pass2ThinkText.length>15){
-                  const subj=_extractThinkSubject(_pass2ThinkText);
-                  if(subj!==_lastThinkLabel){
-                    _lastThinkLabel=subj;
-                    const lbl=thinkPanel.querySelector('.ltp-label');
-                    if(lbl)lbl.textContent=subj;
-                  }
-                }
-                _autoScroll();
-              }
-            }else{
-              thinkText+=data.text;
-              if(canRender()){
-                ensureThinkPanel(1);
-                thinkTextEl.innerHTML=_fmtThink(thinkText);
-                renderMathInElementSafe(thinkTextEl);
-                const _ltpBody=thinkTextEl.parentElement;
-                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
-                if(thinkText.length>15){
-                  const subj=_extractThinkSubject(thinkText);
-                  if(subj!==_lastThinkLabel){
-                    _lastThinkLabel=subj;
-                    const lbl=thinkPanel.querySelector('.ltp-label');
-                    if(lbl)lbl.textContent=subj;
-                  }
-                }
-                _autoScroll();
-              }
-            }
-          }else if(data.type==='thinking_pass_complete'){
-            _lastMeaningfulEvent=Date.now();
-            const pNum=data.pass||1;
-            console.log(`[gyro] thinking pass ${pNum} complete: ${data.label||''}`);
-            const passInfo=_thinkPasses[pNum];
-            if(passInfo&&passInfo.panel){
-              passInfo.panel.classList.add('ltp-done','ltp-collapsed');
-              const dots=passInfo.panel.querySelector('.ltp-dots');
-              if(dots)dots.remove();
-              const lbl=passInfo.panel.querySelector('.ltp-label');
-              if(lbl){
-                const thTxt=pNum===2?_pass2ThinkText:thinkText;
-                const subj=_extractThinkSubject(thTxt);
-                lbl.textContent=pNum===1?'Thought about '+subj:'Verified: '+subj;
-              }
-              const body=passInfo.panel.querySelector('.ltp-body');
-              if(body){body.style.maxHeight='0';body.style.padding='0';}
-            }
-            if(pNum===1&&_isExtended){
-              // Clear the streamed response so pass 2 can replace it
-              fullText='';
-              const respArea=contentEl.querySelector('.stream-response-area');
-              if(respArea)respArea.remove();
-            }
-            _thinkingPass=pNum+1;
-          }else if(data.type==='thinking_pass_start'){
-            _lastMeaningfulEvent=Date.now();
-            const pNum=data.pass||2;
-            console.log(`[gyro] thinking pass ${pNum} starting: ${data.label||''}`);
-            _thinkingPass=pNum;
-            isThinking=true;
-            ensureThinkPanel(pNum);
-            _autoScroll();
-          }else if(data.type==='extended_response'){
-            _lastMeaningfulEvent=Date.now();
-            // Replace full text with the refined response from pass 2
-            fullText=data.text;
+            _turnThinkText+=data.text;
+            thinkText+=data.text;
+            if(_thinkTurns[_thinkTurn])_thinkTurns[_thinkTurn].text=_turnThinkText;
             if(canRender()){
-              // Close pass 2 thinking panel
-              if(_thinkPasses[2]&&_thinkPasses[2].panel){
-                const p2=_thinkPasses[2].panel;
-                p2.classList.add('ltp-done','ltp-collapsed');
-                const dots=p2.querySelector('.ltp-dots');
-                if(dots)dots.remove();
-                const body=p2.querySelector('.ltp-body');
-                if(body){body.style.maxHeight='0';body.style.padding='0';}
-              }
-              isThinking=false;
-              // Ensure response area exists
-              let respDiv=contentEl.querySelector('.stream-response-area');
-              if(!respDiv){
-                respDiv=document.createElement('div');
-                respDiv.className='stream-response-area';
-                contentEl.appendChild(respDiv);
-              }
-              if(devRawMode){
-                respDiv.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'</pre>';
-              }else{
-                respDiv.innerHTML=fmtLive(fullText);
-                renderMathInElementSafe(respDiv);
+              ensureThinkPanel(_thinkTurn);
+              thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
+              const _ltpBody=thinkTextEl.parentElement;
+              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+              if(_turnThinkText.length>15){
+                const subj=_extractThinkSubject(_turnThinkText);
+                if(subj!==_lastThinkLabel){
+                  _lastThinkLabel=subj;
+                  const lbl=thinkPanel.querySelector('.ltp-label');
+                  if(lbl)lbl.textContent=subj;
+                }
               }
               _autoScroll();
             }
@@ -4805,13 +4577,18 @@ async function sendMessage(opts){
               // Update label to final state
               const lbl=thinkPanel.querySelector('.ltp-label');
               if(lbl){
-                const subj=_extractThinkSubject(thinkText);
+                const subj=_extractThinkSubject(_turnThinkText);
                 lbl.textContent='Thought about '+subj;
               }
-              // Add response area below
-              const responseDiv=document.createElement('div');
-              responseDiv.className='stream-response-area';
-              contentEl.appendChild(responseDiv);
+              const body=thinkPanel.querySelector('.ltp-body');
+              if(body){body.style.maxHeight='0';body.style.padding='0';}
+              // Ensure response area exists (always at the end)
+              let respDiv=contentEl.querySelector('.stream-response-area');
+              if(!respDiv){
+                respDiv=document.createElement('div');
+                respDiv.className='stream-response-area';
+                contentEl.appendChild(respDiv);
+              }
             }
             stopThinkingPhrases();
             fullText+=data.text;
@@ -4884,10 +4661,13 @@ async function sendMessage(opts){
             }
             // Always strip thinking tags from display reply
             displayReply=displayReply.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'').replace(/<<<\/?THINKING\/?>>>/g,'').replace(/<<<\/?END_THINKING\/?>>>/g,'').trim();
-            // Render think blocks — multiple passes for extended mode
-            if(_isExtended&&(thinkText||_pass2ThinkText)){
-              if(thinkText)finalHTML+=renderThinkBlock(thinkText,{pass:1,label:'Pass 1: Initial Analysis'});
-              if(_pass2ThinkText)finalHTML+=renderThinkBlock(_pass2ThinkText,{pass:2,label:'Pass 2: Verification & Refinement'});
+            // Render think blocks — one per thinking turn
+            const turnKeys=Object.keys(_thinkTurns).sort((a,b)=>a-b);
+            if(turnKeys.length>0){
+              for(const tn of turnKeys){
+                const t=(_thinkTurns[tn].text||'').trim();
+                if(t)finalHTML+=renderThinkBlock(t);
+              }
             }else if(thinkText){
               finalHTML+=renderThinkBlock(thinkText);
             } else if(_replyThinkText){
@@ -5009,9 +4789,7 @@ async function sendMessage(opts){
             if(!devRawMode&&data.generated_images?.length){
               for(const gi of data.generated_images){
                 const giPrompt=esc(gi.prompt);
-                const giWsPath=gi.workspace_path||'';
-                const giSaved=giWsPath?`<span class="img-gen-saved" title="Saved to ${esc(giWsPath)}">💾 Saved to workspace</span>`:'';
-                const genHTML=`<div class="img-gen-result"${giWsPath?` data-workspace-path="${esc(giWsPath)}"`:''}><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div>${giSaved}<button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
+                const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
                 const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
                 const before=finalHTML;
                 finalHTML=finalHTML.replace(re,genHTML);
@@ -5247,9 +5025,7 @@ async function sendMessage(opts){
               // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
               const safePrompt=esc(data.image.prompt);
-              const wsPath=data.image.workspace_path||'';
-              const savedBadge=wsPath?`<span class="img-gen-saved" title="Saved to ${esc(wsPath)}">💾 Saved to workspace</span>`:'';
-              const html=`<div class="img-gen-result"${wsPath?` data-workspace-path="${esc(wsPath)}"`:''}>`
+              const html=`<div class="img-gen-result">`
                 +`<div class="img-gen-header">`
                 +`<span class="img-gen-icon">🎨</span>`
                 +`<span class="img-gen-title">Generated Image</span>`
@@ -5260,7 +5036,6 @@ async function sendMessage(opts){
                 +`<img src="${data.image.url}" alt="${safePrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')">`
                 +`<div class="img-gen-footer">`
                 +`<div class="img-gen-prompt">${safePrompt}</div>`
-                +savedBadge
                 +`<button class="img-gen-dl-full" onclick="downloadGenFromEl(this)">`
                 +`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
                 +` Download PNG</button>`
@@ -5505,17 +5280,8 @@ async function sendMessage(opts){
         recoveryHTML+='<div style="color:var(--text-muted);font-style:italic;padding:8px 0">Response was interrupted. Try sending your message again.</div>';
       }
       contentEl.innerHTML=recoveryHTML;
-      // Remove all streaming indicators — cursors, executing status, active dots
       contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
-      contentEl.querySelectorAll('.stream-code-exec-status').forEach(el=>el.remove());
-      contentEl.querySelectorAll('.think-active').forEach(el=>el.remove());
-      contentEl.querySelectorAll('.dots').forEach(el=>el.remove());
-      // Change "Writing ... code..." headers to "Code (stopped)"
-      contentEl.querySelectorAll('.stream-code-exec-header').forEach(el=>{
-        if(el.textContent.includes('Writing'))el.innerHTML='<span class="sp-icon">⚙️</span> Code (stopped)';
-        else if(el.textContent.includes('Running'))el.innerHTML='<span class="sp-icon">⚙️</span> Code (stopped)';
-      });
-      setStatus('Generation stopped.');
+      setStatus('Response interrupted — try again.');
     }
     const cur=runningStreams.get(targetChatId);
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
@@ -5551,9 +5317,7 @@ function renderThinkBlock(thinkText,opts){
   const prefix=passNum===2?'Verified: ':passNum===1?'Thought about ':'Thought about ';
   const passBadge=passLabel?`<span class="think-pass-tag">${esc(passLabel)}</span>`:'';
   const passClass=passNum?` think-pass-${passNum}`:'';
-  const blockId='_thkblk'+Math.random().toString(36).slice(2,8);
-  setTimeout(()=>{const el=document.getElementById(blockId);if(el)renderMathInElementSafe(el);},0);
-  return `<div class="think-block${passClass}" id="${blockId}" onclick="this.classList.toggle('expanded')">
+  return `<div class="think-block${passClass}" onclick="this.classList.toggle('expanded')">
     <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">▾</span></div>
     <div class="think-content">${_fmtThink(thinkText)}</div>
   </div>`;
@@ -5578,12 +5342,14 @@ function addMsg(role,text,files,extra={}){
     html+=`<div class="msg-user-files">${previews}</div>`;
   }
   let displayText=text||'';
-  if(displayText.includes('<<<THINKING>>>')&&displayText.includes('<<<END_THINKING>>>')){
-    const parts=displayText.split('<<<END_THINKING>>>');
-    const thinkPart=parts[0].replace('<<<THINKING>>>','').trim();
-    displayText=parts.slice(1).join('<<<END_THINKING>>>').trim();
-    html+=renderThinkBlock(thinkPart);
+  // Extract ALL thinking blocks (supports multiple interleaved thinking turns)
+  const _thinkBlockRe=/<<<THINKING>>>([\s\S]*?)<<<END_THINKING>>>/g;
+  let _tbMatch;
+  while((_tbMatch=_thinkBlockRe.exec(displayText))!==null){
+    const thinkPart=_tbMatch[1].trim();
+    if(thinkPart)html+=renderThinkBlock(thinkPart);
   }
+  displayText=displayText.replace(/<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>/g,'');
   // Strip any remaining thinking tags
   displayText=displayText.replace(/<<<\/?THINKING\/?>>>/g,'').replace(/<<<\/?END_THINKING\/?>>>/g,'').trim();
   // Parse all choice blocks (supports multiple sequential questions)
@@ -5693,9 +5459,7 @@ function addMsg(role,text,files,extra={}){
   if(!devRawMode&&extra.generated_images?.length){
     for(const gi of extra.generated_images){
       const giUrl=esc(gi.url);const giPrompt=esc(gi.prompt);
-      const giWsPath=gi.workspace_path||'';
-      const giSaved=giWsPath?`<span class="img-gen-saved" title="Saved to ${esc(giWsPath)}">💾 Saved to workspace</span>`:'';
-      const genHTML=`<div class="img-gen-result"${giWsPath?` data-workspace-path="${esc(giWsPath)}"`:''}><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenImage('${giUrl}','${giPrompt}')" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${giUrl}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div>${giSaved}<button class="img-gen-dl-full" onclick="downloadGenImage('${giUrl}','${giPrompt}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
+      const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenImage('${giUrl}','${giPrompt}')" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${giUrl}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenImage('${giUrl}','${giPrompt}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
       const re=new RegExp(`<p>\\s*%%%IMGGEN:${gi.index}%%%\\s*</p>|%%%IMGGEN:${gi.index}%%%`,'g');
       const before=html;
       html=html.replace(re,genHTML);
@@ -5739,11 +5503,7 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text){
-    // Don't show edit for image-only messages (no text, only files)
-    const hasTextContent=text.trim().length>0;
-    if(hasTextContent)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
-  }
+  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -5898,7 +5658,7 @@ function addMsg(role,text,files,extra={}){
 
 function addThinking(){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
-  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div>';
+  div.className='thinking';div.innerHTML='<div class="dots"><span></span><span></span><span></span></div> gyro is thinking...';
   area.appendChild(div);area.scrollTop=area.scrollHeight;return div;
 }
 
@@ -6172,7 +5932,6 @@ function addSubtask(listId,parentId){
 function fmt(text){
   if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
   t=t.replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'');
-  t=t.replace(/<<<SILENT_VERIFY:\s*\w+>>>[\s\S]*?<<<END_SILENT_VERIFY>>>/g,'');
   t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
   // Timeline blocks: ```timeline\ndate | title | description\n```
@@ -6634,15 +6393,11 @@ async function resetData(){
     localStorage.removeItem(ONB_DISMISS_KEY);
     localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
     localStorage.removeItem(CHAT_CACHE_KEY);
-    localStorage.removeItem(FOLDER_META_KEY);
     try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
     closeM('settingsModal');
-    curChat=null;curUser=null;isGuest=false;
+    curChat=null;curUser=null;
     document.getElementById('appPage').classList.remove('visible');
     document.getElementById('loginPage').style.display='flex';
-    googleInitDone=false;
-    await ensureOAuthConfigLoaded();
-    initGoogleAuthUI();
     showToast('Account deleted.','success');
   }else{
     await _dlg({title:'Deletion failed',msg:d.error||'Something went wrong.',icon:'✕',iconType:'danger',confirmText:'OK'});
@@ -6742,75 +6497,12 @@ function switchFileTab(tab,btn){
   document.querySelectorAll('.fb-tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.fb-panel').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  const panelMap={workspace:'fbWorkspace',chat:'fbChat',chats:'fbChats'};
-  document.getElementById(panelMap[tab]||'fbWorkspace').classList.add('active');
-  if(tab==='chat')refreshChatFiles();
-  else if(tab==='chats')refreshChatsTab();
-  else refreshWorkspaceFiles();
+  document.getElementById(tab==='chat'?'fbChat':'fbWorkspace').classList.add('active');
+  if(tab==='chat')refreshChatFiles();else refreshWorkspaceFiles();
 }
 async function refreshFileBrowser(){
   refreshWorkspaceFiles();
   refreshChatFiles();
-}
-function refreshChatsTab(){
-  const el=document.getElementById('fbChats');
-  if(!el)return;
-  const folders={};const noFolder=[];
-  const folderMeta=_loadFolderMeta();
-  // Include empty folders from meta
-  for(const fld of Object.keys(folderMeta)){
-    if(fld)folders[fld]=[];
-  }
-  for(const c of allChats){
-    const fld=c.folder||'';
-    if(fld){if(!folders[fld])folders[fld]=[];folders[fld].push(c);}
-    else noFolder.push(c);
-  }
-  if(!allChats.length&&!Object.keys(folders).length){
-    el.innerHTML='<div class="fbc-empty">No chats yet.<br>Start a conversation to see it here.</div>';
-    return;
-  }
-  let html='';
-  // Folders first
-  const sortedFolders=Object.keys(folders).sort();
-  for(const fld of sortedFolders){
-    const chats=folders[fld];
-    const fIcon=getFolderIcon(fld);
-    html+=`<div class="fbc-folder">`;
-    html+=`<div class="fbc-folder-hd" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fbc-arrow">▾</span><span class="fbc-icon">${fIcon}</span> ${esc(fld)}<span class="fbc-count">${chats.length}</span></div>`;
-    html+=`<div class="fbc-folder-body">`;
-    for(const c of chats){
-      const msgCount=c.messages?.length||0;
-      html+=`<div class="fbc-chat" onclick="openChat('${esc(c.id)}');closeFileBrowser()"><span class="fbc-chat-icon">💬</span><span class="fbc-chat-title">${esc(c.title||'Untitled')}</span><span class="fbc-chat-count">${msgCount} msg${msgCount!==1?'s':''}</span><span class="fbc-chat-arrow">→</span></div>`;
-    }
-    if(!chats.length)html+=`<div class="fbc-empty" style="padding:8px 28px">Empty folder</div>`;
-    html+=`</div></div>`;
-  }
-  // Unfiled chats
-  if(noFolder.length){
-    html+=`<div class="fbc-folder"><div class="fbc-folder-hd" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fbc-arrow">▾</span><span class="fbc-icon">💬</span> Unfiled<span class="fbc-count">${noFolder.length}</span></div><div class="fbc-folder-body">`;
-    for(const c of noFolder){
-      const msgCount=c.messages?.length||0;
-      html+=`<div class="fbc-chat" onclick="openChat('${esc(c.id)}');closeFileBrowser()"><span class="fbc-chat-icon">💬</span><span class="fbc-chat-title">${esc(c.title||'Untitled')}</span><span class="fbc-chat-count">${msgCount} msg${msgCount!==1?'s':''}</span><span class="fbc-chat-arrow">→</span></div>`;
-    }
-    html+=`</div></div>`;
-  }
-  el.innerHTML=html;
-}
-function _fbFileIcon(ext){
-  const icons={
-    md:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
-    txt:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
-    json:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#e6a700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M10 12l-2 2 2 2"/><path d="M14 12l2 2-2 2"/></svg>`,
-    png:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
-    pdf:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
-    yaml:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="11" y2="13"/><line x1="8" y1="17" x2="14" y2="17"/></svg>`,
-  };
-  icons.yml=icons.yaml;icons.jpg=icons.png;icons.jpeg=icons.png;icons.gif=icons.png;icons.webp=icons.png;icons.svg=icons.png;icons.bmp=icons.png;icons.ico=icons.png;
-  return icons[ext]||icons.txt;
-}
-function _fbFolderIcon(){
-  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 }
 async function refreshWorkspaceFiles(){
   const el=document.getElementById('fbWorkspace');
@@ -6819,48 +6511,22 @@ async function refreshWorkspaceFiles(){
     const r=await fetch('/api/user-files');
     const d=await r.json();
     const files=d.files||[];
-    if(!files.length){el.innerHTML='<div class="fb-empty"><div class="fb-empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" opacity=".4"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>No workspace files yet<br><span style="opacity:.6">Files created by the AI will appear here</span></div>';return;}
+    if(!files.length){el.innerHTML='<div class="fb-empty">No files yet. The AI will create files here as you work.</div>';return;}
     const folders={};
     files.forEach(f=>{const fld=f.folder||'';if(!folders[fld])folders[fld]=[];folders[fld].push(f);});
-    // Sort files within each folder by name
-    Object.values(folders).forEach(arr=>arr.sort((a,b)=>a.name.localeCompare(b.name)));
     let html='';
-    // Root files first
-    if(folders['']){
-      for(const f of folders['']){
-        const ext=(f.name.split('.').pop()||'').toLowerCase();
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
-          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
-          +`<span class="fb-file-name">${esc(f.name)}</span>`
-          +`<span class="fb-file-ext">.${esc(ext)}</span>`
-          +`<span class="fb-file-size">${formatFileSize(f.size)}</span>`
-          +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
-          +`</div>`;
-      }
-    }
-    // Then folders
-    const sortedFolders=Object.keys(folders).filter(f=>f).sort();
+    const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
     for(const fld of sortedFolders){
-      const items=folders[fld];
-      html+=`<div class="fb-folder">`
-        +`<div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')">`
-        +`<span class="fb-folder-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`
-        +`<span class="fb-folder-icon">${_fbFolderIcon()}</span>`
-        +`<span class="fb-folder-name">${esc(fld)}</span>`
-        +`<span class="fb-folder-count">${items.length}</span>`
-        +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
-        +`</div><div class="fb-folder-body">`;
-      for(const f of items){
-        const ext=(f.name.split('.').pop()||'').toLowerCase();
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
-          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
-          +`<span class="fb-file-name">${esc(f.name)}</span>`
-          +`<span class="fb-file-ext">.${esc(ext)}</span>`
-          +`<span class="fb-file-size">${formatFileSize(f.size)}</span>`
-          +`<button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
-          +`</div>`;
+      if(!folders[fld])continue;
+      if(fld){
+        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon" style="color:var(--accent)">▸</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
       }
-      html+=`</div></div>`;
+      for(const f of folders[fld]){
+        const ext=(f.name.split('.').pop()||'').toLowerCase();
+        const icon=ext==='md'?'◆':ext==='json'?'◇':ext==='txt'?'▪':ext==='yaml'||ext==='yml'?'▫':'▪';
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">${icon}</span><span class="fb-file-name">${esc(f.name)}</span><span class="fb-file-size">${formatFileSize(f.size)}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(f.path)}')" title="Delete">✕</button></div>`;
+      }
+      if(fld)html+=`</div></div>`;
     }
     el.innerHTML=html;
   }catch{el.innerHTML='<div class="fb-empty">Could not load files.</div>';}
@@ -6887,23 +6553,13 @@ async function refreshChatFiles(){
       html+='<div class="fb-section-title">Generated Files</div>';
       for(const f of genFiles){
         const name=f.path.split('/').pop()||f.path;
-        const ext=(name.split('.').pop()||'').toLowerCase();
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')">`
-          +`<span class="fb-file-icon">${_fbFileIcon(ext)}</span>`
-          +`<span class="fb-file-name">${esc(name)}</span>`
-          +`<span class="fb-file-ext">${esc(f.action)}</span>`
-          +`</div>`;
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">◆</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
       }
     }
     if(uploads.length){
       html+='<div class="fb-section-title">Uploaded Files</div>';
       for(const u of uploads){
-        const uext=(u.name.split('.').pop()||'').toLowerCase();
-        html+=`<div class="fb-file">`
-          +`<span class="fb-file-icon">${_fbFileIcon(uext)}</span>`
-          +`<span class="fb-file-name">${esc(u.name)}</span>`
-          +`<span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span>`
-          +`</div>`;
+        html+=`<div class="fb-file"><span class="fb-file-icon">▪</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
       }
     }
     if(!html)html='<div class="fb-empty">No files in this chat yet.</div>';
@@ -7061,230 +6717,11 @@ document.addEventListener('DOMContentLoaded',()=>{
   }));
 });
 
-// ─── Voice Recording & Transcription ──────────────
-let _voiceRecording = false;
-let _voiceMediaRecorder = null;
-let _voiceChunks = [];
-let _voiceTranscript = '';
-
+// ─── Voice (stub) ─────────────────────────────────
 function toggleTTS(){}
 function speak(){}
-
-function toggleMic() {
-  if (_voiceRecording) {
-    stopVoiceRecording();
-  } else {
-    startVoiceRecording();
-  }
-}
-
-async function startVoiceRecording() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    _voiceChunks = [];
-    _voiceTranscript = '';
-    // Use webm for broad browser support
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-    _voiceMediaRecorder = new MediaRecorder(stream, { mimeType });
-    _voiceMediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) _voiceChunks.push(e.data);
-    };
-    _voiceMediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      handleVoiceRecordingDone();
-    };
-    _voiceMediaRecorder.start(250); // collect chunks every 250ms
-    _voiceRecording = true;
-    // Open orb overlay
-    const orbOv = document.getElementById('orbOv');
-    const orb = document.getElementById('orb');
-    const orbLbl = document.getElementById('orbLbl');
-    const orbTxt = document.getElementById('orbTxt');
-    const orbActions = document.getElementById('orbActions');
-    const orbStatus = document.getElementById('orbStatus');
-    orbOv.classList.add('open');
-    orb.className = 'orb listening';
-    orbLbl.textContent = 'LISTENING';
-    orbTxt.textContent = 'Recording... tap the orb to stop';
-    orbActions.style.display = 'none';
-    orbStatus.textContent = '';
-    // Mic button pulse
-    const btn = document.getElementById('btnMic');
-    if (btn) btn.classList.add('recording');
-    // Tap orb to stop
-    orb.onclick = () => stopVoiceRecording();
-  } catch (err) {
-    console.error('Mic access denied:', err);
-    showToast('Microphone access denied', 'error');
-  }
-}
-
-function stopVoiceRecording() {
-  if (_voiceMediaRecorder && _voiceMediaRecorder.state !== 'inactive') {
-    _voiceMediaRecorder.stop();
-  }
-  _voiceRecording = false;
-  const btn = document.getElementById('btnMic');
-  if (btn) btn.classList.remove('recording');
-  const orb = document.getElementById('orb');
-  orb.className = 'orb thinking';
-  document.getElementById('orbLbl').textContent = 'TRANSCRIBING';
-  document.getElementById('orbTxt').textContent = 'Processing audio...';
-  orb.onclick = null;
-}
-
-async function handleVoiceRecordingDone() {
-  if (_voiceChunks.length === 0) {
-    closeOrb();
-    return;
-  }
-  const blob = new Blob(_voiceChunks, { type: _voiceMediaRecorder.mimeType || 'audio/webm' });
-  if (blob.size < 100) {
-    closeOrb();
-    showToast('Recording too short', 'error');
-    return;
-  }
-  // Send to server for transcription
-  const formData = new FormData();
-  formData.append('audio', blob, 'voice.webm');
-  try {
-    const resp = await fetch('/api/voice/transcribe', { method: 'POST', body: formData });
-    const data = await resp.json();
-    if (data.error) {
-      document.getElementById('orbTxt').textContent = data.error;
-      document.getElementById('orbLbl').textContent = 'ERROR';
-      document.getElementById('orb').className = 'orb';
-      setTimeout(() => closeOrb(), 2000);
-      return;
-    }
-    _voiceTranscript = data.text || '';
-    // Show transcript and action buttons
-    document.getElementById('orb').className = 'orb';
-    document.getElementById('orbLbl').textContent = 'TRANSCRIBED';
-    document.getElementById('orbTxt').textContent = _voiceTranscript;
-    document.getElementById('orbActions').style.display = 'flex';
-  } catch (err) {
-    document.getElementById('orbTxt').textContent = 'Transcription failed';
-    document.getElementById('orb').className = 'orb';
-    setTimeout(() => closeOrb(), 2000);
-  }
-}
-
-function voiceSendAsChat() {
-  if (!_voiceTranscript) return;
-  const input = document.getElementById('msgInput');
-  input.value = _voiceTranscript;
-  autoResize(input);
-  closeOrb();
-  sendMessage();
-}
-
-async function voiceSaveNote() {
-  if (!_voiceTranscript) return;
-  const orbStatus = document.getElementById('orbStatus');
-  orbStatus.textContent = 'Routing to workspace...';
-  document.getElementById('orbActions').style.display = 'none';
-  try {
-    const resp = await fetch('/api/voice/process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: _voiceTranscript }),
-    });
-    const data = await resp.json();
-    if (data.error) {
-      orbStatus.textContent = 'Error: ' + data.error;
-      setTimeout(() => closeOrb(), 2500);
-      return;
-    }
-    orbStatus.textContent = `✓ Saved to ${data.target_file}`;
-    showToast(`Voice note saved to ${data.target_file}`, 'success');
-    setTimeout(() => closeOrb(), 1800);
-  } catch (err) {
-    orbStatus.textContent = 'Failed to save';
-    setTimeout(() => closeOrb(), 2000);
-  }
-}
-
-function closeOrb() {
-  const orbOv = document.getElementById('orbOv');
-  orbOv.classList.remove('open');
-  // Clean up recording if still active
-  if (_voiceRecording) {
-    _voiceRecording = false;
-    if (_voiceMediaRecorder && _voiceMediaRecorder.state !== 'inactive') {
-      _voiceMediaRecorder.stop();
-    }
-    const btn = document.getElementById('btnMic');
-    if (btn) btn.classList.remove('recording');
-  }
-  _voiceTranscript = '';
-  _voiceChunks = [];
-}
-
-// ─── Momentum Dashboard ──────────────────────────
-async function openMomentumDashboard() {
-  const state = loadProductivityState();
-  const todos = state.todos || [];
-  try {
-    const resp = await fetch('/api/momentum', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ todos }),
-    });
-    const data = await resp.json();
-    if (data.error) { showToast(data.error, 'error'); return; }
-    // Render as a full-page modal-style overlay
-    let html = `<div class="momentum-dash-inner">`;
-    html += `<div class="momentum-dash-header"><h2>Momentum Dashboard</h2><button class="momentum-dash-close" onclick="this.closest('.momentum-dash').remove()">✕</button></div>`;
-    // Score hero
-    const verdictIcons = { on_fire: '🔥', steady: '⚡', slowing: '🐢', stalled: '❄️' };
-    const verdictColors = { on_fire: 'var(--green)', steady: 'var(--accent)', slowing: 'var(--yellow, #e6a700)', stalled: 'var(--red)' };
-    const icon = verdictIcons[data.verdict] || '⚡';
-    const color = verdictColors[data.verdict] || 'var(--accent)';
-    const pct = Math.min(100, Math.max(0, data.score || 0));
-    const circ = 2 * Math.PI * 54;
-    const off = circ * (1 - pct / 100);
-    html += `<div class="momentum-hero">`
-      + `<div class="momentum-ring-lg">`
-      + `<svg viewBox="0 0 120 120" width="120" height="120">`
-      + `<circle cx="60" cy="60" r="54" fill="none" stroke="var(--border-subtle)" stroke-width="8"/>`
-      + `<circle cx="60" cy="60" r="54" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${off}" transform="rotate(-90 60 60)"/>`
-      + `</svg><div class="momentum-ring-label">${icon}<br><span>${pct}</span></div></div>`
-      + `<div class="momentum-verdict">${esc(data.verdict_text || '')}</div>`
-      + `<div class="momentum-stats-row">`
-      + `<div class="momentum-stat-card"><div class="msc-num" style="color:var(--green)">${data.done || 0}</div><div class="msc-label">Completed</div></div>`
-      + `<div class="momentum-stat-card"><div class="msc-num" style="color:var(--yellow, #e6a700)">${data.pending || 0}</div><div class="msc-label">Pending</div></div>`
-      + `<div class="momentum-stat-card"><div class="msc-num">${data.completion_rate || 0}%</div><div class="msc-label">Rate</div></div>`
-      + `</div></div>`;
-    // Timeline
-    if (data.timeline && data.timeline.length) {
-      const maxC = Math.max(1, ...data.timeline.map(t => t.chats || 0));
-      const bars = data.timeline.map(t => {
-        const h = Math.max(4, ((t.chats || 0) / maxC) * 60);
-        return `<div class="md-bar-col"><div class="md-bar" style="height:${h}px;background:${color}"></div><div class="md-bar-lbl">${esc(t.label || '')}</div></div>`;
-      }).join('');
-      html += `<div class="momentum-section"><h3>7-Day Activity</h3><div class="md-bars">${bars}</div></div>`;
-    }
-    // Friction
-    if (data.friction_points && data.friction_points.length) {
-      const fp = data.friction_points.map(f =>
-        `<div class="md-friction-item"><div class="md-friction-name">${esc(f.name || '')} — <span class="md-friction-idle">${f.days_idle || '?'}d idle</span></div><div class="md-friction-starter">${esc(f.starter || '')}</div></div>`
-      ).join('');
-      html += `<div class="momentum-section"><h3>Friction Points</h3>${fp}</div>`;
-    }
-    html += `</div>`;
-    // Remove existing dashboard if open
-    const existing = document.querySelector('.momentum-dash');
-    if (existing) existing.remove();
-    const overlay = document.createElement('div');
-    overlay.className = 'momentum-dash';
-    overlay.innerHTML = html;
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    document.body.appendChild(overlay);
-  } catch (err) {
-    showToast('Failed to load momentum data', 'error');
-  }
-}
+function toggleMic(){}
+function closeOrb(){}
 
 // ─── Guest Limit (stub) ───────────────────────────
 function showGuestLimit(){}
@@ -7408,7 +6845,9 @@ async function refreshCanvasFiles(){
       if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ ${esc(fld)}</div><div>`;
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
-        html+=`<div class="cfp-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="cfp-icon">${_fbFileIcon(ext)}</span><span class="cfp-name">${esc(f.name)}</span></div>`;
+        const isImg=['png','jpg','jpeg','gif','webp','svg','bmp','ico'].includes(ext);
+        const icon=isImg?'🖼':ext==='md'?'◆':ext==='pdf'?'📄':'▪';
+        html+=`<div class="cfp-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="cfp-icon">${icon}</span><span class="cfp-name">${esc(f.name)}</span></div>`;
       }
       if(fld) html+='</div>';
     }
@@ -7580,101 +7019,21 @@ async function canvasPresetEdit(type){
   const instruction=presetMap[type]||type;
   const lang=document.getElementById('canvasLang').textContent||'text';
   document.getElementById('canvasStatus').textContent='AI is editing...';
-  // Show streaming overlay
-  const wrap=document.querySelector('.canvas-editor-wrap');
-  let overlay=wrap?.querySelector('.canvas-streaming-overlay');
-  if(!overlay&&wrap){
-    overlay=document.createElement('div');
-    overlay.className='canvas-streaming-overlay';
-    overlay.innerHTML='<span class="spinner"></span> AI is editing...';
-    wrap.prepend(overlay);
-  }
-  editor.classList.add('streaming');
   try{
     const r=await apiFetch('/api/canvas/apply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content,instruction,language:lang,stream:true})});
-    if(!r.ok){
-      const d=await r.json();
-      document.getElementById('canvasStatus').textContent='Edit failed';
-      showToast(d.error||'Edit failed','error');
-      editor.classList.remove('streaming');
-      overlay?.remove();
-      return;
-    }
-    const ct=r.headers.get('content-type')||'';
-    if(ct.includes('text/event-stream')||ct.includes('application/x-ndjson')){
-      // Streaming response
-      const reader=r.body.getReader();
-      const decoder=new TextDecoder();
-      let accumulated='';
-      let buffer='';
-      editor.value='';
-      editor.classList.remove('streaming');
-      while(true){
-        const {done,value}=await reader.read();
-        if(done)break;
-        buffer+=decoder.decode(value,{stream:true});
-        const lines=buffer.split('\n');
-        buffer=lines.pop()||'';
-        for(const line of lines){
-          const trimmed=line.trim();
-          if(!trimmed)continue;
-          try{
-            const chunk=JSON.parse(trimmed);
-            if(chunk.text){
-              accumulated+=chunk.text;
-              editor.value=accumulated;
-              editor.scrollTop=editor.scrollHeight;
-            }
-            if(chunk.done){
-              // Final
-            }
-          }catch{}
-        }
-      }
-      // Process remaining buffer
-      if(buffer.trim()){
-        try{
-          const chunk=JSON.parse(buffer.trim());
-          if(chunk.text){accumulated+=chunk.text;editor.value=accumulated;}
-        }catch{}
-      }
-      const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
-      if(tab)tab.content=editor.value;
-      updateCanvasStats();
-      document.getElementById('canvasStatus').textContent='Edit applied';
-      showToast('Canvas updated','success');
-    }else{
-      // Non-streaming fallback
-      const d=await r.json();
-      if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');editor.classList.remove('streaming');overlay?.remove();return;}
-      // Animate the text change with a typing effect
-      const newContent=d.content||'';
-      editor.classList.remove('streaming');
-      editor.value='';
-      let i=0;
-      const chunkSize=Math.max(1,Math.floor(newContent.length/60));
-      const typeInterval=setInterval(()=>{
-        const end=Math.min(i+chunkSize,newContent.length);
-        editor.value=newContent.slice(0,end);
-        editor.scrollTop=editor.scrollHeight;
-        i=end;
-        if(i>=newContent.length){
-          clearInterval(typeInterval);
-          const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
-          if(tab)tab.content=editor.value;
-          updateCanvasStats();
-          document.getElementById('canvasStatus').textContent='Edit applied';
-          showToast('Canvas updated','success');
-        }
-      },16);
-    }
+      body:JSON.stringify({content,instruction,language:lang})});
+    const d=await r.json();
+    if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');return;}
+    editor.value=d.content||'';
+    const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
+    if(tab)tab.content=editor.value;
+    updateCanvasStats();
+    document.getElementById('canvasStatus').textContent='Edit applied';
+    showToast('Canvas updated','success');
   }catch(e){
     document.getElementById('canvasStatus').textContent='Edit failed';
     showToast('AI edit failed','error');
   }
-  editor.classList.remove('streaming');
-  overlay?.remove();
 }
 
 // ─── Canvas run / preview ─────────────────────────
