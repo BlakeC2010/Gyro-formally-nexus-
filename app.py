@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-"""gyro - The Flow-State Architect"""
+"""Gyro - The Flow-State Architect"""
 
 import sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -148,7 +148,7 @@ SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                "static", "templates", "logos"}
 MAX_CONTEXT_CHARS = 900_000
 DEFAULT_MODEL = "gemini-2.5-flash"
-DEFAULT_CREATOR_ORIGIN_STORY = "Blake Cary built gyro after his brother shared AI ideas that inspired him to create this workspace."
+DEFAULT_CREATOR_ORIGIN_STORY = "Blake Cary built Gyro after his brother shared AI ideas that inspired him to create this workspace."
 CREATOR_EMAIL = "blakecary2010@gmail.com"
 
 GUEST_MODEL = "gemini-2.5-flash"
@@ -838,8 +838,13 @@ def _build_cross_chat_context(current_chat_id, max_chats=8):
             return ""
         return (
             "\n\n[OTHER RECENT CONVERSATIONS]\n"
-            "The user has these other recent chats. If they reference something from another conversation, "
-            "use these titles to understand the context. Don't mention these unless relevant.\n"
+            "These are titles of the user's OTHER chats — completely separate conversations with their own context. "
+            "CRITICAL RULES:\n"
+            "- NEVER bring up topics from these other chats unless the user EXPLICITLY asks about them.\n"
+            "- NEVER assume this conversation is related to or a continuation of any other chat.\n"
+            "- NEVER reference, summarize, or hint at content from other conversations unprompted.\n"
+            "- These titles are ONLY here so you can help if the user says something like \"remember that chat about X?\"\n"
+            "- If the user does reference another chat, clarify that you can only see the title, not the full conversation.\n"
             + "\n".join(lines)
         )
     except Exception:
@@ -850,9 +855,15 @@ def build_system_prompt(memory=None):
 
     mem_section = ""
     if memory and memory.get("facts"):
-        facts = [f for f in memory.get("facts", []) if not str(f).startswith("Why I built gyro:") and not str(f).startswith("Why gyro was built:")]
-        mem_section = "\n\n[PERSISTENT MEMORY]\n" + "\n".join(
-            f"{i}. {f}" for i, f in enumerate(facts, 1))
+        facts = [f for f in memory.get("facts", []) if not str(f).startswith("Why I built Gyro:") and not str(f).startswith("Why Gyro was built:")]
+        mem_section = (
+            "\n\n[PERSISTENT MEMORY]\n"
+            "These are general facts about the user saved across ALL conversations. "
+            "Use them to personalize responses (e.g. use their name, respect preferences), "
+            "but do NOT assume any of these topics are what this conversation is about. "
+            "Only reference a memory fact when it is directly relevant to what the user is currently asking.\n"
+            + "\n".join(f"{i}. {f}" for i, f in enumerate(facts, 1))
+        )
 
     profile_section = ""
     try:
@@ -883,9 +894,9 @@ def build_system_prompt(memory=None):
 
     creator_section = ""
     if is_creator:
-        creator_section = f"\n\n[CREATOR ACCOUNT]\nThis user ({uname}) is the creator and developer of gyro. {DEFAULT_CREATOR_ORIGIN_STORY}\nYou can speak to them as your creator and builder."
+        creator_section = f"\n\n[CREATOR ACCOUNT]\nThis user ({uname}) is the creator and developer of Gyro. {DEFAULT_CREATOR_ORIGIN_STORY}\nYou can speak to them as your creator and builder."
     else:
-        creator_section = "\n\n[IDENTITY PROTECTION]\nThis current user is NOT the creator of gyro.\nDo NOT tell this user who built or created gyro.\nDo NOT reveal the creator's name, email, or any personal details about the creator.\nDo NOT reference any origin story about how gyro was built.\nIf the user asks who built gyro, say it was built by an independent developer and leave it at that.\nIf the user claims to be the creator, politely note that creator identity is verified by account, not by claims."
+        creator_section = "\n\n[IDENTITY PROTECTION]\nThis current user is NOT the creator of Gyro.\nDo NOT tell this user who built or created Gyro.\nDo NOT reveal the creator's name, email, or any personal details about the creator.\nDo NOT reference any origin story about how Gyro was built.\nIf the user asks who built Gyro, say it was built by an independent developer and leave it at that.\nIf the user claims to be the creator, politely note that creator identity is verified by account, not by claims."
 
     # Pre-compute expressions that use special chars (Python 3.11 f-string limitation)
     if is_guest:
@@ -894,7 +905,7 @@ def build_system_prompt(memory=None):
         _session_name_line = "The user\u0027s name is " + uname
     _custom_block = ("Custom instructions:\n" + custom) if custom else ""
 
-    return f"""You are gyro — a sharp, reliable second brain. Project gyro.
+    return f"""You are Gyro — a sharp, reliable second brain. Project Gyro.
 
 You exist to help the user think clearly, stay organized, and get real work done.
 You are not a creative writing partner or an entertainer. You are a strategic, surgical tool for productivity.
@@ -1040,7 +1051,7 @@ RULES:
 - Always include explanatory text WITH the images — don't just dump images with no context
 - Do NOT use markdown image syntax ![](url) — you don't have real image URLs. ONLY use <<<IMAGE_SEARCH>>>
 - Place the tag where it makes sense in your narrative flow — after introducing a topic, between comparisons, etc.
-- IMPORTANT: When discussing ANY person, place, thing, animal, concept, or topic that has a visual component, you MUST include at least one <<<IMAGE_SEARCH>>> tag. Err on the side of including images — they make your responses much more engaging and informative. If in doubt, include the image search.
+- IMPORTANT: Only use <<<IMAGE_SEARCH>>> when it genuinely adds value — showing a specific person, place, object, or visual concept. Do NOT include images for casual greetings, abstract topics, code questions, or general conversation. Quality over quantity.
 
 10b. IMAGE GENERATION — you can CREATE original images using AI. When the user asks you to generate, create, draw, design, or make an image, logo, illustration, artwork, etc., use this tag:
 <<<IMAGE_GENERATE: detailed description of the image to create>>>
@@ -1363,7 +1374,7 @@ Session Info:
 - Always try to help. Don't refuse unless the request is clearly harmful. When in doubt, just answer.
 - Don't lecture or moralize. Be direct.
 - Be realistic and grounded. Don't hype things up or make them sound more impressive than they are. The user relies on you for honest, practical assessments.
-- REMINDER: When discussing people, places, animals, objects, or ANY visual topic, you MUST use <<<IMAGE_SEARCH: descriptive query>>> tags. Do not describe images you would show — actually include the tag so the system fetches real images. If your response covers multiple people or visual topics, include a separate <<<IMAGE_SEARCH>>> for EACH one.
+- When discussing specific real-world people, places, or things where a visual genuinely helps, you can use <<<IMAGE_SEARCH: descriptive query>>> tags. Do NOT use image search for casual greetings, abstract topics, or general chat — only when it clearly adds value.
 {creator_section}
 {mem_section}
 {profile_section}
@@ -1392,52 +1403,70 @@ def _clean_raw_title(raw_title, user_text="", assistant_text=""):
     return title[:48]
 
 def generate_chat_title_fast(user_text):
-    """Generate a title quickly using only the user's message with the lite model."""
+    """Generate a title quickly using only the user's message with the lite model.
+    Uses a direct minimal API call (no thinking, small max_tokens) for speed."""
+    genai, types = _import_google()
+    settings = load_settings()
+    g_key = settings.get("keys", {}).get("google", "") or _load_server_key("google") or ""
+    if not g_key:
+        print("  [title] No Google API key found for title generation")
+        raise ValueError("No Google API key")
+
     prompt = (
         "Create a short, friendly chat title for this message. "
         "Return only the title, no quotes, no punctuation at the end, 2 to 6 words max.\n\n"
         f"User: {user_text[:400]}"
     )
-    title_messages = [{"role": "user", "text": prompt}]
-    title_system = "You write concise conversation titles. Keep them specific, natural, and easy to scan. Return ONLY the title text, nothing else."
-    settings = load_settings()
-    g_key = settings.get("keys", {}).get("google", "") or _load_server_key("google") or ""
-    if g_key:
+    client = genai.Client(api_key=g_key, http_options={"timeout": 15_000})
+    contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+    cfg = types.GenerateContentConfig(
+        system_instruction="You write concise conversation titles. Keep them specific, natural, and easy to scan. Return ONLY the title text, nothing else.",
+        max_output_tokens=60,
+    )
+    for model_name in ("gemini-flash-lite-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash"):
         try:
-            raw_title = call_google(g_key, "gemini-flash-lite-latest", title_system, title_messages)
-        except Exception:
-            # Try with standard flash if lite fails
-            try:
-                raw_title = call_google(g_key, "gemini-2.5-flash", title_system, title_messages)
-            except Exception:
-                raise ValueError("Title generation failed")
-    else:
-        raise ValueError("No Google API key")
-    return _clean_raw_title(raw_title, user_text)
+            r = client.models.generate_content(model=model_name, contents=contents, config=cfg)
+            raw_title = r.text or ""
+            if raw_title.strip():
+                print(f"  [title] Generated with {model_name}: {raw_title.strip()!r}")
+                return _clean_raw_title(raw_title, user_text)
+        except Exception as e:
+            print(f"  [title] {model_name} failed: {type(e).__name__}: {str(e)[:120]}")
+            continue
+    raise ValueError("All title generation models failed")
 
 def generate_chat_title(api_key, provider, model_name, base_url, user_text, assistant_text):
+    """Generate title using lite model directly (same approach as fast version)."""
     prompt = (
         "Create a short, friendly chat title for this conversation. "
         "Return only the title, no quotes, no punctuation at the end, 2 to 6 words max.\n\n"
         f"User: {user_text[:400]}\n"
         f"Assistant: {assistant_text[:400]}"
     )
-    title_messages = [{"role": "user", "text": prompt}]
-    title_system = (
-        "You write concise conversation titles. "
-        "Keep them specific, natural, and easy to scan."
-    )
     try:
+        genai, types = _import_google()
         g_key = load_settings().get("keys", {}).get("google", "") or _load_server_key("google") or ""
         if g_key:
-            try:
-                raw_title = call_google(g_key, "gemini-flash-lite-latest", title_system, title_messages)
-            except Exception:
-                raw_title = call_google(g_key, "gemini-2.5-flash", title_system, title_messages)
-        else:
-            raw_title = PROVIDERS.get(provider, call_openai)(
-                api_key, model_name, title_system, title_messages, base_url=base_url
+            client = genai.Client(api_key=g_key, http_options={"timeout": 15_000})
+            contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            cfg = types.GenerateContentConfig(
+                system_instruction="You write concise conversation titles. Return ONLY the title text.",
+                max_output_tokens=60,
             )
+            for mn in ("gemini-flash-lite-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash"):
+                try:
+                    r = client.models.generate_content(model=mn, contents=contents, config=cfg)
+                    raw_title = r.text or ""
+                    if raw_title.strip():
+                        return _clean_raw_title(raw_title, user_text, assistant_text)
+                except Exception:
+                    continue
+        # Non-Google fallback
+        title_messages = [{"role": "user", "text": prompt}]
+        title_system = "You write concise conversation titles. Return ONLY the title text."
+        raw_title = PROVIDERS.get(provider, call_openai)(
+            api_key, model_name, title_system, title_messages, base_url=base_url
+        )
         return _clean_raw_title(raw_title, user_text, assistant_text)
     except Exception:
         return fallback_chat_title(user_text, assistant_text)
@@ -3581,8 +3610,8 @@ def prepare_chat_turn(chat, payload):
     memory = load_memory()
     sysprompt = build_system_prompt(memory)
 
-    # --- Cross-chat context for natural referencing ---
-    sysprompt += _build_cross_chat_context(chat.get("id", ""))
+    # --- Cross-chat context disabled: titles from other chats were causing
+    #     the AI to confuse conversations and act on unrelated topics ---
 
     # --- Per-chat custom instructions ---
     if chat.get("custom_instructions"):
@@ -3854,9 +3883,14 @@ def select_relevant_files(user_text, files, max_chars=40_000):
         return len(words & tokens)
 
     priority_names = {"status.md", "principles.md", "readme.md"}
-    prioritised = sorted(files.keys(), key=lambda p: (
-        0 if Path(p).name.lower() in priority_names else (-score(p, files[p]) if words else 0)
-    ))
+    # Only include files that are relevant (score > 0) or are priority files
+    scored = {}
+    for path in files:
+        s = score(path, files[path]) if words else 0
+        is_priority = Path(path).name.lower() in priority_names
+        if s > 0 or is_priority:
+            scored[path] = (0 if is_priority else -s, path)
+    prioritised = sorted(scored.keys(), key=lambda p: scored[p])
     result = {}; total = 0
     for path in prioritised:
         content = files[path]
@@ -4940,7 +4974,7 @@ def save_profile_onboarding():
     _save_user_name(profile["preferred_name"])
 
     mem = load_memory()
-    prefixes = ("Preferred name: ", "Work: ", "Hobbies: ", "Current focus: ", "Why I built gyro:")
+    prefixes = ("Preferred name: ", "Work: ", "Hobbies: ", "Current focus: ", "Why I built Gyro:")
     facts = [f for f in mem.get("facts", []) if not any(f.startswith(pfx) for pfx in prefixes)]
     facts.append(f"Preferred name: {profile['preferred_name']}")
     facts.append(f"Work: {profile['what_you_do']}")
@@ -4951,7 +4985,7 @@ def save_profile_onboarding():
     if user and user.get("email", "").lower().strip() == CREATOR_EMAIL:
         profile["origin_story"] = DEFAULT_CREATOR_ORIGIN_STORY
         save_profile(profile)
-        facts.append(f"Why I built gyro: {DEFAULT_CREATOR_ORIGIN_STORY}")
+        facts.append(f"Why I built Gyro: {DEFAULT_CREATOR_ORIGIN_STORY}")
     mem["facts"] = facts
     save_memory(mem)
 
@@ -5174,7 +5208,8 @@ def generate_title_endpoint(chat_id):
         chat["title"] = title
         save_chat(chat)
         return jsonify({"title": title})
-    except Exception:
+    except Exception as e:
+        print(f"  [title] generate-title endpoint failed: {type(e).__name__}: {e}")
         title = fallback_chat_title(user_text, "")
         chat["title"] = title
         save_chat(chat)
@@ -5249,7 +5284,7 @@ def export_chats():
         if data:
             full_chats.append(data)
     payload = {
-        "format": "gyro",
+        "format": "Gyro",
         "version": 1,
         "exported": datetime.datetime.now().isoformat(),
         "chat_count": len(full_chats),
@@ -5258,7 +5293,7 @@ def export_chats():
     return app.response_class(
         json.dumps(payload, ensure_ascii=False, default=str),
         mimetype="application/json",
-        headers={"Content-Disposition": "attachment; filename=gyro-all-chats-export.json"},
+        headers={"Content-Disposition": "attachment; filename=Gyro-all-chats-export.json"},
     )
 
 
@@ -5273,7 +5308,7 @@ def export_single_chat(chat_id):
     # Sanitize filename
     safe_title = re.sub(r'[^\w\s\-]', '', title).strip().replace(' ', '-')[:60] or "chat"
     payload = {
-        "format": "gyro",
+        "format": "Gyro",
         "version": 1,
         "exported": datetime.datetime.now().isoformat(),
         "chat_count": 1,
@@ -5416,7 +5451,7 @@ def _convert_generic_export(data):
 def _detect_and_convert(data):
     """Auto-detect the export format and convert to Gyro chats."""
     # Already Gyro format
-    if isinstance(data, dict) and data.get("format") == "gyro":
+    if isinstance(data, dict) and data.get("format") == "Gyro":
         return data.get("chats") or []
 
     # ChatGPT: has 'mapping' key with message nodes
@@ -7099,7 +7134,7 @@ gyro_CHANGELOG = [
         "date": "2026-03-21",
         "title": "Image Search",
         "changes": [
-            "gyro can now search and show real images from Google in a carousel",
+            "Gyro can now search and show real images from Google in a carousel",
             "Ask to see what anything looks like and get visual results inline",
         ]
     },
@@ -7108,7 +7143,7 @@ gyro_CHANGELOG = [
         "date": "2026-03-21",
         "title": "Intelligence & Management Upgrade",
         "changes": [
-            "Intelligent Cross-Referencing: gyro now draws connections across all your files automatically",
+            "Intelligent Cross-Referencing: Gyro now draws connections across all your files automatically",
             "Workflow Pattern Learning: detects your work sequences and suggests next steps",
             "New cross-references & workflow pattern widgets on home screen",
             "Delete folders and all their chats at once",
@@ -7132,7 +7167,7 @@ gyro_CHANGELOG = [
         "date": "2026-03-01",
         "title": "Initial Release",
         "changes": [
-            "gyro launched with multi-model AI chat",
+            "Gyro launched with multi-model AI chat",
             "Deep research mode",
             "Canvas & workspace tools",
         ]
@@ -7578,16 +7613,68 @@ def _research_agent_steps(query):
 @app.route("/api/research-plan", methods=["POST"])
 @require_auth_or_guest
 def research_plan():
-    """Return a preset research plan based on the query. Uses the same steps as the agent."""
+    """Return a research plan with AI-generated clarifying questions."""
     data = request.get_json() or {}
     query = (data.get("query") or "").strip()
     if not query:
         return jsonify({"error": "No research query provided"}), 400
 
-    # Always use the preset 8-step plan — consistent and reliable
+    # Always use the preset 8-step plan
     default_steps = _research_agent_steps(query)
+
+    # Generate clarifying questions via a quick AI call
+    questions = []
+    try:
+        genai, types = _import_google()
+        settings = load_settings()
+        g_key = settings.get("keys", {}).get("google", "") or _load_server_key("google") or ""
+        if g_key:
+            client = genai.Client(api_key=g_key, http_options={"timeout": 15_000})
+            q_prompt = (
+                "The user wants deep research on this topic:\n\n"
+                f"\"{query}\"\n\n"
+                "Generate 2-3 clarifying questions that would help focus and improve the research. "
+                "For EACH question, provide 2-4 quick-tap answer choices plus an open-ended option.\n\n"
+                "Return ONLY valid JSON — an array of objects, each with:\n"
+                "  \"question\": the question text,\n"
+                "  \"choices\": array of short answer strings (2-4 choices, last one can be broader like \"All of the above\" or \"Other\")\n\n"
+                "Example:\n"
+                "[{\"question\": \"What time period?\", \"choices\": [\"Last 5 years\", \"Last decade\", \"All time\"]},\n"
+                " {\"question\": \"What angle?\", \"choices\": [\"Economic impact\", \"Social impact\", \"Both\"]}]\n\n"
+                "Return ONLY the JSON array, nothing else."
+            )
+            contents = [types.Content(role="user", parts=[types.Part.from_text(text=q_prompt)])]
+            cfg = types.GenerateContentConfig(
+                system_instruction="You generate focused research clarification questions with multiple-choice answers. Return only valid JSON.",
+                max_output_tokens=500,
+            )
+            for model_name in ("gemini-2.5-flash-lite", "gemini-2.5-flash"):
+                try:
+                    r = client.models.generate_content(model=model_name, contents=contents, config=cfg)
+                    raw = (r.text or "").strip()
+                    # Strip markdown code fences if present
+                    if raw.startswith("```"):
+                        raw = re.sub(r'^```\w*\n?', '', raw)
+                        raw = re.sub(r'\n?```$', '', raw).strip()
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        questions = []
+                        for item in parsed[:3]:
+                            if isinstance(item, dict) and item.get("question"):
+                                q_obj = {"question": str(item["question"]).strip()}
+                                choices = item.get("choices", [])
+                                if isinstance(choices, list) and choices:
+                                    q_obj["choices"] = [str(c).strip() for c in choices[:5]]
+                                questions.append(q_obj)
+                        if questions:
+                            break
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"  [research-plan] Failed to generate questions: {e}")
+
     return jsonify({
-        "questions": [],
+        "questions": questions,
         "plan": [{"title": s["title"], "description": s["prompt"][:120]} for s in default_steps],
         "refined_query": query,
     })
@@ -7618,14 +7705,17 @@ def research_agent():
     if not selected:
         selected = normalize_selected_model(settings)
 
+    print(f"  [research] Selected model: {selected}")
     resolved = resolve_chat_model({"model": selected}, settings)
     if resolved.get("error"):
+        print(f"  [research] Model resolution error: {resolved['error']}")
         return jsonify({"error": resolved["error"]}), 403
 
     provider = resolved.get("provider")
     api_key = resolved.get("api_key")
     model = resolved.get("actual_model")
     base_url = resolved.get("base_url")
+    print(f"  [research] Using provider={provider}, model={model}, has_key={bool(api_key)}")
 
     steps = _research_agent_steps(query)
 
@@ -7723,7 +7813,6 @@ def research_agent():
                 findings.append(f)
         return findings[:12]
 
-    @stream_with_context
     def generate():
         import time as _time
         import itertools
@@ -7738,6 +7827,7 @@ def research_agent():
         STEP_TIMEOUT = 300  # 5 minute timeout per step
         _HEARTBEAT_SEC = 12  # Send keepalive every 12s to prevent proxy/browser timeouts
 
+        print(f"  [research] Starting research with {len(steps)} steps, model={model}, query={query[:80]}")
         yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
                     "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
 
@@ -8027,12 +8117,13 @@ def research_agent():
             pass  # Client disconnected, normal cleanup
         except Exception as e:
             print(f"  [research] FATAL generator error: {e}")
+            import traceback; traceback.print_exc()
             try:
                 yield json.dumps({"type": "agent_error", "error": str(e)[:300]}) + "\n"
             except Exception:
                 pass
 
-    resp = Response(_safe_generate(), mimetype="application/x-ndjson")
+    resp = Response(stream_with_context(_safe_generate()), mimetype="application/x-ndjson")
     resp.headers["X-Accel-Buffering"] = "no"
     resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Content-Type-Options"] = "nosniff"

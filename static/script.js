@@ -144,8 +144,10 @@ function updateComposerBusyUI(){
   const busy=isChatRunning(curChat);
   const btnSend=document.getElementById('btnSend');
   const btnStop=document.getElementById('btnStop');
+  const btnMic=document.getElementById('btnMic');
   if(btnSend)btnSend.style.display=busy?'none':'';
   if(btnStop)btnStop.style.display=busy?'':'none';
+  if(btnMic)btnMic.style.display=busy?'none':'';
 }
 
 function setChatRunning(chatId,state,meta={}){
@@ -355,6 +357,20 @@ function retryMsg(btn){
   sendMessage();
 }
 
+function copyMsg(btn){
+  const msgEl=btn.closest('.msg');
+  if(!msgEl)return;
+  const content=msgEl.querySelector('.msg-content')||msgEl;
+  // Get text content, excluding action bar
+  const clone=content.cloneNode(true);
+  clone.querySelectorAll('.msg-actions').forEach(el=>el.remove());
+  const text=clone.innerText||clone.textContent||'';
+  navigator.clipboard.writeText(text.trim()).then(()=>{
+    btn.textContent='✓ Copied';
+    setTimeout(()=>{btn.textContent='⎘ Copy'},1500);
+  }).catch(()=>{});
+}
+
 // ─── Auto Resume ──────────────────────────────────
 async function tryAutoResume(){
   // Try to resume an authenticated session using a stored remember token
@@ -547,6 +563,8 @@ function toggleDevRaw(on){
   // Live re-render: re-render current chat to apply new mode (skip during active streaming)
   if(curChat&&!isChatRunning(curChat)){
     reRenderCurrentChat();
+  }else if(!curChat){
+    loadWelcome(true);
   }
 }
 function hideDevButton(){
@@ -815,8 +833,9 @@ function renderHomeWidget(w){
     const body=items.map(i=>{
       const doneClass=i.done?'wl-todo-done':'';
       const check=i.done?'✓':'○';
-      // Extract chat ID from todo item ID (format: tl_CHATID_listIdx_itemIdx)
-      const chatId=(i.id||'').split('_')[1]||'';
+      // Only link to chat for chat-derived tasks (tl_CHATID_listIdx_itemIdx)
+      const isChatTask=(i.id||'').startsWith('tl_');
+      const chatId=isChatTask?(i.id||'').split('_')[1]||'':'';
       const clickChat=chatId?`onclick="openChat('${esc(chatId)}')"`:''
       return `<div class="wl-todo-item ${doneClass}" data-todo-id="${esc(i.id||'')}" ${clickChat} style="${chatId?'cursor:pointer':''}">`
         +`<button class="wl-todo-check" onclick="event.stopPropagation();toggleHomeTodo('${esc(i.id||'')}')">${check}</button>`
@@ -832,7 +851,7 @@ function renderHomeWidget(w){
     const catIcons={'stale_chat':'⏸','task_overload':'📋','scope_creep':'📈','stalled_project':'🔄','deadline_soon':'⏰','resource_spread':'🎯','status_friction':'⚡','no_focus':'🧭'};
     const body=items.map(i=>{
       const icon=catIcons[i.category]||'●';
-      const actionAttr=i.action?`data-nudge-action='${esc(JSON.stringify(i.action))}'`:'';
+      const actionAttr=i.action?`data-nudge-action="${esc(JSON.stringify(i.action)).replace(/"/g,'&quot;')}"`:'';;
       return `<div class="wl-nudge-item" ${actionAttr}>`
         +`<span class="wl-nudge-icon">${icon}</span>`
         +`<div class="wl-nudge-body">`
@@ -860,7 +879,7 @@ function renderHomeWidget(w){
     const items=Array.isArray(w.items)?w.items:[];
     if(!items.length)return'';
     const body=items.map(i=>{
-      const actionAttr=i.action?`data-nudge-action='${esc(JSON.stringify(i.action))}'`:'';
+      const actionAttr=i.action?`data-nudge-action="${esc(JSON.stringify(i.action)).replace(/"/g,'&quot;')}"`:'';;
       return `<div class="wl-nudge-item" ${actionAttr}>`
         +`<span class="wl-nudge-icon">→</span>`
         +`<div class="wl-nudge-body">`
@@ -922,7 +941,7 @@ function renderHomeWidget(w){
 
 function buildInstantHomePlan(greeting){
   const state=loadProductivityState();
-  const todos=(state.todos||[]).filter(t=>!t.done).slice(0,5);
+  const todos=[...(state.todos||[]).filter(t=>!t.done),...(state.todos||[]).filter(t=>t.done)].slice(0,5);
   const reminders=(state.reminders||[]).filter(r=>!r.done);
   const chats=(allChats||[]).slice(0,4);
   const pool=[];
@@ -2502,72 +2521,46 @@ async function showResearchPlan(query, contentEl, area, chatId){
     const refined=plan.refined_query||query;
 
     let html=`<div class="ra-plan-container">`;
-    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><div><span class="ra-plan-title">Research Plan</span><div style="font-size:12px;color:var(--text-muted);margin-top:2px">Customize your research before launching</div></div></div>`;
+    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><div><span class="ra-plan-title">Research Plan</span><div style="font-size:12px;color:var(--text-muted);margin-top:2px">Review your research plan before launching</div></div></div>`;
     html+=`<div class="ra-plan-query-wrap"><label class="ra-plan-label">Research Query</label><textarea class="ra-plan-query" id="_raPlanQuery" rows="2">${esc(refined)}</textarea></div>`;
 
     if(questions.length){
-      html+=`<div class="ra-plan-questions"><div class="ra-plan-label">⚠️ Clarifying Questions</div><div class="ra-plan-q-hint">Answer these to improve research quality (optional)</div>`;
-      questions.forEach((q,i)=>{
-        html+=`<div class="ra-plan-q-row"><div class="ra-plan-q-text">${esc(q)}</div><input class="ra-plan-q-input" id="_raPlanQ${i}" placeholder="Your answer (optional)..." /></div>`;
+      html+=`<div class="ra-plan-questions"><div class="ra-plan-label">💬 Quick Questions <span style="font-weight:400;color:var(--text-muted)">(optional — tap to refine your research)</span></div>`;
+      questions.forEach((qObj,i)=>{
+        const qText=typeof qObj==='string'?qObj:(qObj.question||'');
+        const choices=Array.isArray(qObj.choices)?qObj.choices:[];
+        html+=`<div class="ra-plan-q-row"><div class="ra-plan-q-text">${esc(qText)}</div>`;
+        if(choices.length){
+          html+=`<div class="ra-plan-q-choices" data-q="${i}">`;
+          choices.forEach((c,j)=>{
+            html+=`<button class="ra-plan-q-chip" data-q="${i}" data-c="${j}" onclick="this.classList.toggle('ra-chip-active');document.getElementById('_raPlanQ${i}').value=Array.from(this.parentElement.querySelectorAll('.ra-chip-active')).map(b=>b.textContent).join(', ')">${esc(c)}</button>`;
+          });
+          html+=`</div>`;
+        }
+        html+=`<input class="ra-plan-q-input" id="_raPlanQ${i}" placeholder="Or type your own answer..." />`;
+        html+=`</div>`;
       });
       html+=`</div>`;
     }
 
-    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">Research Steps <span class="ra-plan-hint">drag to reorder · click × to remove · edit titles</span></div><div class="ra-plan-steps" id="_raPlanSteps">`;
+    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">Research Steps</div><div class="ra-plan-steps" id="_raPlanSteps">`;
     steps.forEach((s,i)=>{
-      html+=`<div class="ra-plan-step" draggable="true" data-idx="${i}"><span class="ra-plan-step-drag">⋮⋮</span><span class="ra-plan-step-num">${i+1}</span><input class="ra-plan-step-title" value="${esc(s.title)}" /><span class="ra-plan-step-desc">${esc(s.description||'')}</span><button class="ra-plan-step-rm" onclick="this.parentElement.remove();_raPlanRenum()" title="Remove step">×</button></div>`;
+      html+=`<div class="ra-plan-step"><span class="ra-plan-step-num">${i+1}</span><span class="ra-plan-step-title-ro">${esc(s.title)}</span></div>`;
     });
-    html+=`</div><button class="ra-plan-add-step" onclick="_raPlanAddStep()">+ Add Step</button></div>`;
+    html+=`</div></div>`;
 
     html+=`<div class="ra-plan-actions"><button class="ra-plan-btn ra-plan-btn-primary" id="_raPlanStart">🚀 Start Research</button><button class="ra-plan-btn ra-plan-btn-skip" id="_raPlanSkip">⚡ Quick Start</button></div>`;
     html+=`</div>`;
     contentEl.innerHTML=html;
 
-    // Drag-to-reorder
-    const stepsEl=document.getElementById('_raPlanSteps');
-    if(stepsEl){
-      let dragEl=null;
-      stepsEl.addEventListener('dragstart',e=>{dragEl=e.target.closest('.ra-plan-step');if(dragEl)dragEl.classList.add('ra-plan-dragging')});
-      stepsEl.addEventListener('dragend',()=>{if(dragEl)dragEl.classList.remove('ra-plan-dragging');dragEl=null;_raPlanRenum()});
-      stepsEl.addEventListener('dragover',e=>{
-        e.preventDefault();
-        const after=_getDragAfterElement(stepsEl,e.clientY);
-        if(dragEl){if(after){stepsEl.insertBefore(dragEl,after)}else{stepsEl.appendChild(dragEl)}}
-      });
-    }
-
-    window._raPlanRenum=()=>{
-      const items=document.querySelectorAll('#_raPlanSteps .ra-plan-step');
-      items.forEach((el,i)=>{const n=el.querySelector('.ra-plan-step-num');if(n)n.textContent=i+1});
-    };
-    window._raPlanAddStep=()=>{
-      const container=document.getElementById('_raPlanSteps');
-      if(!container)return;
-      const idx=container.children.length;
-      const div=document.createElement('div');
-      div.className='ra-plan-step';div.draggable=true;div.dataset.idx=idx;
-      div.innerHTML=`<span class="ra-plan-step-drag">⋮⋮</span><span class="ra-plan-step-num">${idx+1}</span><input class="ra-plan-step-title" value="New Step" /><span class="ra-plan-step-desc">Custom research step</span><button class="ra-plan-step-rm" onclick="this.parentElement.remove();_raPlanRenum()" title="Remove step">×</button>`;
-      container.appendChild(div);_raPlanRenum();
-    };
-
-    function _getDragAfterElement(container,y){
-      const els=[...container.querySelectorAll('.ra-plan-step:not(.ra-plan-dragging)')];
-      return els.reduce((closest,child)=>{
-        const box=child.getBoundingClientRect();
-        const offset=y-box.top-box.height/2;
-        if(offset<0&&offset>closest.offset) return{offset,element:child};
-        return closest;
-      },{offset:Number.NEGATIVE_INFINITY}).element;
-    }
-
     // Button handlers
     document.getElementById('_raPlanStart').addEventListener('click',async()=>{
       const finalQuery=document.getElementById('_raPlanQuery').value.trim()||query;
-      // Append answers to query context
       let context=finalQuery;
-      questions.forEach((q,i)=>{
+      questions.forEach((qObj,i)=>{
+        const qText=typeof qObj==='string'?qObj:(qObj.question||'');
         const inp=document.getElementById('_raPlanQ'+i);
-        if(inp&&inp.value.trim()) context+=`\n\nContext: ${q} — ${inp.value.trim()}`;
+        if(inp&&inp.value.trim()) context+=`\n\nContext: ${qText} — ${inp.value.trim()}`;
       });
       contentEl.innerHTML='';
       await runResearchAgent(context, contentEl, area, chatId);
@@ -2588,6 +2581,12 @@ async function runResearchAgent(query, contentEl, area, chatId){
   const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert & Stakeholder Analysis','Data & Comparative Analysis','Synthesis & Insights','Strategic Assessment','Final Intelligence Brief'];
   const totalSteps=8;
   let currentStep=0;
+  // Global retry function for all retry buttons
+  window._raRetry=function(btn){
+    if(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';}
+    contentEl.innerHTML='';
+    runResearchAgent(query, contentEl, area, chatId);
+  };
   // Smart auto-scroll: only auto-scroll if user is near bottom
   let _raUserScrolledAway=false;
   const _raScrollThreshold=200;
@@ -3028,7 +3027,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const actionBar=document.createElement('div');
           actionBar.className='ra-actions';
           window._raCopyReport=function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){})};
-          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-researching...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='✓ Copied!';setTimeout(function(){btn.textContent='📋 Copy Report'},1500)})(this)">📋 Copy Report</button>`;
+          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="window._raRetry(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='✓ Copied!';setTimeout(function(){btn.textContent='📋 Copy Report'},1500)})(this)">📋 Copy Report</button>`;
 
           // Update badge
           const badge=document.getElementById('_raBadge');
@@ -3054,13 +3053,14 @@ async function runResearchAgent(query, contentEl, area, chatId){
         }
       }
     }
+
     // Stream ended — check if we got a proper completion
     if(!_raDoneReceived){
       const totalTime=((Date.now()-startTime)/1000).toFixed(1);
       const badge=document.getElementById('_raBadge');
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Research Interrupted — '+totalTime+'s';}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. The server may have timed out. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. The server may have timed out. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
     }
   }catch(e){
@@ -3078,13 +3078,13 @@ async function runResearchAgent(query, contentEl, area, chatId){
       const badge=document.getElementById('_raBadge');
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Connection Lost — '+totalTime+'s';}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container').parentElement;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ lost';el.className='ra-section-status ra-failed';});
     }else{
       const totalTime=((Date.now()-startTime)/1000).toFixed(1);
       const badge=document.getElementById('_raBadge');
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='❌ Research Failed — '+totalTime+'s';}
-      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';var c=btn.closest('.ra-container')?.parentElement||contentEl;c.innerHTML='';runResearchAgent(${JSON.stringify(query).replace(/'/g,"\\'")},c,c.closest('.msg')?.parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/'/g,"\\'")})})(this)">🔄 Retry</button></div>`;
+      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></div>`;
       setStatus('Research failed.');
     }
   }finally{
@@ -4310,6 +4310,10 @@ async function sendMessage(opts){
   }
   if(!_silent){_codeRepromptCount=0;}
   if(!_targetChat&&curChat&&isChatRunning(curChat)&&!_silent){showToast('Already generating in this chat — switch to another chat or wait.','info');return;}
+  // Safety: if the welcome screen is visible, force new chat (curChat may be stale)
+  if(!_targetChat&&curChat&&isWelcomeScreenVisible()){
+    curChat=null;
+  }
   // Force-create a new chat if none exists (don't rely on createChat guard)
   let _isFirstMessage=false;
   if(!_targetChat&&!curChat){
@@ -4515,6 +4519,7 @@ async function sendMessage(opts){
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
     let buffer='',fullText='',thinkText='',isThinking=false;
+    const _streamDevRaw=devRawMode;  // Snapshot dev mode at stream start to prevent mid-stream format switches
     let _genFailures=[];
     // ── Multi-turn thinking state ──
     let _thinkTurn=0;              // Current thinking turn number (incremented each time thinking restarts)
@@ -4706,7 +4711,7 @@ async function sendMessage(opts){
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 const ta=contentEl.querySelector('.think-active');
                 if(ta){ta.remove();stopThinkingPhrases();}
-                if(devRawMode){
+                if(_streamDevRaw){
                   targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
                 }else{
                   targetEl.innerHTML=fmtLive(fullText);
@@ -4787,7 +4792,7 @@ async function sendMessage(opts){
             displayReply=displayReply.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
             // Strip any continuation markers from visible output
             displayReply=displayReply.replace(/<<<CONTINUE>>>/g,'').trim();
-            if(devRawMode){
+            if(_streamDevRaw){
               // In dev raw mode, show the full unprocessed AI response with all tags
               finalHTML+='<pre class="dev-raw-log">'+esc(fullText||data.reply||displayReply)+'</pre>';
             }else{
@@ -4798,18 +4803,18 @@ async function sendMessage(opts){
                 finalHTML+=fmt(displayReply);
               }
             }
-            if(!devRawMode&&choiceBlocks.length){
+            if(!_streamDevRaw&&choiceBlocks.length){
               const validBlocks=choiceBlocks.filter(cb=>cb.choices.length);
               if(validBlocks.length)finalHTML+=renderChoiceWizard(validBlocks);
             }
             const artifactIds=registerArtifactsFromReply(displayReply,data.files||[]);
-            if(!devRawMode&&data.files?.length){
+            if(!_streamDevRaw&&data.files?.length){
               finalHTML+='<div class="fops">';
               for(const f of data.files){const fname=f.path.split('/').pop().split('\\').pop();finalHTML+=`<div class="fo"><a href="#" onclick="event.preventDefault();openWorkspaceFile('${encodeURIComponent(f.path)}')" class="fo-link">📄 ${esc(f.action==='created'?'Created':'Updated')}: ${esc(fname)}</a></div>`;}
               finalHTML+='</div>';
             }
-            if(!devRawMode)finalHTML+=renderArtifactCards(artifactIds,'ready');
-            if(!devRawMode&&data.code_results?.length){
+            if(!_streamDevRaw)finalHTML+=renderArtifactCards(artifactIds,'ready');
+            if(!_streamDevRaw&&data.code_results?.length){
               for(const cr of data.code_results){
                 const statusCls=cr.success?'code-run-success':'code-run-error';
                 let filesHtml='';
@@ -4842,7 +4847,7 @@ async function sendMessage(opts){
             }
 
             // ── Image search — show loading placeholders for pending images ──
-            if(!devRawMode&&data.pending_images?.length){
+            if(!_streamDevRaw&&data.pending_images?.length){
               for(const pi of data.pending_images){
                 const loaderId=`img-loader-${pi.index}`;
                 const loaderHTML=`<div class="img-grid-wrap img-loading-placeholder" id="${loaderId}" data-img-index="${pi.index}"><div class="img-grid-header"><span class="img-car-icon">🖼</span> Searching images for "${esc(pi.query)}"...</div><div class="img-loading-shimmer"><div class="img-shimmer-bar"></div><div class="img-shimmer-bar"></div><div class="img-shimmer-bar short"></div></div></div>`;
@@ -4858,7 +4863,7 @@ async function sendMessage(opts){
             }
 
             // Also replace any remaining image results that came synchronously (reload/history)
-            if(!devRawMode&&data.image_results?.length){
+            if(!_streamDevRaw&&data.image_results?.length){
               const imgMap={};
               for(const ir of data.image_results){
                 imgMap[ir.index]=renderImageBlock(ir);
@@ -4868,14 +4873,14 @@ async function sendMessage(opts){
                 return imgMap[idx]||'';
               });
             }
-            if(!devRawMode&&data.failed_images?.length){
+            if(!_streamDevRaw&&data.failed_images?.length){
               for(const fq of data.failed_images){
                 finalHTML+=`<div class="img-search-fail"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(fq)}" couldn't load — try again or search manually.</div>`;
               }
             }
 
             // ── AI image generation — show loading placeholders ──
-            if(!devRawMode&&data.pending_generations?.length){
+            if(!_streamDevRaw&&data.pending_generations?.length){
               for(const pg of data.pending_generations){
                 const loaderId=`imggen-loader-${pg.index}`;
                 const loaderHTML=`<div class="img-grid-wrap img-loading-placeholder" id="${loaderId}" data-imggen-index="${pg.index}"><div class="img-grid-header"><span class="img-gen-icon">🎨</span> Generating image...</div><div class="img-gen-prompt-preview">${esc(pg.prompt.length>80?pg.prompt.slice(0,80)+'…':pg.prompt)}</div><div class="img-loading-shimmer"><div class="img-shimmer-bar"></div><div class="img-shimmer-bar"></div><div class="img-shimmer-bar short"></div></div></div>`;
@@ -4889,7 +4894,7 @@ async function sendMessage(opts){
             }
 
             // Handle generated images on reload/history
-            if(!devRawMode&&data.generated_images?.length){
+            if(!_streamDevRaw&&data.generated_images?.length){
               for(const gi of data.generated_images){
                 const giPrompt=esc(gi.prompt);
                 const genHTML=`<div class="img-gen-result"><div class="img-gen-header"><span class="img-gen-icon">🎨</span><span class="img-gen-title">Generated Image</span><button class="img-gen-dl" onclick="downloadGenFromEl(this)" title="Download PNG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><img src="${gi.url}" alt="${giPrompt}" class="img-gen-output" onclick="openImageLightbox(this.src,'Generated Image')" onerror="this.onerror=null;this.parentElement.querySelector('.img-gen-footer').innerHTML='<div class=img-gen-prompt>Image no longer available</div>';this.remove()"><div class="img-gen-footer"><div class="img-gen-prompt">${giPrompt}</div><button class="img-gen-dl-full" onclick="downloadGenFromEl(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download PNG</button></div></div>`;
@@ -4903,7 +4908,7 @@ async function sendMessage(opts){
             }
 
             // ── Stock data — ensure loading placeholders exist for pending stocks ──
-            if(!devRawMode&&data.pending_stocks?.length){
+            if(!_streamDevRaw&&data.pending_stocks?.length){
               for(const ps of data.pending_stocks){
                 const loaderId=`stock-loader-${ps.index}`;
                 // fmt() should have rendered these already, but update the loading text
@@ -4922,7 +4927,7 @@ async function sendMessage(opts){
               }
             }
             // Handle stock results on reload/history
-            if(!devRawMode&&data.stock_results?.length){
+            if(!_streamDevRaw&&data.stock_results?.length){
               for(const sr of data.stock_results){
                 const stockHTML=renderStockCard(sr.ticker, sr.data);
                 const re=new RegExp(`<p>\\s*%%%STOCKBLOCK:${sr.index}%%%\\s*</p>|%%%STOCKBLOCK:${sr.index}%%%`,'g');
@@ -4935,7 +4940,7 @@ async function sendMessage(opts){
             }
 
             // ── HuggingFace results — render inline ──
-            if(!devRawMode&&data.hf_results?.length){
+            if(!_streamDevRaw&&data.hf_results?.length){
               for(const hr of data.hf_results){
                 const hfHTML=renderHFResult(hr);
                 const re=new RegExp(`<p>\\s*%%%HFBLOCK:${hr.index}%%%\\s*</p>|%%%HFBLOCK:${hr.index}%%%`,'g');
@@ -4981,7 +4986,7 @@ async function sendMessage(opts){
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
-              contentEl.innerHTML=finalHTML;
+              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
               renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               // Animate content in smoothly
@@ -5027,7 +5032,7 @@ async function sendMessage(opts){
                     if(loader){
                       const img=result;
                       const temp=document.createElement('div');
-                      temp.innerHTML=`<div class="img-gen-card" style="position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--bg-surface)"><img src="${img.url}" alt="${esc(img.prompt||'Generated image')}" style="width:100%;border-radius:14px;display:block;cursor:pointer" onclick="openLightbox(this.src)"><div style="padding:10px 14px;font-size:12px;color:var(--text-secondary)">🎨 ${esc(img.prompt||'Generated image')}</div></div>`;
+                      temp.innerHTML=`<div class="img-gen-card" style="position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--bg-surface);max-width:360px"><img src="${img.url}" alt="${esc(img.prompt||'Generated image')}" style="width:100%;border-radius:14px;display:block;cursor:pointer" onclick="openLightbox(this.src)"><div style="padding:10px 14px;font-size:12px;color:var(--text-secondary)">🎨 ${esc(img.prompt||'Generated image')}</div></div>`;
                       loader.replaceWith(temp.firstElementChild||temp);
                     }
                   }
@@ -5076,7 +5081,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#img-loader-${data.image.index}`);
               if(loader){
@@ -5101,7 +5106,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#img-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🖼</span> Image search for "${esc(data.query)}" couldn't load — try again or search manually.</div>`;
@@ -5124,7 +5129,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#imggen-loader-${data.image.index}`);
               const safePrompt=esc(data.image.prompt);
@@ -5165,7 +5170,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#imggen-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="img-grid-header"><span class="img-search-fail-icon">🎨</span> Image generation failed: ${esc(data.error||'Unknown error')}</div>`;
@@ -5188,7 +5193,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
               const loader=contentEl.querySelector(`#stock-loader-${data.stock.index}`);
               if(loader){
@@ -5212,7 +5217,7 @@ async function sendMessage(opts){
                   _autoScroll();
                 });
               }
-            }else if(!devRawMode&&canRender()){
+            }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
               if(loader){
                 loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">⚠️ Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
@@ -5608,7 +5613,7 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
+  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -5755,7 +5760,7 @@ function addMsg(role,text,files,extra={}){
         html+=fmt(displayText);
       }
     }
-    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
+    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
   }
   div.dataset.text=text||'';
   div.innerHTML=html;renderMathInElementSafe(div);area.appendChild(div);area.scrollTop=area.scrollHeight;
@@ -7492,14 +7497,37 @@ function toggleHomeTodo(id){
   if(!item)return;
   item.done=!item.done;
   saveProductivityState(state);
-  refreshHomeWidgets();
+  // Visual feedback: animate the row before re-rendering
+  const row=document.querySelector(`.wl-todo-item[data-todo-id="${CSS.escape(id)}"]`);
+  if(row){
+    if(item.done){
+      row.classList.add('wl-todo-done');
+      row.style.transition='opacity .3s, transform .3s';
+      row.style.opacity='.4';
+      row.style.transform='translateX(8px)';
+    }else{
+      row.classList.remove('wl-todo-done');
+    }
+    setTimeout(()=>refreshHomeWidgets(),350);
+  }else{
+    refreshHomeWidgets();
+  }
 }
 
 function deleteHomeTodo(id){
   const state=loadProductivityState();
   state.todos=state.todos.filter(t=>t.id!==id);
   saveProductivityState(state);
-  refreshHomeWidgets();
+  // Visual feedback: fade out before re-rendering
+  const row=document.querySelector(`.wl-todo-item[data-todo-id="${CSS.escape(id)}"]`);
+  if(row){
+    row.style.transition='opacity .25s, transform .25s';
+    row.style.opacity='0';
+    row.style.transform='translateX(-12px)';
+    setTimeout(()=>refreshHomeWidgets(),280);
+  }else{
+    refreshHomeWidgets();
+  }
 }
 
 function refreshHomeWidgets(){
@@ -7510,13 +7538,14 @@ function handleNudgeAction(btn){
   const item=btn.closest('.wl-nudge-item');
   if(!item)return;
   try{
-    const action=JSON.parse(item.dataset.nudgeAction||'{}');
+    const raw=item.getAttribute('data-nudge-action')||'{}';
+    const action=JSON.parse(raw);
     if(action.type==='open_chat'&&action.chat_id){
       openChat(action.chat_id);
     }else if(action.type==='prompt'&&action.text){
       fillMasterPrompt(action.text);
     }
-  }catch{}
+  }catch(e){console.log('nudge action error:',e);}
 }
 
 function _detectClientFriction(){
