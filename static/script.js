@@ -300,6 +300,11 @@ function editMsg(btn){
     const newText=editInput.value.trim();
     if(!newText&&!_editFiles.length)return;
 
+    // Stop any running stream first so the edit send isn't blocked
+    if(curChat&&isChatRunning(curChat)){
+      stopStreaming();
+    }
+
     // Re-attach files that came from the original message + any newly added files
     const readyFiles=_editFiles.filter(f=>!f._loading);
     if(readyFiles.length){
@@ -307,12 +312,20 @@ function editMsg(btn){
       renderPF();
     }
 
-    // Remove this message and all subsequent messages
+    // Remove this message and all subsequent messages from DOM
     let toRemove=[];
     let found=false;
     for(const el of allMsgs){
       if(el===msgEl)found=true;
       if(found)toRemove.push(el);
+    }
+    // Also remove any AI response divs that came after allMsgs snapshot
+    const currentMsgs=[...document.querySelectorAll('#chatArea .msg')];
+    const msgIdx=currentMsgs.indexOf(msgEl);
+    if(msgIdx>=0){
+      for(let i=msgIdx;i<currentMsgs.length;i++){
+        if(!toRemove.includes(currentMsgs[i]))toRemove.push(currentMsgs[i]);
+      }
     }
     toRemove.forEach(el=>el.remove());
 
@@ -324,8 +337,8 @@ function editMsg(btn){
     // Clean up window functions
     delete window._editRemoveFile;delete window._editHandleFiles;
     delete window._editToggleToolMenu;delete window._editCloseToolMenu;
-    // Trigger send
-    sendMessage();
+    // Small delay to let abort settle before re-sending
+    setTimeout(()=>sendMessage(),50);
   });
 }
 
@@ -4427,10 +4440,9 @@ async function sendMessage(opts){
     // Silent/auto-reprompt: minimal indicator, no "Thinking..." animation
     msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
   }else{
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span id="_thinkPhrase" style="display:inline-block;transition:opacity .3s ease,transform .3s ease"> Thinking...</span></div></div>';
+    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div></div></div>';
   }
   if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
-  if(!_silent)startThinkingPhrases(msgDiv.querySelector('#_thinkPhrase'));
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
   let _renderScheduled=false;
