@@ -1066,6 +1066,7 @@ IMAGE GENERATION RULES:
 - You can use MULTIPLE <<<IMAGE_GENERATE>>> tags in one response
 - Always accompany generated images with descriptive text about what you created
 - For best results, describe the image as if you're art-directing a professional designer
+- If the user uploads/attaches an image and asks you to generate a new image, the uploaded image will automatically be passed to the image generator as a visual reference. Describe what to change or keep from the reference in your prompt.
 - If image generation fails, the system will notify you automatically. Do NOT retry on your own — inform the user about the failure instead.
 - After generating an image, let the user know they can download it as a PNG using the download button that appears with the image.
 
@@ -1400,10 +1401,10 @@ def generate_chat_title_fast(user_text):
     title_messages = [{"role": "user", "text": prompt}]
     title_system = "You write concise conversation titles. Keep them specific, natural, and easy to scan. Return ONLY the title text, nothing else."
     settings = load_settings()
-    g_key = settings.get("keys", {}).get("google", "")
+    g_key = settings.get("keys", {}).get("google", "") or _load_server_key("google") or ""
     if g_key:
         try:
-            raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+            raw_title = call_google(g_key, "gemini-flash-lite-latest", title_system, title_messages)
         except Exception:
             # Try with standard flash if lite fails
             try:
@@ -1427,10 +1428,10 @@ def generate_chat_title(api_key, provider, model_name, base_url, user_text, assi
         "Keep them specific, natural, and easy to scan."
     )
     try:
-        g_key = load_settings().get("keys", {}).get("google", "")
+        g_key = load_settings().get("keys", {}).get("google", "") or _load_server_key("google") or ""
         if g_key:
             try:
-                raw_title = call_google(g_key, "gemini-2.5-flash-lite", title_system, title_messages)
+                raw_title = call_google(g_key, "gemini-flash-lite-latest", title_system, title_messages)
             except Exception:
                 raw_title = call_google(g_key, "gemini-2.5-flash", title_system, title_messages)
         else:
@@ -1674,19 +1675,37 @@ def extract_image_generation(text):
     result_text = pattern.sub(_replace, text)
     return result_text, generations
 
-def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None):
-    """Generate an image using Gemini 2.5 Flash Image model. Returns (image_base64, mime_type) or (None, error_str)."""
+def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None, reference_images=None):
+    """Generate an image using Gemini 2.5 Flash Image model.
+    reference_images: optional list of {data: base64_str, mime: str} to use as visual references.
+    Returns (image_base64, mime_type) or (None, error_str)."""
     try:
         genai, types = _import_google()
         if not api_key:
             settings = load_settings()
             api_key, _ = resolve_provider_key(settings, "google")
         if not api_key:
+            api_key = _load_server_key("google")
+        if not api_key:
             return None, "No Google API key configured"
         client = genai.Client(api_key=api_key)
+        # Build contents: text prompt + optional reference images
+        if reference_images:
+            parts = [types.Part.from_text(text=prompt)]
+            for img in reference_images:
+                try:
+                    parts.append(types.Part.from_bytes(
+                        data=base64.b64decode(img["data"]),
+                        mime_type=img["mime"]
+                    ))
+                except Exception:
+                    pass
+            contents = types.Content(role="user", parts=parts)
+        else:
+            contents = prompt
         response = client.models.generate_content(
             model="gemini-2.5-flash-image",
-            contents=[prompt],
+            contents=contents,
             config=types.GenerateContentConfig(
                 response_modalities=['TEXT', 'IMAGE'],
                 image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
@@ -3569,6 +3588,11 @@ def prepare_chat_turn(chat, payload):
     if chat.get("custom_instructions"):
         sysprompt += f"\n\n[CHAT-SPECIFIC INSTRUCTIONS]\n{chat['custom_instructions']}"
 
+    # --- Folder custom instructions ---
+    _folder_instr = payload.get("folder_instructions", "").strip()
+    if _folder_instr:
+        sysprompt += f"\n\n[FOLDER INSTRUCTIONS]\nThis chat is in a folder with these custom instructions. Follow them for all responses:\n{_folder_instr}"
+
     # --- Active tool instructions (injected silently into system prompt) ---
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
@@ -4424,7 +4448,9 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
     # Try streaming; on 400 errors with thinking+tools, retry without thinking
-    for _attempt in range(2):
+    _had_thinking = use_thinking
+    _had_tools = "tools" in cfg
+    for _attempt in range(3):
         try:
             stream = client.models.generate_content_stream(
                 model=model,
@@ -4469,6 +4495,10 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
                 print(f"  [thinking] Google stream: 400 error with thinking ({err_str[:100]}), retrying without thinking")
                 cfg.pop("thinking_config", None)
                 use_thinking = False
+                continue
+            if _attempt <= 1 and "400" in err_str and "tools" in cfg:
+                print(f"  [google] 400 error with tools ({err_str[:100]}), retrying without tools")
+                cfg.pop("tools", None)
                 continue
             raise
 
@@ -4733,6 +4763,7 @@ def auth_google():
     user["remember_tokens"] = tokens
     _save_user(user)
     session.permanent = True
+    session.pop("guest", None); session.pop("guest_id", None)
     session["user_id"] = user["id"]; session["email"] = user["email"]
     return jsonify({"user": {"id": user["id"], "email": user["email"],
                              "name": user["name"], "theme": user.get("theme", "dark"), "plan": user.get("plan", "free")},
@@ -4754,6 +4785,7 @@ def auth_resume():
     if hashed not in stored:
         return jsonify({"authenticated": False}), 401
     session.permanent = True
+    session.pop("guest", None); session.pop("guest_id", None)
     session["user_id"] = user["id"]
     session["email"] = user["email"]
     profile = load_profile()
@@ -5513,8 +5545,9 @@ def chat_message(chat_id):
     gen_results = []
     if image_generations:
         api_key = ctx["resolved"].get("api_key", "")
+        _ref_imgs = ctx.get("user_msg", {}).get("images") or None
         for entry in image_generations:
-            img_b64, result_or_err = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key)
+            img_b64, result_or_err = generate_image_gemini(entry['prompt'], entry['aspect_ratio'], api_key=api_key, reference_images=_ref_imgs)
             if img_b64:
                 data_uri = f"data:{result_or_err};base64,{img_b64}"
                 gen_results.append({"prompt": entry['prompt'], "index": entry['index'], "url": data_uri, "mime": result_or_err})
@@ -5536,6 +5569,17 @@ def chat_message(chat_id):
         chat["messages"][-1]["hf_results"] = hf_results_sync
     if image_results or gen_results or stock_results_sync or hf_results_sync:
         save_chat(chat)
+    # Clean up %%%IMGGEN:N%%% placeholders for failed image generations
+    if image_generations and len(gen_results) < len(image_generations):
+        _ok_indices = {g["index"] for g in gen_results}
+        _failed = [g for g in image_generations if g["index"] not in _ok_indices]
+        if _failed and chat["messages"]:
+            _msg = chat["messages"][-1]
+            _txt = _msg.get("text", "")
+            for g in _failed:
+                _txt = re.sub(rf'%%%IMGGEN:{g["index"]}%%%\s*', '', _txt)
+            _msg["text"] = _txt.strip()
+            save_chat(chat)
     result = {"reply": clean_wp if (image_searches or image_generations or stock_tickers_sync or hf_calls_sync) else clean, "files": executed, "memory_added": new_facts}
     if code_results:
         result["code_results"] = code_results
@@ -6239,7 +6283,8 @@ def chat_message_stream(chat_id):
                 _media_idx["gen"] += 1
                 entry = {"prompt": prompt, "index": idx, "aspect_ratio": aspect}
                 _api_key = resolved.get("api_key", "")
-                future = _media_executor.submit(generate_image_gemini, prompt, aspect, api_key=_api_key)
+                _ref_imgs = ctx.get("user_msg", {}).get("images") or None
+                future = _media_executor.submit(generate_image_gemini, prompt, aspect, api_key=_api_key, reference_images=_ref_imgs)
                 _media_fetches.append(("image_gen", entry, future))
                 return {"type": "media_loading", "kind": "image_gen", "index": idx, "prompt": prompt}
             elif tag_type == "STOCK":
@@ -6575,6 +6620,18 @@ def chat_message_stream(chat_id):
             if _fetched_images or _fetched_stocks or _fetched_gens or _hf_results_stream:
                 save_chat(chat)
 
+            # Clean up %%%IMGGEN:N%%% placeholders for failed image generations
+            if image_generations and len(_fetched_gens) < len(image_generations):
+                _ok_indices = {g["index"] for g in _fetched_gens}
+                _failed = [g for g in image_generations if g["index"] not in _ok_indices]
+                if _failed and chat["messages"]:
+                    _msg = chat["messages"][-1]
+                    _txt = _msg.get("text", "")
+                    for g in _failed:
+                        _txt = re.sub(rf'%%%IMGGEN:{g["index"]}%%%\s*', '', _txt)
+                    _msg["text"] = _txt.strip()
+                    save_chat(chat)
+
             # gen_ops_complete signal
             if image_searches or image_generations or stock_tickers:
                 total_ops = len(image_searches) + len(image_generations) + len(stock_tickers)
@@ -6648,6 +6705,72 @@ def canvas_apply():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/canvas/apply-stream", methods=["POST"])
+@require_auth
+def canvas_apply_stream():
+    d = request.get_json() or {}
+    content = (d.get("content") or "")
+    instruction = (d.get("instruction") or "").strip()
+    language = (d.get("language") or "text").strip()
+    if not content.strip():
+        return jsonify({"error": "Canvas is empty."}), 400
+    if not instruction:
+        return jsonify({"error": "Add an instruction for the canvas."}), 400
+
+    settings = load_settings()
+    selected_model = normalize_selected_model(settings)
+    allowed, reason, _ = model_access(selected_model, settings)
+    if not allowed:
+        return jsonify({"error": reason}), 400
+
+    resolved = resolve_chat_model({"model": selected_model}, settings)
+    if resolved.get("error"):
+        return jsonify({"error": resolved["error"]}), 400
+
+    canvas_prompt = (
+        "You are editing a document inside a side-by-side AI canvas. "
+        "Return only the updated document content. Do not wrap it in markdown fences. "
+        "Preserve useful structure, improve clarity, and follow the user's request exactly.\n\n"
+        f"Document language: {language}\n"
+        f"Instruction: {instruction}\n\n"
+        "[CURRENT DOCUMENT]\n"
+        f"{content}"
+    )
+
+    def _stream():
+        try:
+            g_key = resolve_provider_key(settings, "google")
+            genai = _import_google()
+            client = genai.Client(api_key=g_key)
+            resp = client.models.generate_content_stream(
+                model=resolved["actual_model"],
+                contents=[{"role": "user", "parts": [{"text": canvas_prompt}]}],
+                config={"system_instruction": "You edit documents. Return only the updated content, no fences."},
+            )
+            full = ""
+            for chunk in resp:
+                token = chunk.text or ""
+                if token:
+                    full += token
+                    yield json.dumps({"token": token}) + "\n"
+            yield json.dumps({"done": True, "content": full.strip()}) + "\n"
+        except Exception as e:
+            # Fallback to non-streaming
+            try:
+                updated = PROVIDERS.get(resolved["provider"], call_openai)(
+                    resolved["api_key"],
+                    resolved["actual_model"],
+                    build_system_prompt(load_memory()),
+                    [{"role": "user", "text": canvas_prompt}],
+                    base_url=resolved["base_url"],
+                )
+                yield json.dumps({"done": True, "content": (updated or "").strip()}) + "\n"
+            except Exception as e2:
+                yield json.dumps({"error": str(e2)}) + "\n"
+
+    return Response(stream_with_context(_stream()), mimetype="application/x-ndjson")
+
+
 @app.route("/api/canvas/run", methods=["POST"])
 @require_auth
 def canvas_run():
@@ -6690,13 +6813,51 @@ def canvas_run():
 def gen_image():
     prompt = (request.get_json() or {}).get("prompt", "").strip()
     if not prompt: return jsonify({"error": "No prompt"}), 400
-    api_key = load_settings().get("keys", {}).get("google", "")
+    settings = load_settings()
+    api_key = settings.get("keys", {}).get("google", "") or _load_server_key("google")
     if not api_key: return jsonify({"error": "Google API key required."}), 400
     try:
-        img = generate_image_google(api_key, prompt)
-        return jsonify({"image": img}) if img else jsonify({"error": "No image generated"}), 500
+        img_b64, result_or_err = generate_image_gemini(prompt, api_key=api_key)
+        if img_b64:
+            return jsonify({"image": img_b64, "mime": result_or_err})
+        return jsonify({"error": result_or_err or "No image generated"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/folders/enhance-instructions", methods=["POST"])
+@require_auth_or_guest
+def enhance_folder_instructions():
+    d = request.get_json() or {}
+    instructions = (d.get("instructions") or "").strip()
+    if not instructions:
+        return jsonify({"error": "No instructions provided."}), 400
+    settings = load_settings() if session.get("user_id") else {"keys": {}}
+    api_key = settings.get("keys", {}).get("google", "") or _load_server_key("google")
+    if not api_key:
+        return jsonify({"error": "No API key available."}), 400
+    try:
+        genai, types = _import_google()
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            "You are helping a user write better custom instructions for an AI chat folder. "
+            "The user wrote a brief description of what the folder is for. "
+            "Expand it into clear, detailed, well-structured instructions that an AI assistant should follow "
+            "for all conversations in this folder. Keep it practical and specific. "
+            "Return ONLY the enhanced instructions text, nothing else.\n\n"
+            f"User's description:\n{instructions}"
+        )
+        r = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=prompt,
+        )
+        enhanced = r.text.strip() if r.text else ""
+        if not enhanced:
+            return jsonify({"error": "No enhancement generated."}), 500
+        return jsonify({"enhanced": enhanced})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/upload", methods=["POST"])
 @require_auth_or_guest

@@ -391,11 +391,13 @@ async function apiFetch(url, opts={}){
 }
 
 // ─── Session keep-alive ───────────────────────────
-function _handleSessionLost(){
+async function _handleSessionLost(){
   showToast('Session expired. Please sign in again.','info');
   curUser=null; curChat=null;
   document.getElementById('appPage').classList.remove('visible');
   document.getElementById('loginPage').style.display='flex';
+  googleInitDone=false;
+  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -1179,31 +1181,45 @@ function openFolderView(folder){
   document.getElementById('topTitle').textContent=folder;
   const meta=getFolderMeta(folder);
   const fIcon=meta.emoji||'📁';
-  const fColor=meta.color||'var(--accent)';
-  const chatListHtml=chats.length?chats.map(c=>{
-    const preview=c.messages?.length?`${c.messages.length} messages`:'Empty chat';
-    return `<div class="fv-chat" onclick="openChat('${esc(c.id)}')">`
-      +`<span class="fv-chat-icon">💬</span>`
-      +`<div class="fv-chat-info"><div class="fv-chat-title">${esc(c.title||'Untitled')}</div><div class="fv-chat-meta">${preview}</div></div>`
-      +`<span class="fv-chat-arrow">→</span></div>`;
-  }).join('')
-    :'<div class="fv-empty">No chats yet. Start one below.</div>';
-  area.innerHTML=`<div class="folder-view">
-    <div class="fv-hero">
-      <div class="fv-hero-icon" style="background:${fColor}20;color:${fColor}">${fIcon}</div>
-      <h1 class="fv-title">${esc(folder)}</h1>
-      <p class="fv-subtitle">${chats.length} chat${chats.length!==1?'s':''}</p>
+  const instructions=meta.instructions||'';
+  const ef=esc(folder).replace(/'/g,"\\'");
+
+  // Prompt-style action cards (same grid as main homepage)
+  const actionCards=`
+    <div class="wl-action-card" onclick="createChat('${ef}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation</span></div>
+    <div class="wl-action-card" onclick="customizeFolder('${ef}')"><span class="wl-ac-icon">⚙️</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Icon, name & instructions</span></div>
+    <div class="wl-action-card" onclick="renameFolderFromView('${ef}')"><span class="wl-ac-icon">✏️</span><span class="wl-ac-label">Rename</span><span class="wl-ac-sub">Change folder name</span></div>
+    <div class="wl-action-card" onclick="deleteFolderAndChats('${ef}')"><span class="wl-ac-icon" style="color:var(--red)">🗑</span><span class="wl-ac-label">Delete</span><span class="wl-ac-sub">Remove folder & chats</span></div>`;
+
+  // Build data widgets
+  const widgets=[];
+  if(chats.length){
+    const items=chats.slice(0,4).map(c=>({id:c.id,title:c.title||'Untitled'}));
+    widgets.push(renderHomeWidget({type:'recent',size:'medium',title:`Chats (${chats.length})`,items}));
+  }
+  if(instructions){
+    widgets.push(renderHomeWidget({type:'motivation',size:'medium',title:'Custom Instructions',text:instructions.length>200?instructions.slice(0,200)+'…':instructions}));
+  }
+  const state=loadProductivityState();
+  const allTodos=(state.todos||[]).filter(t=>!t.done);
+  const folderTodos=allTodos.filter(t=>{
+    const chatId=(t.id||'').split('_')[1]||'';
+    return chats.some(c=>c.id===chatId);
+  }).slice(0,5);
+  if(folderTodos.length){
+    widgets.push(renderHomeWidget({type:'todos',size:'medium',title:'Folder Tasks',items:folderTodos}));
+  }
+  const dataSection=widgets.length?`<div class="wl-data-section"><div class="wl-section-label">Folder overview</div><div class="wl-grid">${widgets.join('')}</div></div>`:'';
+
+  area.innerHTML=`<div class="welcome">
+    <div class="wl-hero">
+      <h1 class="welcome-greeting">${fIcon} ${esc(folder)}</h1>
+      <p class="welcome-sub">${chats.length} chat${chats.length!==1?'s':''}${instructions?' · Custom instructions active':''}</p>
     </div>
-    <div class="fv-actions">
-      <button class="fv-action-btn fv-action-primary" onclick="createChat('${esc(folder).replace(/'/g,"\\'")}')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New Chat
-      </button>
-      <button class="fv-action-btn" onclick="customizeFolder('${esc(folder).replace(/'/g,"\\'")}')">🎨 Customize</button>
-      <button class="fv-action-btn" onclick="renameFolderFromView('${esc(folder).replace(/'/g,"\\'")}')">✏️ Rename</button>
-      <button class="fv-action-btn fv-action-danger" onclick="deleteFolderAndChats('${esc(folder).replace(/'/g,"\\'")}')">🗑 Delete</button>
+    <div class="wl-prompts-section">
+      <div class="wl-prompts-grid">${actionCards}</div>
     </div>
-    <div class="fv-chat-list">${chatListHtml}</div>
+    ${dataSection}
   </div>`;
   renderChatList();
 }
@@ -1223,38 +1239,50 @@ async function renameFolderFromView(oldName){
 }
 
 async function customizeFolder(folder){
+  document.querySelector('.sf-menu')?.remove();
   const meta=getFolderMeta(folder);
-  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','❤️','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊',''];
-  const colors=['','#bf6b3a','#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e91e63','#00bcd4','#ff5722'];
-  const colorNames=['Default','Orange','Red','Amber','Yellow','Green','Teal','Blue','Purple','Pink','Cyan','Deep Orange'];
+  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','💰','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊','🏋️','🍳','✈️','🎬','📱','🔒','🎓','❤️','🏆','🧠','💻'];
   const curEmoji=meta.emoji||'📁';
-  const curColor=meta.color||'';
+  const curName=folder;
+  const curInstructions=meta.instructions||'';
+  const curFiles=meta.instructionFiles||[];
   const emojiGrid=emojis.map(e=>{
-    const label=e||'None';
-    const sel=e===curEmoji||(e===''&&!curEmoji)?' fv-cust-sel':'';
-    return `<button class="fv-cust-btn${sel}" onclick="this.closest('.fv-cust-popup').dataset.emoji='${e}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')">${label}</button>`;
-  }).join('');
-  const colorGrid=colors.map((c,i)=>{
-    const sel=c===curColor||(c===''&&!curColor)?' fv-cust-sel':'';
-    const bg=c||'var(--text-muted)';
-    return `<button class="fv-cust-color${sel}" style="background:${bg}" title="${colorNames[i]}" onclick="this.closest('.fv-cust-popup').dataset.color='${c}';this.closest('.fv-cust-grid').querySelectorAll('.fv-cust-color').forEach(b=>b.classList.remove('fv-cust-sel'));this.classList.add('fv-cust-sel')"></button>`;
-  }).join('');
+    const sel=e===curEmoji?' fv-cust-sel':'';
+    return `<button class="fv-cust-btn${sel}" data-emoji="${e}" onclick="_custSelectEmoji(this)">${e}</button>`;
+  }).join('')+`<button class="fv-cust-btn fv-cust-none${!curEmoji?' fv-cust-sel':''}" data-emoji="" onclick="_custSelectEmoji(this)">✕</button>`;
+  const fileChips=curFiles.map((f,i)=>`<div class="fv-cust-file-chip"><span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span></div>`).join('');
 
   const popup=document.createElement('div');
   popup.className='fv-cust-popup';
   popup.dataset.emoji=curEmoji;
-  popup.dataset.color=curColor;
+  popup.dataset.folder=folder;
   popup.innerHTML=`
     <div class="fv-cust-overlay" onclick="this.parentElement.remove()"></div>
     <div class="fv-cust-modal">
-      <h3>Customize "${esc(folder)}"</h3>
+      <h3>Customize Folder</h3>
+      <div class="fv-cust-section">
+        <label>Folder Name</label>
+        <input class="fv-cust-input" id="fvCustName" type="text" value="${esc(curName)}" placeholder="Folder name..." maxlength="50">
+      </div>
       <div class="fv-cust-section">
         <label>Icon</label>
         <div class="fv-cust-grid">${emojiGrid}</div>
       </div>
       <div class="fv-cust-section">
-        <label>Color</label>
-        <div class="fv-cust-grid">${colorGrid}</div>
+        <label>Custom Instructions</label>
+        <textarea class="fv-cust-textarea" id="fvCustInstructions" placeholder="Describe what this folder is for. The AI will use these instructions for all chats in this folder...">${esc(curInstructions)}</textarea>
+        <div class="fv-cust-hint">These instructions will be included in every chat within this folder.</div>
+        <div class="fv-cust-file-row">
+          <button class="fv-cust-file-btn" onclick="_custUploadFile()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload context file
+          </button>
+          <input type="file" id="fvCustFileInput" style="display:none" onchange="_custHandleFile(this)" multiple accept=".txt,.md,.json,.pdf,.png,.jpg,.jpeg,.webp">
+        </div>
+        <div class="fv-cust-files-list" id="fvCustFilesList">${fileChips}</div>
+        <button class="fv-cust-enhance-btn" onclick="_custEnhanceInstructions(this)">
+          <span>✨</span> Enhance with AI
+        </button>
       </div>
       <div class="fv-cust-footer">
         <button class="fv-cust-cancel" onclick="this.closest('.fv-cust-popup').remove()">Cancel</button>
@@ -1262,19 +1290,69 @@ async function customizeFolder(folder){
       </div>
     </div>`;
   document.body.appendChild(popup);
+  document.getElementById('fvCustName').focus();
+}
+function _custSelectEmoji(btn){
+  btn.closest('.fv-cust-grid').querySelectorAll('.fv-cust-btn').forEach(b=>b.classList.remove('fv-cust-sel'));
+  btn.classList.add('fv-cust-sel');
+  btn.closest('.fv-cust-popup').dataset.emoji=btn.dataset.emoji;
+}
+function _custUploadFile(){
+  document.getElementById('fvCustFileInput')?.click();
+}
+function _custHandleFile(input){
+  const list=document.getElementById('fvCustFilesList');
+  if(!list||!input.files)return;
+  for(const f of input.files){
+    const chip=document.createElement('div');
+    chip.className='fv-cust-file-chip';
+    chip.dataset.fileName=f.name;
+    const reader=new FileReader();
+    reader.onload=()=>{chip.dataset.fileData=reader.result;};
+    if(f.type.startsWith('image/'))reader.readAsDataURL(f);
+    else reader.readAsText(f);
+    chip.innerHTML=`<span>${esc(f.name)}</span><span class="fc-rm" onclick="this.closest('.fv-cust-file-chip').remove()">✕</span>`;
+    list.appendChild(chip);
+  }
+  input.value='';
+}
+async function _custEnhanceInstructions(btn){
+  const textarea=document.getElementById('fvCustInstructions');
+  const text=textarea?.value?.trim();
+  if(!text){btn.textContent='⚠ Write instructions first';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);return;}
+  btn.disabled=true;
+  btn.innerHTML='<span class="spinner"></span> Enhancing...';
+  try{
+    const r=await apiFetch('/api/folders/enhance-instructions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instructions:text})});
+    const d=await r.json();
+    if(d.enhanced){textarea.value=d.enhanced;btn.innerHTML='<span>✓</span> Enhanced!';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},2000);}
+    else{btn.textContent='⚠ '+(d.error||'Enhancement failed');setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
+  }catch{btn.textContent='⚠ Enhancement failed';setTimeout(()=>{btn.innerHTML='<span>✨</span> Enhance with AI';},3000);}
+  btn.disabled=false;
 }
 
-function saveFolderCustomize(btn){
+async function saveFolderCustomize(btn){
   const popup=btn.closest('.fv-cust-popup');
-  const folder=_activeFolderView;
-  if(!folder){popup.remove();return;}
+  const oldFolder=popup.dataset.folder;
+  if(!oldFolder){popup.remove();return;}
   const emoji=popup.dataset.emoji||'';
-  const color=popup.dataset.color||'';
-  setFolderMeta(folder,{emoji,color});
+  const newName=(document.getElementById('fvCustName')?.value||'').trim()||oldFolder;
+  const instructions=(document.getElementById('fvCustInstructions')?.value||'').trim();
+  const fileChips=[...document.querySelectorAll('#fvCustFilesList .fv-cust-file-chip')];
+  const instructionFiles=fileChips.map(c=>({name:c.dataset.fileName||c.querySelector('span')?.textContent||'file',data:c.dataset.fileData||''})).filter(f=>f.name);
+  setFolderMeta(oldFolder,{emoji,instructions,instructionFiles});
+  if(newName!==oldFolder){
+    renameFolderMeta(oldFolder,newName);
+    const chats=allChats.filter(c=>c.folder===oldFolder);
+    for(const c of chats){
+      await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:newName})});
+    }
+    await refreshChats();
+    _activeFolderView=newName;
+  }
   popup.remove();
   renderChatList();
-  openFolderView(folder);
-  showToast('Folder customized.','success');
+  if(_activeFolderView) openFolderView(_activeFolderView);
 }
 
 function loadCachedChats(){
@@ -1344,7 +1422,9 @@ async function handleGoogleCred(resp){
       localStorage.removeItem('gyro_guest_id');
     }
     theme=d.user.theme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
-    applyTheme(false); onboardingChecked=false; showApp();
+    applyTheme(false); onboardingChecked=false;
+    localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
+    showApp();
   }catch(e){document.getElementById('loginErr').textContent='Google auth failed'}
 }
 
@@ -1357,6 +1437,7 @@ async function guestLogin(){
     if(d.ok){
       isGuest=true;curUser={name:'Guest',email:'',plan:'guest'};
       if(d.guest_id) localStorage.setItem('gyro_guest_id',d.guest_id);
+      localStorage.removeItem(CHAT_CACHE_KEY);localStorage.removeItem(FOLDER_META_KEY);localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
       showApp();
     }
     else document.getElementById('loginErr').textContent=d.error||'Guest login failed';
@@ -1370,6 +1451,10 @@ async function signOut(){
   localStorage.removeItem('gyro_uid');
   localStorage.removeItem('gyro_remember');
   localStorage.removeItem('gyro_guest_id');
+  localStorage.removeItem(CHAT_CACHE_KEY);
+  localStorage.removeItem(FOLDER_META_KEY);
+  localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
+  try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
   curUser=null;curChat=null;allChats=[];isGuest=false;
   onboardingChecked=false;
   hideSetupReminder();
@@ -1377,6 +1462,7 @@ async function signOut(){
   document.getElementById('loginPage').style.display='flex';
   document.getElementById('loginErr').textContent='';
   googleInitDone=false;
+  await ensureOAuthConfigLoaded();
   initGoogleAuthUI();
 }
 
@@ -1627,7 +1713,7 @@ function renderChatList(filter=''){
   const selBar=document.getElementById('selectBar');
   if(selBar){
     const cnt=selectedItems.size;
-    document.getElementById('selCount').textContent=cnt?`${cnt} selected`:'None selected';
+    document.getElementById('selCount').textContent=cnt?`${cnt} selected`:'0 selected';
   }
 }
 
@@ -1728,8 +1814,9 @@ function toggleFolderMenu(btn,folder){
   const menu=document.createElement('div');
   menu.className='sf-menu';
   menu.innerHTML=`<button onclick="renameFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Rename</button><button onclick="customizeFolder('${folder.replace(/'/g,"\\'")}')">Customize</button><button onclick="deleteFolderFromMenu('${folder.replace(/'/g,"\\'")}')">Remove folder</button><button onclick="deleteFolderAndChats('${folder.replace(/'/g,"\\'")}')">Delete folder & chats</button>`;
-  btn.parentElement.style.position='relative';
-  btn.parentElement.appendChild(menu);
+  const rect=btn.getBoundingClientRect();
+  Object.assign(menu.style,{position:'fixed',top:rect.bottom+'px',left:rect.left+'px',zIndex:'9999'});
+  document.body.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -1750,8 +1837,9 @@ function showMoveMenu(btn,chatId){
   if(curFolder) items+=`<button onclick="moveChat('${chatId}','')">🚫 Remove from folder</button>`;
   if(!items) items='<div style="padding:8px 12px;color:var(--text-muted);font-size:11px">No folders yet</div>';
   menu.innerHTML=items;
-  btn.closest('.sb-chat').style.position='relative';
-  btn.closest('.sb-chat').appendChild(menu);
+  const rect=btn.getBoundingClientRect();
+  Object.assign(menu.style,{position:'fixed',top:rect.bottom+'px',left:rect.left+'px',zIndex:'9999'});
+  document.body.appendChild(menu);
   const close=e=>{if(!menu.contains(e.target)&&e.target!==btn){menu.remove();document.removeEventListener('click',close)}};
   setTimeout(()=>document.addEventListener('click',close),0);
 }
@@ -4375,6 +4463,9 @@ async function sendMessage(opts){
     delete window._editTruncateAt;
     const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
+    // Inject folder custom instructions if chat is in a folder
+    const _chatFolder=(allChats.find(c=>c.id===targetChatId)||{}).folder||_activeFolderView||'';
+    if(_chatFolder){const _fi=getFolderMeta(_chatFolder);if(_fi.instructions)_bodyObj.folder_instructions=_fi.instructions;}
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(_bodyObj),signal:controller.signal});
 
@@ -5468,6 +5559,8 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
+  // Strip any unresolved %%%IMGGEN:N%%% placeholders (e.g. image gen failed)
+  html=html.replace(/<p>\s*%%%IMGGEN:\d+%%%\s*<\/p>|%%%IMGGEN:\d+%%%/g,'');
   // Render persisted stock results on reload
   if(!devRawMode&&extra.stock_results?.length){
     for(const sr of extra.stock_results){
@@ -6393,11 +6486,15 @@ async function resetData(){
     localStorage.removeItem(ONB_DISMISS_KEY);
     localStorage.removeItem(HOME_WIDGET_CACHE_KEY);
     localStorage.removeItem(CHAT_CACHE_KEY);
+    localStorage.removeItem(FOLDER_META_KEY);
     try{localStorage.removeItem('gyro_productivity');localStorage.removeItem('gyro_productivity_v1');}catch{}
     closeM('settingsModal');
-    curChat=null;curUser=null;
+    curChat=null;curUser=null;isGuest=false;
     document.getElementById('appPage').classList.remove('visible');
     document.getElementById('loginPage').style.display='flex';
+    googleInitDone=false;
+    await ensureOAuthConfigLoaded();
+    initGoogleAuthUI();
     showToast('Account deleted.','success');
   }else{
     await _dlg({title:'Deletion failed',msg:d.error||'Something went wrong.',icon:'✕',iconType:'danger',confirmText:'OK'});
@@ -6497,12 +6594,49 @@ function switchFileTab(tab,btn){
   document.querySelectorAll('.fb-tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.fb-panel').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  document.getElementById(tab==='chat'?'fbChat':'fbWorkspace').classList.add('active');
-  if(tab==='chat')refreshChatFiles();else refreshWorkspaceFiles();
+  const panelId=tab==='chat'?'fbChat':tab==='chats'?'fbChats':'fbWorkspace';
+  document.getElementById(panelId).classList.add('active');
+  if(tab==='chat')refreshChatFiles();else if(tab==='chats')refreshChatsTab();else refreshWorkspaceFiles();
 }
 async function refreshFileBrowser(){
   refreshWorkspaceFiles();
   refreshChatFiles();
+}
+async function refreshChatsTab(){
+  const el=document.getElementById('fbChats');
+  if(!el)return;
+  el.innerHTML='<div class="fbc-loading">Loading chats…</div>';
+  try{
+    const r=await apiFetch('/api/chats');
+    const d=await r.json();
+    const chats=(d.chats||[]).filter(c=>!_isTransientEmpty(c));
+    if(!chats.length){el.innerHTML='<div class="fb-empty">No chats yet.</div>';return;}
+    const folders={};
+    chats.forEach(c=>{const f=c.folder||'';if(!folders[f])folders[f]=[];folders[f].push(c);});
+    let html='';
+    const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
+    for(const fld of sortedFolders){
+      if(!folders[fld])continue;
+      if(fld){
+        const meta=getFolderMeta(fld);
+        html+=`<div class="fbc-folder"><div class="fbc-folder-head">${meta.emoji||'📁'} ${esc(fld)} <span class="fbc-count">${folders[fld].length}</span></div>`;
+      }
+      for(const c of folders[fld]){
+        const active=c.id===curChat?' fbc-active':'';
+        const date=c.updated?new Date(c.updated).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'';
+        html+=`<div class="fbc-chat${active}" onclick="loadChat('${c.id}');closeFileBrowser()"><span class="fbc-title">${esc(c.title||'New Chat')}</span><span class="fbc-date">${date}</span></div>`;
+      }
+      if(fld)html+='</div>';
+    }
+    el.innerHTML=html;
+  }catch(e){
+    el.innerHTML='<div class="fb-empty">Failed to load chats.</div>';
+  }
+}
+function _isTransientEmpty(c){
+  if(!c||typeof c!=='object')return true;
+  const t=(c.title||'').trim().toLowerCase();
+  return !c.messages?.length&&(t===''||t==='new chat')&&!c.folder;
 }
 async function refreshWorkspaceFiles(){
   const el=document.getElementById('fbWorkspace');
@@ -6704,7 +6838,7 @@ async function genImage(){
   try{
     const r=await fetch('/api/generate-image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p})});
     const d=await r.json();
-    el.innerHTML=d.image?`<img src="data:image/png;base64,${d.image}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-md)">`:`<div style="color:var(--red);font-size:12px">${esc(d.error||'Failed')}</div>`;
+    el.innerHTML=d.image?`<img src="data:${d.mime||'image/png'};base64,${d.image}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-md)">`:`<div style="color:var(--red);font-size:12px">${esc(d.error||'Failed')}</div>`;
   }catch(e){el.innerHTML=`<div style="color:var(--red);font-size:12px">${esc(e.message)}</div>`}
 }
 
@@ -7018,21 +7152,39 @@ async function canvasPresetEdit(type){
   };
   const instruction=presetMap[type]||type;
   const lang=document.getElementById('canvasLang').textContent||'text';
-  document.getElementById('canvasStatus').textContent='AI is editing...';
+  document.getElementById('canvasStatus').textContent='AI is editing…';
+  editor.readOnly=true;
   try{
-    const r=await apiFetch('/api/canvas/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await apiFetch('/api/canvas/apply-stream',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({content,instruction,language:lang})});
-    const d=await r.json();
-    if(d.error){document.getElementById('canvasStatus').textContent='Edit failed';showToast(d.error,'error');return;}
-    editor.value=d.content||'';
+    if(!r.ok){document.getElementById('canvasStatus').textContent='Edit failed';return;}
+    const reader=r.body.getReader();
+    const decoder=new TextDecoder();
+    let buf='',full='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buf+=decoder.decode(value,{stream:true});
+      const lines=buf.split('\n');
+      buf=lines.pop();
+      for(const line of lines){
+        if(!line.trim())continue;
+        try{
+          const j=JSON.parse(line);
+          if(j.token){full+=j.token;editor.value=full;}
+          if(j.done){editor.value=j.content||full;}
+          if(j.error){document.getElementById('canvasStatus').textContent='Edit failed';}
+        }catch(e){}
+      }
+    }
     const tab=canvasTabs.find(t=>t.id===activeCanvasTabId);
     if(tab)tab.content=editor.value;
     updateCanvasStats();
     document.getElementById('canvasStatus').textContent='Edit applied';
-    showToast('Canvas updated','success');
   }catch(e){
     document.getElementById('canvasStatus').textContent='Edit failed';
-    showToast('AI edit failed','error');
+  }finally{
+    editor.readOnly=false;
   }
 }
 
