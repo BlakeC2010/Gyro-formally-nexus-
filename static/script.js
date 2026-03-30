@@ -1,4 +1,4 @@
-﻿// ─── State ────────────────────────────────────────
+// --- State ----------------------------------------
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
 let _uploadsInFlight=0,_pendingSendOpts=null;
@@ -29,6 +29,7 @@ let selectMode=false;
 const selectedItems=new Set();
 const _collapsedFolders=new Set();
 const runningStreams=new Map();
+const _pendingReprompts=new Map(); // chatId => [timeoutId, ...] — cleared on stop/edit
 const unreadChats=new Set();
 const artifactStore=[];
 const artifactIndex=new Map();
@@ -49,7 +50,7 @@ const FOLDER_META_KEY='gyro_folder_meta_v1';
 let homeWidgetRefreshTimer=null;
 let homeWidgetRefreshInFlight=false;
 
-// ─── Location ─────────────────────────────────────
+// --- Location -------------------------------------
 function isLocationEnabled(){ return localStorage.getItem('gyro_location_enabled')==='true'; }
 function getUserLocation(){
   if(!isLocationEnabled()) return null;
@@ -171,6 +172,9 @@ function stopStreaming(){
   if(run?.controller){
     run.controller.abort();
   }
+  // Cancel ALL pending auto-reprompts for this chat
+  const pending=_pendingReprompts.get(curChat);
+  if(pending){pending.forEach(id=>clearTimeout(id));_pendingReprompts.delete(curChat);}
   // Force-clear running state immediately so UI updates even if abort is slow
   setChatRunning(curChat,false);
   setStatus('Generation cancelled.');
@@ -229,7 +233,7 @@ function editMsg(btn){
     `<input type="file" id="_editFileInput" multiple style="display:none" onchange="window._editHandleFiles(this)">`+
     `<button class="msg-edit-tool-btn" onclick="window._editToggleToolMenu()" title="Tools">🔧</button>`+
     `<div class="msg-edit-tool-menu" id="_editToolMenu" style="display:none">`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('canvas');window._editCloseToolMenu()">✏️ Canvas</div>`+
+    `<div class="msg-edit-tool-opt" onclick="activateTool('canvas');window._editCloseToolMenu()">?? Canvas</div>`+
     `<div class="msg-edit-tool-opt" onclick="activateTool('search');window._editCloseToolMenu()">🔍 Google Search</div>`+
     `<div class="msg-edit-tool-opt" onclick="activateTool('research');window._editCloseToolMenu()">🔬 Research Agent</div>`+
     `<div class="msg-edit-tool-opt" onclick="activateTool('code');window._editCloseToolMenu()">💻 Code Execution</div>`+
@@ -339,8 +343,8 @@ function editMsg(btn){
     // Clean up window functions
     delete window._editRemoveFile;delete window._editHandleFiles;
     delete window._editToggleToolMenu;delete window._editCloseToolMenu;
-    // Small delay to let abort settle before re-sending
-    setTimeout(()=>sendMessage(),50);
+    // Delay to let abort settle before re-sending
+    setTimeout(()=>sendMessage(),250);
   });
 }
 
@@ -367,11 +371,11 @@ function copyMsg(btn){
   const text=clone.innerText||clone.textContent||'';
   navigator.clipboard.writeText(text.trim()).then(()=>{
     btn.textContent='✓ Copied';
-    setTimeout(()=>{btn.textContent='⎘ Copy'},1500);
+    setTimeout(()=>{btn.textContent='? Copy'},1500);
   }).catch(()=>{});
 }
 
-// ─── Auto Resume ──────────────────────────────────
+// --- Auto Resume ----------------------------------
 async function tryAutoResume(){
   // Try to resume an authenticated session using a stored remember token
   const savedUid=localStorage.getItem('gyro_uid');
@@ -419,7 +423,7 @@ async function apiFetch(url, opts={}){
   return r;
 }
 
-// ─── Session keep-alive ───────────────────────────
+// --- Session keep-alive ---------------------------
 async function _handleSessionLost(){
   showToast('Session expired. Please sign in again.','info');
   curUser=null; curChat=null;
@@ -449,7 +453,7 @@ document.addEventListener('visibilitychange', async()=>{
   }catch{}
 });
 
-// ─── Init ─────────────────────────────────────────
+// --- Init -----------------------------------------
 document.addEventListener('DOMContentLoaded',async()=>{
   if(!localStorage.getItem('gyro_theme_override')){
     theme=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
@@ -523,7 +527,7 @@ function applyTheme(animated=true){
   }
   document.body.classList.toggle('light',theme==='light');
   const btn=document.getElementById('btnTheme');
-  if(btn)btn.textContent=theme==='light'?'○':'●';
+  if(btn)btn.textContent=theme==='light'?'🌙':'☀️';
   const dark=document.getElementById('themeBtn_dark');
   const light=document.getElementById('themeBtn_light');
   if(dark&&light){
@@ -542,7 +546,7 @@ function toggleTheme(){
   fetch('/api/auth/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})});
 }
 
-/* ─── Dev Raw Log Mode ──────────────────────────── */
+/* --- Dev Raw Log Mode ---------------------------- */
 let devRawMode=localStorage.getItem('gyro_dev_raw')==='1';
 let devButtonVisible=localStorage.getItem('gyro_dev_visible')==='1'||devRawMode;
 function toggleDevRaw(on){
@@ -604,7 +608,15 @@ async function reRenderCurrentChat(){
       }
       _suppressCanvasAutoOpen=false;
       setTimeout(()=>{
-        try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams());}catch(e){}
+        try{
+          const mermaidEls=area.querySelectorAll('pre.mermaid:not([data-processed])');
+          if(mermaidEls.length){
+            mermaid.run({nodes:mermaidEls}).then(()=>enhanceMermaidDiagrams()).catch(()=>enhanceMermaidDiagrams());
+          }
+        }catch(e){
+          console.log('Mermaid re-render:',e);
+          enhanceMermaidDiagrams();
+        }
       },200);
     }else{
       _suppressCanvasAutoOpen=false;
@@ -612,14 +624,14 @@ async function reRenderCurrentChat(){
   }catch(e){console.log('Re-render error:',e);}
 }
 
-// ─── Custom Dialog Engine ────────────────────────
+// --- Custom Dialog Engine ------------------------
 let _dlgResolve=null;
 function _dlg({title,msg,icon,iconType='info',confirmText='OK',cancelText=null,inputLabel=null,inputDefault='',inputPlaceholder='',dangerous=false}){
   return new Promise(resolve=>{
     _dlgResolve=resolve;
     document.getElementById('dlgTitle').textContent=title||'';
     document.getElementById('dlgMsg').textContent=msg||'';
-    document.getElementById('dlgIconEmoji').textContent=icon||'ℹ️';
+    document.getElementById('dlgIconEmoji').textContent=icon||'📁';
     const iconWrap=document.getElementById('dlgIconWrap');
     iconWrap.className='dlg-icon-wrap '+iconType;
     if(!icon){document.getElementById('dlgIconBand').style.display='none'}
@@ -668,7 +680,7 @@ document.addEventListener('DOMContentLoaded',()=>{
       _closeDlg();if(_dlgResolve)_dlgResolve(null);
     }
   });
-  // ── Global scroll-to-bottom button ──
+  // -- Global scroll-to-bottom button --
   const _chatArea=document.getElementById('chatArea');
   const _scrollBtn=document.getElementById('scrollToBottom');
   if(_chatArea&&_scrollBtn){
@@ -724,7 +736,7 @@ async function showApp(){
   try{const cr=await fetch('/api/connectors');if(cr.ok){const cd=await cr.json();const hf=cd.connectors?.huggingface||{};const hfTool=document.getElementById('hfToolItem');if(hfTool)hfTool.style.display=(hf.enabled&&hf.token)?'':'none';}}catch{}
 }
 
-// ─── Changelog / Update Notification ──────────────
+// --- Changelog / Update Notification --------------
 const LAST_SEEN_VERSION_KEY='gyro_last_seen_version';
 
 async function checkForUpdates(){
@@ -795,10 +807,10 @@ function normalizeMasterPrompt(text){
 
 function getMasterPrompts(){
   return [
-    {icon:'→',label:'Plan my day',q:'Help me organize and prioritize everything on my plate today. Ask me 2 quick clarifying questions before building the plan.'},
-    {icon:'→',label:'Help me write',q:'Help me write or polish something. Start by asking what audience, tone, and outcome I want.'},
-    {icon:'→',label:'Brainstorm',q:'Brainstorm ideas with me for a project or problem. Push for novel options, then rank the top 3.'},
-    {icon:'→',label:'Research & analyze',q:'Help me research this topic deeply. Outline the scope first, then suggest a strong investigation path.'}
+    {icon:'📋',label:'Plan my day',q:'Help me organize and prioritize everything on my plate today. Ask me 2 quick clarifying questions before building the plan.'},
+    {icon:'✏️',label:'Help me write',q:'Help me write or polish something. Start by asking what audience, tone, and outcome I want.'},
+    {icon:'💡',label:'Brainstorm',q:'Brainstorm ideas with me for a project or problem. Push for novel options, then rank the top 3.'},
+    {icon:'🔬',label:'Research & analyze',q:'Help me research this topic deeply. Outline the scope first, then suggest a strong investigation path.'}
   ];
 }
 
@@ -848,9 +860,9 @@ function renderHomeWidget(w){
   if(type==='nudge'){
     const items=Array.isArray(w.items)?w.items:[];
     if(!items.length)return'';
-    const catIcons={'stale_chat':'⏸','task_overload':'📋','scope_creep':'📈','stalled_project':'🔄','deadline_soon':'⏰','resource_spread':'🎯','status_friction':'⚡','no_focus':'🧭'};
+    const catIcons={'stale_chat':'⚡','task_overload':'📋','scope_creep':'📈','stalled_project':'🔄','deadline_soon':'🧭','resource_spread':'⏰','status_friction':'?','no_focus':'🎯'};
     const body=items.map(i=>{
-      const icon=catIcons[i.category]||'●';
+      const icon=catIcons[i.category]||'📄';
       const actionAttr=i.action?`data-nudge-action="${esc(JSON.stringify(i.action)).replace(/"/g,'&quot;')}"`:'';;
       return `<div class="wl-nudge-item" ${actionAttr}>`
         +`<span class="wl-nudge-icon">${icon}</span>`
@@ -881,7 +893,7 @@ function renderHomeWidget(w){
     const body=items.map(i=>{
       const actionAttr=i.action?`data-nudge-action="${esc(JSON.stringify(i.action)).replace(/"/g,'&quot;')}"`:'';;
       return `<div class="wl-nudge-item" ${actionAttr}>`
-        +`<span class="wl-nudge-icon">→</span>`
+        +`<span class="wl-nudge-icon">🎨</span>`
         +`<div class="wl-nudge-body">`
         +`<div class="wl-nudge-msg">${esc(i.detected||'')}</div>`
         +`<div class="wl-nudge-step">${esc(i.suggestion||'')}</div>`
@@ -923,13 +935,13 @@ function renderHomeWidget(w){
       }
       const overdueClass=isOverdue?'wl-reminder-overdue':'';
       return `<div class="wl-reminder-item ${overdueClass}" data-reminder-id="${esc(i.id||'')}">`
-        +`<button class="wl-reminder-check" onclick="event.stopPropagation();completeReminder('${esc(i.id||'')}')">○</button>`
+        +`<button class="wl-reminder-check" onclick="event.stopPropagation();completeReminder('${esc(i.id||'')}')">✕</button>`
         +`<div class="wl-reminder-body">`
         +`<div class="wl-reminder-text">${esc(i.text||'')}</div>`
-        +(dueLabel?`<div class="wl-reminder-due ${overdueClass}">${isOverdue?'⚠ ':''}${esc(dueLabel)}</div>`:'')
+        +(dueLabel?`<div class="wl-reminder-due ${overdueClass}">${isOverdue?'? ':''}${esc(dueLabel)}</div>`:'')
         +`</div>`
         +`<div class="wl-reminder-actions">`
-        +`<button class="wl-reminder-snooze" onclick="event.stopPropagation();snoozeReminder('${esc(i.id||'')}')" title="Snooze 24h">⏸</button>`
+        +`<button class="wl-reminder-snooze" onclick="event.stopPropagation();snoozeReminder('${esc(i.id||'')}')" title="Snooze 24h">✕</button>`
         +`<button class="wl-reminder-del" onclick="event.stopPropagation();deleteReminder('${esc(i.id||'')}')" title="Delete">✕</button>`
         +`</div>`
         +`</div>`;
@@ -1114,12 +1126,12 @@ function getLocalTimeGreeting(){
       `Morning focus, steady pace${namePart}.`,
       `Fresh morning energy${namePart}.`,
       `New day, new momentum${namePart}.`,
-      `Rise and build${namePart}. ☀️`,
+      `Rise and build${namePart}. ??`,
       `Morning brain is the best brain${namePart}.`,
       `Let's make today count${namePart}.`,
       `Good morning${namePart}. What's the plan?`,
       `The day is yours${namePart}.`,
-      `Coffee and ideas${namePart}? ☕`,
+      `Coffee and ideas${namePart}? ?`,
       `Starting fresh${namePart}.`,
       `Clear mind, full day ahead${namePart}.`,
     ],
@@ -1169,7 +1181,7 @@ function goHome(){
   renderChatList();
 }
 
-/* ─── Folder Meta (emoji, color) stored in localStorage ─── */
+/* --- Folder Meta (emoji, color) stored in localStorage --- */
 function _loadFolderMeta(){
   try{return JSON.parse(localStorage.getItem(FOLDER_META_KEY)||'{}');}catch{return {};}
 }
@@ -1219,8 +1231,8 @@ function openFolderView(folder){
   // Prompt-style action cards (same grid as main homepage)
   const actionCards=`
     <div class="wl-action-card" onclick="createChat('${ef}')"><span class="wl-ac-icon">+</span><span class="wl-ac-label">New Chat</span><span class="wl-ac-sub">Start a conversation</span></div>
-    <div class="wl-action-card" onclick="customizeFolder('${ef}')"><span class="wl-ac-icon">⚙️</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Icon, name & instructions</span></div>
-    <div class="wl-action-card" onclick="renameFolderFromView('${ef}')"><span class="wl-ac-icon">✏️</span><span class="wl-ac-label">Rename</span><span class="wl-ac-sub">Change folder name</span></div>
+    <div class="wl-action-card" onclick="customizeFolder('${ef}')"><span class="wl-ac-icon">⚙</span><span class="wl-ac-label">Settings</span><span class="wl-ac-sub">Icon, name & instructions</span></div>
+    <div class="wl-action-card" onclick="renameFolderFromView('${ef}')"><span class="wl-ac-icon">✏</span><span class="wl-ac-label">Rename</span><span class="wl-ac-sub">Change folder name</span></div>
     <div class="wl-action-card" onclick="deleteFolderAndChats('${ef}')"><span class="wl-ac-icon" style="color:var(--red)">🗑</span><span class="wl-ac-label">Delete</span><span class="wl-ac-sub">Remove folder & chats</span></div>`;
 
   // Build data widgets
@@ -1257,7 +1269,7 @@ function openFolderView(folder){
 }
 
 async function renameFolderFromView(oldName){
-  const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
+  const next=await _dlg({title:'Rename folder',msg:'',icon:'✏️',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
   if(!next?.trim()||next.trim()===oldName)return;
   const newName=next.trim();
   renameFolderMeta(oldName,newName);
@@ -1273,7 +1285,7 @@ async function renameFolderFromView(oldName){
 async function customizeFolder(folder){
   document.querySelector('.sf-menu')?.remove();
   const meta=getFolderMeta(folder);
-  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','💰','⭐','🔥','🌟','💎','🎵','📸','🌍','🧪','✨','🤖','🛠️','📊','🏋️','🍳','✈️','🎬','📱','🔒','🎓','❤️','🏆','🧠','💻'];
+  const emojis=['📁','💼','🎯','🚀','💡','📝','🎨','🔬','📚','🎮','🏠','💰','🧠','⭐','🔥','🌟','💎','🎵','📸','🌍','💻','🧪','✨','🤖','🛠','📊','🏋','🍳','✈','🎬','📱','🔒','🎓','❤','🏆'];
   const curEmoji=meta.emoji||'📁';
   const curName=folder;
   const curInstructions=meta.instructions||'';
@@ -1439,7 +1451,7 @@ function updateUserUI(){
   }
 }
 
-// ─── Auth ─────────────────────────────────────────
+// --- Auth -----------------------------------------
 async function handleGoogleCred(resp){
   try{
     const r=await fetch('/api/auth/google',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1477,7 +1489,7 @@ async function guestLogin(){
 }
 
 async function signOut(){
-  const ok=await _dlg({title:'Sign out',msg:'Are you sure you want to sign out of gyro?',icon:'⏻',iconType:'warn',confirmText:'Sign out',cancelText:'Cancel'});
+  const ok=await _dlg({title:'Sign out',msg:'Are you sure you want to sign out of gyro?',icon:'🚪',iconType:'warn',confirmText:'Sign out',cancelText:'Cancel'});
   if(!ok)return;
   await fetch('/api/auth/logout',{method:'POST'});
   localStorage.removeItem('gyro_uid');
@@ -1619,7 +1631,7 @@ async function submitOnboarding(){
   }
 }
 
-// ─── Sidebar ──────────────────────────────────────
+// --- Sidebar --------------------------------------
 function toggleSB(){
   const sb=document.getElementById('sidebar');
   sb.classList.toggle('closed');
@@ -1724,7 +1736,7 @@ function renderChatList(filter=''){
       html+=`<span class="sf-icon"${colorStyle}>${fIcon}</span>`;
       html+=`<span class="sf-label">${esc(fld)}</span>`;
       html+=`<span class="sf-count">${chatCount}</span>`;
-      html+=`<button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">⋮</button></div>`;
+      html+=`<button class="sf-dots" onclick="event.stopPropagation();toggleFolderMenu(this,'${esc(fld)}')" title="Folder options">✕</button></div>`;
       if(isCollapsed) continue;
     }
     for(const c of grouped[fld]){
@@ -1739,7 +1751,7 @@ function renderChatList(filter=''){
     }
   }
   el.innerHTML=html||'<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px;line-height:1.7">No chats yet.<br>Start a conversation to see it here.</div>';
-  // ── Drag-to-folder: wire up after render ──
+  // -- Drag-to-folder: wire up after render --
   _initSidebarDrag(el);
   // Update select bar count
   const selBar=document.getElementById('selectBar');
@@ -1749,7 +1761,7 @@ function renderChatList(filter=''){
   }
 }
 
-// ── Sidebar drag-to-folder ──
+// -- Sidebar drag-to-folder --
 function _initSidebarDrag(container){
   let _dragChatId=null;
   container.addEventListener('dragstart',e=>{
@@ -1796,7 +1808,7 @@ function filterChats(){renderChatList(document.getElementById('chatSearch').valu
 
 async function renameChat(id){
   const chat=allChats.find(c=>c.id===id);
-  const next=await _dlg({title:'Rename chat',msg:'',icon:'▸',iconType:'info',inputLabel:'New title',inputDefault:chat?.title||'',inputPlaceholder:'Chat title…',confirmText:'Rename',cancelText:'Cancel'});
+  const next=await _dlg({title:'Rename chat',msg:'',icon:'✏️',iconType:'info',inputLabel:'New title',inputDefault:chat?.title||'',inputPlaceholder:'Chat title…',confirmText:'Rename',cancelText:'Cancel'});
   if(!next||!next.trim())return;
   await fetch(`/api/chats/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:next.trim()})});
   if(curChat===id)document.getElementById('topTitle').textContent=next.trim();
@@ -1824,7 +1836,7 @@ async function createChat(folder=''){
 }
 
 async function newFolder(){
-  const n=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
+  const n=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create',cancelText:'Cancel'});
   if(!n?.trim())return;
   const name=n.trim();
   // Just create the folder entry in meta and add one empty chat to register the folder on the server
@@ -1884,7 +1896,7 @@ async function moveChat(chatId,folder){
 }
 async function renameFolderFromMenu(oldName){
   document.querySelector('.sf-menu')?.remove();
-  const next=await _dlg({title:'Rename folder',msg:'',icon:'▸',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
+  const next=await _dlg({title:'Rename folder',msg:'',icon:'✏️',iconType:'info',inputLabel:'New name',inputDefault:oldName,inputPlaceholder:'Folder name',confirmText:'Rename',cancelText:'Cancel'});
   if(!next?.trim()||next.trim()===oldName)return;
   renameFolderMeta(oldName,next.trim());
   const chats=allChats.filter(c=>c.folder===oldName);
@@ -1900,7 +1912,7 @@ async function openFolderSettings(folder){
 }
 async function deleteFolderFromMenu(folder){
   document.querySelector('.sf-menu')?.remove();
-  const ok=await _dlg({title:'Remove folder',msg:'Chats will be moved out of the folder, not deleted.',icon:'▸',iconType:'danger',confirmText:'Remove folder',cancelText:'Cancel',dangerous:true});
+  const ok=await _dlg({title:'Remove folder',msg:'Chats will be moved out of the folder, not deleted.',icon:'🗑️',iconType:'danger',confirmText:'Remove folder',cancelText:'Cancel',dangerous:true});
   if(!ok)return;
   const chats=allChats.filter(c=>c.folder===folder);
   for(const c of chats){await fetch(`/api/chats/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:''})});}
@@ -1926,7 +1938,7 @@ async function deleteFolderAndChats(folder){
   await refreshChats();showToast(`Folder "${folder}" deleted.`,'success');
 }
 
-// ─── Multi-Select Mode ────────────────────────────
+// --- Multi-Select Mode ----------------------------
 function toggleSelectMode(){
   selectMode=!selectMode;
   selectedItems.clear();
@@ -1975,7 +1987,7 @@ async function deleteSelectedChats(){
   showToast(`${count} chat${count!==1?'s':''} deleted.`,'success');
 }
 
-// ─── Smart Home Widgets (async) ─────────────────
+// --- Smart Home Widgets (async) -----------------
 async function _loadSmartWidgets(){
   try{
     const [crRes, wfRes]=await Promise.all([
@@ -2044,9 +2056,13 @@ async function openChat(id){
     _suppressCanvasAutoOpen=false;
     setTimeout(()=>{
       try{
-        Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams());
+        const mermaidEls=area.querySelectorAll('pre.mermaid:not([data-processed])');
+        if(mermaidEls.length){
+          mermaid.run({nodes:mermaidEls}).then(()=>enhanceMermaidDiagrams()).catch(()=>enhanceMermaidDiagrams());
+        }
       }catch(e){
         console.log('Mermaid re-render:',e);
+        enhanceMermaidDiagrams();
       }
     },200);
   }else{
@@ -2069,7 +2085,7 @@ async function openChat(id){
 }
 
 async function delChat(id){
-  const ok=await _dlg({title:'Delete chat',msg:'This chat will be permanently deleted.',icon:'▸',iconType:'danger',confirmText:'Delete',cancelText:'Cancel',dangerous:true});
+  const ok=await _dlg({title:'Delete chat',msg:'This chat will be permanently deleted.',icon:'🔥',iconType:'danger',confirmText:'Delete',cancelText:'Cancel',dangerous:true});
   if(!ok)return;
   try{
     const run=runningStreams.get(id);
@@ -2092,7 +2108,7 @@ async function delChat(id){
   }
 }
 
-// ─── Models ───────────────────────────────────────
+// --- Models ---------------------------------------
 let currentModel='';
 const logoUrls={
   google:'/static/logos/google.svg',
@@ -2254,12 +2270,12 @@ document.addEventListener('click',e=>{
   }
 });
 
-// ─── File Upload ──────────────────────────────────
+// --- File Upload ----------------------------------
 // Convert unsupported image files to PNG client-side before uploading
 function _convertImageToPng(file){
   return new Promise((resolve)=>{
     const mime=file.type||'';
-    // SVG → render on canvas → PNG
+    // SVG ? render on canvas ? PNG
     if(mime==='image/svg+xml'||file.name.toLowerCase().endsWith('.svg')){
       const reader=new FileReader();
       reader.onload=()=>{
@@ -2289,7 +2305,7 @@ function _convertImageToPng(file){
       reader.readAsText(file);
       return;
     }
-    // BMP, TIFF, ICO, etc. → canvas → PNG
+    // BMP, TIFF, ICO, etc. ? canvas ? PNG
     const NON_NATIVE=['image/bmp','image/tiff','image/x-icon','image/vnd.microsoft.icon','image/x-ms-bmp'];
     if(NON_NATIVE.includes(mime)||/\.(bmp|tiff?|ico)$/i.test(file.name)){
       const reader=new FileReader();
@@ -2374,7 +2390,7 @@ function renderPF(){
   else if(ready)setStatus(`${ready} file${ready===1?'':'s'} attached and ready.`);
 }
 
-/* ─── Reply Context (images + text from chat) ─── */
+/* --- Reply Context (images + text from chat) --- */
 function addReplyImage(url,title){
   if(pendingReplies.some(r=>r.type==='image'&&r.url===url))return;
   pendingReplies.push({type:'image',url:url,title:title||''});
@@ -2443,7 +2459,7 @@ function initDropzone(){
   });
 }
 
-// ─── Plus Menu ────────────────────────────────────
+// --- Plus Menu ------------------------------------
 function togglePlusMenu(){
   const btn=document.getElementById('plusBtn');
   const popup=document.getElementById('plusPopup');
@@ -2510,76 +2526,15 @@ function toggleResearch(){
 }
 
 async function showResearchPlan(query, contentEl, area, chatId){
-  contentEl.innerHTML=`<div class="ra-plan-loading"><div class="dots"><span></span><span></span><span></span></div><span>Generating research plan...</span></div>`;
-  try{
-    const res=await apiFetch('/api/research-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
-    const plan=await res.json();
-    if(plan.error) throw new Error(plan.error);
-
-    const questions=plan.questions||[];
-    const steps=plan.plan||[];
-    const refined=plan.refined_query||query;
-
-    let html=`<div class="ra-plan-container">`;
-    html+=`<div class="ra-plan-header"><span class="ra-plan-icon">🔬</span><div><span class="ra-plan-title">Research Plan</span><div style="font-size:12px;color:var(--text-muted);margin-top:2px">Review your research plan before launching</div></div></div>`;
-    html+=`<div class="ra-plan-query-wrap"><label class="ra-plan-label">Research Query</label><textarea class="ra-plan-query" id="_raPlanQuery" rows="2">${esc(refined)}</textarea></div>`;
-
-    if(questions.length){
-      html+=`<div class="ra-plan-questions"><div class="ra-plan-label">💬 Quick Questions <span style="font-weight:400;color:var(--text-muted)">(optional — tap to refine your research)</span></div>`;
-      questions.forEach((qObj,i)=>{
-        const qText=typeof qObj==='string'?qObj:(qObj.question||'');
-        const choices=Array.isArray(qObj.choices)?qObj.choices:[];
-        html+=`<div class="ra-plan-q-row"><div class="ra-plan-q-text">${esc(qText)}</div>`;
-        if(choices.length){
-          html+=`<div class="ra-plan-q-choices" data-q="${i}">`;
-          choices.forEach((c,j)=>{
-            html+=`<button class="ra-plan-q-chip" data-q="${i}" data-c="${j}" onclick="this.classList.toggle('ra-chip-active');document.getElementById('_raPlanQ${i}').value=Array.from(this.parentElement.querySelectorAll('.ra-chip-active')).map(b=>b.textContent).join(', ')">${esc(c)}</button>`;
-          });
-          html+=`</div>`;
-        }
-        html+=`<input class="ra-plan-q-input" id="_raPlanQ${i}" placeholder="Or type your own answer..." />`;
-        html+=`</div>`;
-      });
-      html+=`</div>`;
-    }
-
-    html+=`<div class="ra-plan-steps-wrap"><div class="ra-plan-label">Research Steps</div><div class="ra-plan-steps" id="_raPlanSteps">`;
-    steps.forEach((s,i)=>{
-      html+=`<div class="ra-plan-step"><span class="ra-plan-step-num">${i+1}</span><span class="ra-plan-step-title-ro">${esc(s.title)}</span></div>`;
-    });
-    html+=`</div></div>`;
-
-    html+=`<div class="ra-plan-actions"><button class="ra-plan-btn ra-plan-btn-primary" id="_raPlanStart">🚀 Start Research</button><button class="ra-plan-btn ra-plan-btn-skip" id="_raPlanSkip">⚡ Quick Start</button></div>`;
-    html+=`</div>`;
-    contentEl.innerHTML=html;
-
-    // Button handlers
-    document.getElementById('_raPlanStart').addEventListener('click',async()=>{
-      const finalQuery=document.getElementById('_raPlanQuery').value.trim()||query;
-      let context=finalQuery;
-      questions.forEach((qObj,i)=>{
-        const qText=typeof qObj==='string'?qObj:(qObj.question||'');
-        const inp=document.getElementById('_raPlanQ'+i);
-        if(inp&&inp.value.trim()) context+=`\n\nContext: ${qText} — ${inp.value.trim()}`;
-      });
-      contentEl.innerHTML='';
-      await runResearchAgent(context, contentEl, area, chatId);
-    });
-    document.getElementById('_raPlanSkip').addEventListener('click',async()=>{
-      contentEl.innerHTML='';
-      await runResearchAgent(query, contentEl, area, chatId);
-    });
-
-  }catch(e){
-    contentEl.innerHTML=`<div style="color:var(--red);padding:12px">Failed to generate plan: ${esc(e.message||'Unknown error')}. Starting research directly...</div>`;
-    setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},2000);
-  }
+  // Go straight to research — questions are handled in normal chat conversation
+  contentEl.innerHTML='';
+  await runResearchAgent(query, contentEl, area, chatId);
 }
 
 async function runResearchAgent(query, contentEl, area, chatId){
-  const stepIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
-  const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert & Stakeholder Analysis','Data & Comparative Analysis','Synthesis & Insights','Strategic Assessment','Final Intelligence Brief'];
-  const totalSteps=8;
+  const stepIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋','📝'];
+  const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
+  const totalSteps=9;
   let currentStep=0;
   // Global retry function for all retry buttons
   window._raRetry=function(btn){
@@ -2628,42 +2583,39 @@ async function runResearchAgent(query, contentEl, area, chatId){
         <div class="ra-stats-row">
           <span>📚 <strong id="_raSourceCount">0</strong> sources</span>
           <span>💡 <strong id="_raFindStat">0</strong> findings</span>
-          <span>📝 <strong id="_raWordCount">0</strong> words</span>
-          <span>⏱️ <strong id="_raElapsed">0s</strong></span>
+          <span>?? <strong id="_raElapsed">0s</strong></span>
         </div>
         <div class="ra-activity" id="_raActivity"><span class="ra-pulse"></span><span id="_raMsg">Initializing research agent...</span></div>
-      </div>
-      <div class="ra-findings-panel" id="_raFindings" style="display:none">
-        <div class="ra-findings-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')">
-          <span class="ra-findings-icon">💡</span>
-          <span class="ra-findings-title">Key Findings</span>
-          <span class="ra-findings-count" id="_raFindCount">0</span>
-          <span class="ra-findings-chevron">▾</span>
+        <div class="ra-card-tabs" id="_raCardTabs" style="display:none">
+          <button class="ra-card-tab ra-card-tab-active" data-tab="findings" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='';p.querySelector('#_raSrcPanel').style.display='none'}})(this)">?? Findings <span class="ra-tab-count" id="_raFindCount">0</span></button>
+          <button class="ra-card-tab" data-tab="sources" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display=''}})(this)">?? Sources <span class="ra-tab-count" id="_raSrcCount2">0</span></button>
         </div>
-        <div class="ra-findings-list" id="_raFindList"></div>
+        <div class="ra-tab-panel" id="_raFindPanel" style="display:none"><div class="ra-findings-list" id="_raFindList"></div></div>
+        <div class="ra-tab-panel" id="_raSrcPanel" style="display:none"><div class="ra-sources-list" id="_raSrcList"></div></div>
       </div>
       <div class="ra-output" id="_raOut"></div>
-      <div class="ra-sources-panel" id="_raSrcPanel" style="display:none">
-        <div class="ra-sources-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')">
-          <span class="ra-sources-icon">📚</span>
-          <span class="ra-sources-title">Sources Discovered</span>
-          <span class="ra-sources-count" id="_raSrcCount2">0</span>
-          <span class="ra-sources-chevron">▾</span>
-        </div>
-        <div class="ra-sources-list" id="_raSrcList"></div>
-      </div>
       <div class="ra-toast-container" id="_raToasts"></div>
     </div>`;
   _raAutoScroll();
 
-  // Live elapsed timer
+  // Live elapsed timer — show as h:m:s format
+  const _fmtElapsed=(ms)=>{
+    const secs=Math.floor(ms/1000);
+    if(secs<60) return secs+'s';
+    const mins=Math.floor(secs/60);
+    const remSecs=secs%60;
+    if(mins<60) return mins+'m '+remSecs+'s';
+    const hrs=Math.floor(mins/60);
+    const remMins=mins%60;
+    return hrs+'h '+remMins+'m';
+  };
   const elTimer=setInterval(()=>{
     const el=document.getElementById('_raElapsed');
-    if(el) el.textContent=((Date.now()-startTime)/1000|0)+'s';
+    if(el) el.textContent=_fmtElapsed(Date.now()-startTime);
   },1000);
 
   // Toast notification system
-  const showToast=(msg,icon='ℹ️')=>{
+  const showToast=(msg,icon='🔔')=>{
     const container=document.getElementById('_raToasts');
     if(!container)return;
     const toast=document.createElement('div');
@@ -2725,8 +2677,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
   const addSource=(src)=>{
     discoveredSources.push(src);
-    const panel=document.getElementById('_raSrcPanel');
-    if(panel) panel.style.display='';
+    const tabs=document.getElementById('_raCardTabs');
+    if(tabs) tabs.style.display='';
     const cntEl=document.getElementById('_raSourceCount');
     const cnt2=document.getElementById('_raSrcCount2');
     if(cntEl) cntEl.textContent=discoveredSources.length;
@@ -2749,8 +2701,12 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
   const addFinding=(text,step)=>{
     discoveredFindings.push({text,step});
-    const panel=document.getElementById('_raFindings');
-    if(panel) panel.style.display='';
+    const tabs=document.getElementById('_raCardTabs');
+    if(tabs) tabs.style.display='';
+    // Show findings tab panel if findings tab is active
+    const findPanel=document.getElementById('_raFindPanel');
+    const activeTab=tabs&&tabs.querySelector('.ra-card-tab-active');
+    if(findPanel&&activeTab&&activeTab.dataset.tab==='findings') findPanel.style.display='';
     const cntEl=document.getElementById('_raFindCount');
     if(cntEl) cntEl.textContent=discoveredFindings.length;
     const fStatEl=document.getElementById('_raFindStat');
@@ -2837,7 +2793,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
               section=document.createElement('div');
               section.className='ra-section ra-slide-in';
               section.id='_raS'+ev.step;
-              section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">▾</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
+              section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">?</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">?</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
               if(outEl) outEl.appendChild(section);
               showToast(`Step ${ev.step}: ${ev.title}`,icon);
             }
@@ -2854,8 +2810,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
             if(ev.word_count) stepWordCounts[ev.step]=ev.word_count;
             if(ev.source_count!==undefined) stepSourceCounts[ev.step]=ev.source_count;
             totalWords+=(ev.word_count||0);
-            const wcEl=document.getElementById('_raWordCount');
-            if(wcEl) wcEl.textContent=totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords;
             const timerEl=document.getElementById('_raT'+ev.step);
             if(timerEl){timerEl.classList.remove('ra-timer-live');if(elapsed) timerEl.textContent=elapsed+'s';}
             const ce=document.getElementById('_raC'+ev.step);
@@ -2876,8 +2830,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const timerEl=document.getElementById('_raT'+ev.step);
             if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
             const ce=document.getElementById('_raC'+ev.step);
-            if(ce&&ev.error) ce.innerHTML=`<div class="ra-step-error">⚠️ Step failed: ${esc(ev.error.slice(0,150))}</div>`;
-            updateProgress(ev.step, '⚠️ '+ev.title+' failed — continuing...');
+            if(ce&&ev.error) ce.innerHTML=`<div class="ra-step-error">?? Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, '?? '+ev.title+' failed — continuing...');
           }
         }else if(ev.type==='agent_thinking'){
           stepThinking+=(ev.text||'');
@@ -2912,13 +2866,13 @@ async function runResearchAgent(query, contentEl, area, chatId){
           updateProgress(totalSteps,'Research complete!');
           followupQuestions=ev.followup_questions||[];
           totalWords=ev.total_words||totalWords;
-          const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+          const totalTimeMs=Date.now()-startTime;
+          const totalTime=(totalTimeMs/1000).toFixed(1);
+          const totalTimeFmt=_fmtElapsed(totalTimeMs);
           const elapsedEl=document.getElementById('_raElapsed');
-          if(elapsedEl) elapsedEl.textContent=totalTime+'s';
-          const wcEl=document.getElementById('_raWordCount');
-          if(wcEl) wcEl.textContent=totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords;
+          if(elapsedEl) elapsedEl.textContent=totalTimeFmt;
           const actEl=document.getElementById('_raActivity');
-          if(actEl) actEl.innerHTML=`<span class="ra-complete-icon">✅</span> Research complete in <strong>${totalTime}s</strong> — ${discoveredSources.length} sources, ${totalWords.toLocaleString()} words analyzed`;
+          if(actEl) actEl.innerHTML=`<span class="ra-complete-icon">✅</span> Research complete in <strong>${totalTimeFmt}</strong> — ${discoveredSources.length} sources, ${discoveredFindings.length} findings`;
 
           // Collapse all sections
           if(outEl) outEl.querySelectorAll('.ra-section').forEach(s=>s.classList.add('ra-collapsed'));
@@ -2942,18 +2896,19 @@ async function runResearchAgent(query, contentEl, area, chatId){
           if(tldr){
             const summaryEl=document.createElement('div');
             summaryEl.className='ra-summary ra-slide-in';
-            summaryEl.innerHTML=`<div class="ra-summary-hd">⚡ Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div>`;
+            summaryEl.innerHTML=`<div class="ra-summary-hd">? Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div>`;
             if(outEl) outEl.insertBefore(summaryEl,outEl.querySelector('.ra-section'));
           }
 
-          // Build completion dashboard
-          const _srcScore=Math.min(discoveredSources.length/25,1)*30;
-          const _stpScore=((totalSteps-failedSteps)/totalSteps)*25;
-          const _wrdScore=Math.min(totalWords/5000,1)*25;
-          const _fndScore=Math.min(discoveredFindings.length/15,1)*20;
-          const qualityScore=Math.round(_srcScore+_stpScore+_wrdScore+_fndScore);
-          const qualityLabel=qualityScore>=85?'Exceptional':qualityScore>=70?'Thorough':qualityScore>=50?'Good':qualityScore>=30?'Basic':'Limited';
-          const qualityColor=qualityScore>=85?'#22c55e':qualityScore>=70?'#8b5cf6':qualityScore>=50?'#eab308':'#ef4444';
+          // Build completion dashboard — confidence score (not self-ranked quality)
+          // Confidence is based on objective metrics: source count, step completion, depth, findings
+          const _srcPct=Math.min(discoveredSources.length/30,1);
+          const _stpPct=(totalSteps-failedSteps)/totalSteps;
+          const _wrdPct=Math.min(totalWords/8000,1);
+          const _fndPct=Math.min(discoveredFindings.length/20,1);
+          const confidenceScore=Math.round((_srcPct*30+_stpPct*25+_wrdPct*25+_fndPct*20));
+          const confidenceLabel=confidenceScore>=85?'High':confidenceScore>=70?'Good':confidenceScore>=50?'Moderate':confidenceScore>=30?'Low':'Very Low';
+          const confidenceColor=confidenceScore>=85?'#22c55e':confidenceScore>=70?'#8b5cf6':confidenceScore>=50?'#eab308':'#ef4444';
 
           // Source diversity
           const domainCounts={};
@@ -2961,30 +2916,29 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const topDomains=Object.entries(domainCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
           const maxDomainCount=topDomains.length?topDomains[0][1]:1;
 
-          // SVG quality gauge
+          // SVG confidence gauge
           const _qr=54,_qcx=60,_qcy=60,_qstroke=8;
           const _qcirc=2*Math.PI*_qr;
           const _qarcLen=_qcirc*0.75;
-          const _qfilled=_qarcLen*(qualityScore/100);
+          const _qfilled=_qarcLen*(confidenceScore/100);
           const _qdashArr=`${_qfilled} ${_qarcLen-_qfilled}`;
 
           const dashboard=document.createElement('div');
           dashboard.className='ra-dashboard ra-slide-in';
-          let dashHtml=`<div class="ra-complete-banner"><div class="ra-complete-banner-title">🔬 Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${totalSteps-failedSteps} steps completed · ${discoveredSources.length} sources · ${totalWords.toLocaleString()} words · ${totalTime}s</div></div>`;
+          let dashHtml=`<div class="ra-complete-banner"><div class="ra-complete-banner-title">?? Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${totalSteps-failedSteps} steps completed · ${discoveredSources.length} sources · ${discoveredFindings.length} findings · ${totalTimeFmt}</div></div>`;
           dashHtml+=`<div class="ra-dash-stats">
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalSteps-failedSteps}/${totalSteps}</div><div class="ra-dash-stat-lbl">Steps</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredSources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</div><div class="ra-dash-stat-lbl">Words</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredFindings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTime}s</div><div class="ra-dash-stat-lbl">Time</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val" style="color:${qualityColor}">${qualityScore}</div><div class="ra-dash-stat-lbl">Quality</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTimeFmt}</div><div class="ra-dash-stat-lbl">Time</div></div>
+            <div class="ra-dash-stat"><div class="ra-dash-stat-val" style="color:${confidenceColor}">${confidenceLabel}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
           </div>`;
-          // Quality gauge section
-          dashHtml+=`<div class="ra-quality-section"><div class="ra-quality-hd">📊 Research Quality Score</div><div class="ra-quality-body"><div class="ra-quality-gauge"><svg viewBox="0 0 120 120" width="110" height="110"><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="var(--border)" stroke-width="${_qstroke}" stroke-dasharray="${_qarcLen} ${_qcirc-_qarcLen}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round"/><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="${qualityColor}" stroke-width="${_qstroke}" stroke-dasharray="${_qdashArr}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round" class="ra-quality-gauge-fill"/><text x="${_qcx}" y="${_qcy-4}" text-anchor="middle" fill="${qualityColor}" font-size="24" font-weight="800" font-family="var(--mono)">${qualityScore}</text><text x="${_qcx}" y="${_qcy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/100</text></svg><div style="text-align:center;margin-top:4px;font-size:11px;font-weight:700;color:${qualityColor}">${qualityLabel}</div></div><div class="ra-quality-breakdown">`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">📚 Sources</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_srcScore/30*100)}%;background:#8b5cf6"></div></div><span class="ra-quality-item-val">${discoveredSources.length}/25</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">✅ Coverage</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_stpScore/25*100)}%;background:#22c55e"></div></div><span class="ra-quality-item-val">${totalSteps-failedSteps}/${totalSteps}</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">📝 Depth</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_wrdScore/25*100)}%;background:#3b82f6"></div></div><span class="ra-quality-item-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords}</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">💡 Findings</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_fndScore/20*100)}%;background:#f59e0b"></div></div><span class="ra-quality-item-val">${discoveredFindings.length}/15</span></div>`;
+          // Confidence gauge section
+          dashHtml+=`<div class="ra-quality-section"><div class="ra-quality-hd">?? Research Confidence</div><div class="ra-quality-body"><div class="ra-quality-gauge"><svg viewBox="0 0 120 120" width="110" height="110"><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="var(--border)" stroke-width="${_qstroke}" stroke-dasharray="${_qarcLen} ${_qcirc-_qarcLen}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round"/><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="${confidenceColor}" stroke-width="${_qstroke}" stroke-dasharray="${_qdashArr}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round" class="ra-quality-gauge-fill"/><text x="${_qcx}" y="${_qcy-4}" text-anchor="middle" fill="${confidenceColor}" font-size="24" font-weight="800" font-family="var(--mono)">${confidenceScore}</text><text x="${_qcx}" y="${_qcy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/ 100</text></svg><div style="text-align:center;margin-top:4px;font-size:11px;font-weight:700;color:${confidenceColor}">${confidenceLabel}</div></div><div class="ra-quality-breakdown">`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Sources</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_srcPct*100)}%;background:#8b5cf6"></div></div><span class="ra-quality-item-val">${discoveredSources.length}</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">? Coverage</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_stpPct*100)}%;background:#22c55e"></div></div><span class="ra-quality-item-val">${totalSteps-failedSteps} steps</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Depth</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_wrdPct*100)}%;background:#3b82f6"></div></div><span class="ra-quality-item-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords} words</span></div>`;
+          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Findings</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_fndPct*100)}%;background:#f59e0b"></div></div><span class="ra-quality-item-val">${discoveredFindings.length}</span></div>`;
           dashHtml+=`</div></div></div>`;
           // Source diversity
           if(topDomains.length>0){
@@ -2995,19 +2949,9 @@ async function runResearchAgent(query, contentEl, area, chatId){
             });
             dashHtml+=`</div></div>`;
           }
-          // Top findings preview
-          if(discoveredFindings.length){
-            dashHtml+=`<div class="ra-dash-findings"><div class="ra-dash-findings-hd">💡 Key Findings <span style="font-weight:400;color:var(--text-muted)">(${discoveredFindings.length})</span></div>`;
-            discoveredFindings.slice(0,5).forEach(f=>{
-              const fIcon=stepIcons[(f.step||1)-1]||'📄';
-              const fText=f.text||'';
-              dashHtml+=`<div class="ra-dash-finding-mini"><span class="ra-dash-finding-icon">${fIcon}</span><span class="ra-dash-finding-text">${esc(fText.length>120?fText.slice(0,120)+'…':fText)}</span></div>`;
-            });
-            dashHtml+=`</div>`;
-          }
           // Step timing chart
           if(durations.length){
-            dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">⏱️ Step Performance</div><div class="ra-timing-chart">`;
+            dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">?? Step Performance</div><div class="ra-timing-chart">`;
             durations.forEach(d=>{
               const pct=Math.round((d.elapsed/maxDur)*100);
               const sIcon=stepIcons[(d.step||1)-1]||'📄';
@@ -3027,11 +2971,11 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const actionBar=document.createElement('div');
           actionBar.className='ra-actions';
           window._raCopyReport=function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){})};
-          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="window._raRetry(this)">🔄 Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">📖 Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">📁 Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='✓ Copied!';setTimeout(function(){btn.textContent='📋 Copy Report'},1500)})(this)">📋 Copy Report</button>`;
+          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="window._raRetry(this)">?? Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">?? Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">?? Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='? Copied!';setTimeout(function(){btn.textContent='?? Copy Report'},1500)})(this)">?? Copy Report</button>`;
 
           // Update badge
           const badge=document.getElementById('_raBadge');
-          if(badge){badge.classList.add('ra-badge-done');badge.textContent='✅ Research Complete — '+totalTime+'s';}
+          if(badge){badge.classList.add('ra-badge-done');badge.textContent='? Research Complete — '+totalTimeFmt;}
 
           if(outEl){
             outEl.appendChild(searchEl);
@@ -3039,6 +2983,19 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
           showToast('Research complete!','✅');
           _raAutoScroll();
+
+          // Auto-trigger AI follow-up turn after research completes
+          const _raFollowTid=setTimeout(()=>{
+            // Guard: skip if user already started a new interaction in this chat
+            if(isChatRunning(chatId))return;
+            sendMessage({
+              silent: true,
+              noThinking: false,
+              message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps. The full research is displayed above. Now continue helping the user with their original request. Reference the research findings naturally. Do NOT repeat or summarize the research — it is already visible. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions). If the user's request was purely for research, provide a brief acknowledgment and ask what they'd like to do next.`,
+              targetChat: chatId
+            });
+          }, 1500);
+          const _pListR=_pendingReprompts.get(chatId)||[];_pListR.push(_raFollowTid);_pendingReprompts.set(chatId,_pListR);
         }else if(ev.type==='heartbeat'){
           // Keepalive from server — ignore, just prevents connection timeout
         }else if(ev.type==='agent_error'){
@@ -3056,35 +3013,64 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
     // Stream ended — check if we got a proper completion
     if(!_raDoneReceived){
-      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      // Auto-retry if stream ended unexpectedly (server timeout, etc.)
+      if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
+      window._raAutoRetryCount++;
+      if(window._raAutoRetryCount<=2){
+        const actEl=document.getElementById('_raActivity');
+        if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection interrupted — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? retrying';el.className='ra-section-status ra-running';});
+        clearInterval(elTimer);
+        if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+        area.removeEventListener('scroll',_raOnScroll);
+        setChatRunning(chatId,false);
+        setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},1500);
+        return;
+      }
+      const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Research Interrupted — '+totalTime+'s';}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Research Interrupted — '+totalTimeFmtEnd;}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. The server may have timed out. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
     }
   }catch(e){
     const isAbort=e.name==='AbortError';
     const isNetwork=e.name==='TypeError'||e.message?.includes('network')||e.message?.includes('Failed to fetch');
     if(isAbort){
-      // User cancelled — show a clean message
+      // User cancelled — show a clean message (don't auto-retry user cancels)
+      window._raAutoRetryCount=0;
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⏹️ Research Cancelled';}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Research Cancelled';}
       const actEl=document.getElementById('_raActivity');
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
-      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⏹ cancelled';el.className='ra-section-status ra-failed';});
+      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
     }else if(isNetwork){
-      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      // Auto-retry network errors
+      if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
+      window._raAutoRetryCount++;
+      if(window._raAutoRetryCount<=2){
+        const actEl=document.getElementById('_raActivity');
+        if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection lost — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? retrying';el.className='ra-section-status ra-running';});
+        clearInterval(elTimer);
+        if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+        area.removeEventListener('scroll',_raOnScroll);
+        setChatRunning(chatId,false);
+        setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},2000);
+        return;
+      }
+      const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='⚠️ Connection Lost — '+totalTime+'s';}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Connection Lost — '+totalTimeFmtEnd;}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ lost';el.className='ra-section-status ra-failed';});
     }else{
-      const totalTime=((Date.now()-startTime)/1000).toFixed(1);
+      const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='❌ Research Failed — '+totalTime+'s';}
-      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">❌ Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raRetry(this)">🔄 Retry</button></div>`;
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='? Research Failed — '+totalTimeFmtEnd;}
+      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">? Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></div>`;
       setStatus('Research failed.');
     }
   }finally{
@@ -3096,7 +3082,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
   }
 }
 
-// ─── Stock Analysis Helpers ───────────────────────
+// --- Stock Analysis Helpers -----------------------
 function _saParseRating(text){
   if(!text)return{label:'Hold',score:50};
   // Try to extract numeric rating X/100 from the text
@@ -3211,7 +3197,7 @@ function buildSentimentGauge(rating, stockDataArr, lastStepText){
 
 function buildGrowthChart(stockDataArr){
   if(!stockDataArr||!stockDataArr.length)return'';
-  let html='<div class="sa-growth-wrap sa-growth-collapsed"><div class="sa-growth-header" onclick="this.parentElement.classList.toggle(\'sa-growth-collapsed\')"><div class="sa-growth-title">📈 Key Metrics Comparison</div><span class="sa-growth-chevron">▾</span></div><div class="sa-growth-body">';
+  let html='<div class="sa-growth-wrap sa-growth-collapsed"><div class="sa-growth-header" onclick="this.parentElement.classList.toggle(\'sa-growth-collapsed\')"><div class="sa-growth-title">?? Key Metrics Comparison</div><span class="sa-growth-chevron">📈</span></div><div class="sa-growth-body">';
   for(let si=0;si<stockDataArr.length;si++){
     const sd=stockDataArr[si];
     const ticker=sd.ticker||'?';
@@ -3243,9 +3229,9 @@ function buildGrowthChart(stockDataArr){
   return html;
 }
 
-// ─── Stock Analysis Agent ─────────────────────────
+// --- Stock Analysis Agent -------------------------
 async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId){
-  const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠️','🎯','🔎','🏆','💰'];
+  const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠','🎯','🔎','🏆','💰'];
   const stepNames=['Stock Screening','Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Winner Deep Dive','Final Verdict','Buying Plan'];
   const totalSteps=11;
   let currentStep=0;
@@ -3398,7 +3384,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const section=document.createElement('div');
             section.className='sa-section sa-slide-in';
             section.id='_saS'+ev.step;
-            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
+            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">?</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">?</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
             if(outEl) outEl.appendChild(section);
             currentContentEl=section.querySelector('.sa-step-content');
             if(window._chatAutoScroll)window._chatAutoScroll();
@@ -3432,8 +3418,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const timerEl=document.getElementById('_saT'+ev.step);
             if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
             const ce=document.getElementById('_saC'+ev.step);
-            if(ce&&ev.error) ce.innerHTML=`<div class="sa-step-error">⚠️ Step failed: ${esc(ev.error.slice(0,150))}</div>`;
-            updateProgress(ev.step, '⚠️ '+ev.title+' failed — continuing...');
+            if(ce&&ev.error) ce.innerHTML=`<div class="sa-step-error">?? Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, '?? '+ev.title+' failed — continuing...');
           }
         }else if(ev.type==='agent_thinking'){
           stepThinking+=(ev.text||'');
@@ -3516,7 +3502,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl&&Object.keys(stepElapsed).length){
             const timingEl=document.createElement('div');
             timingEl.className='sa-timing-section sa-slide-in';
-            let timHtml=`<div class="sa-timing-hd">⏱️ Step Performance <span style="font-weight:400;opacity:.6">— Total: ${totalTime}s</span></div><div class="sa-timing-chart">`;
+            let timHtml=`<div class="sa-timing-hd">?? Step Performance <span style="font-weight:400;opacity:.6">— Total: ${totalTime}s</span></div><div class="sa-timing-chart">`;
             for(let s=1;s<=totalSteps;s++){
               const dur=stepElapsed[s]||0;
               const pct=Math.round((dur/maxDur)*100);
@@ -3531,7 +3517,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl){
             const disc=document.createElement('div');
             disc.className='stock-disclaimer sa-disclaimer';
-            disc.innerHTML='⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.';
+            disc.innerHTML='?? <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.';
             outEl.appendChild(disc);
           }
 
@@ -3539,13 +3525,13 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl){
             const actions=document.createElement('div');
             actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
-            actions.innerHTML=`<button class="sa-reanalyze" onclick="(function(btn){btn.disabled=true;btn.textContent='⏳ Re-analyzing...';var c=btn.closest('.sa-container')||btn.parentElement.parentElement;var contentEl=c.parentElement;contentEl.innerHTML='';runStockAgent(${JSON.stringify(stockDataArray).replace(/</g,'\\u003c')},${JSON.stringify(userQuery).replace(/</g,'\\u003c')},contentEl,contentEl.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/</g,'\\u003c')})})(this)">🔄 Re-analyze</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.remove('sa-collapsed')})})(this)">📖 Expand All</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.add('sa-collapsed')})})(this)">📁 Collapse All</button>`;
+            actions.innerHTML=`<button class="sa-reanalyze" onclick="(function(btn){btn.disabled=true;btn.textContent='? Re-analyzing...';var c=btn.closest('.sa-container')||btn.parentElement.parentElement;var contentEl=c.parentElement;contentEl.innerHTML='';runStockAgent(${JSON.stringify(stockDataArray).replace(/</g,'\\u003c')},${JSON.stringify(userQuery).replace(/</g,'\\u003c')},contentEl,contentEl.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/</g,'\\u003c')})})(this)">?? Re-analyze</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.remove('sa-collapsed')})})(this)">?? Expand All</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.add('sa-collapsed')})})(this)">?? Collapse All</button>`;
             outEl.appendChild(actions);
           }
 
           // Update badge
           const badge=document.getElementById('_saBadge');
-          if(badge){badge.classList.add('sa-badge-done');badge.textContent='✅ Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
+          if(badge){badge.classList.add('sa-badge-done');badge.textContent='? Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
 
           if(window._chatAutoScroll)window._chatAutoScroll();
         }
@@ -3558,12 +3544,12 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
   }
 }
 
-// ─── Messaging ────────────────────────────────────
+// --- Messaging ------------------------------------
 function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}}
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
 function sendQ(t){document.getElementById('msgInput').value=t;sendMessage()}
 
-// ─── Map Embeds ───────────────────────────────────
+// --- Map Embeds -----------------------------------
 function renderMapEmbed(query, label){
   const q=encodeURIComponent(query);
   const loc=getUserLocation();
@@ -3572,7 +3558,7 @@ function renderMapEmbed(query, label){
     src=`https://www.google.com/maps?q=${q}&ll=${loc.lat},${loc.lng}&z=13&output=embed`;
   }
   const mapsLink=`https://www.google.com/maps/search/${q}`;
-  return `<div class="map-embed-wrap"><div class="map-embed-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg><span>${esc(label||query)}</span><a href="${mapsLink}" target="_blank" rel="noopener" class="map-open-btn">Open in Maps ↗</a></div><iframe class="map-embed-iframe" src="${src}" allowfullscreen loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe></div>`;
+  return `<div class="map-embed-wrap"><div class="map-embed-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg><span>${esc(label||query)}</span><a href="${mapsLink}" target="_blank" rel="noopener" class="map-open-btn">Open in Maps ?</a></div><iframe class="map-embed-iframe" src="${src}" allowfullscreen loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe></div>`;
 }
 
 function renderFlightsLink(query){
@@ -3580,7 +3566,7 @@ function renderFlightsLink(query){
   return `<div class="flights-link-wrap"><a href="https://www.google.com/travel/flights?q=${q}" target="_blank" rel="noopener" class="flights-link-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5 5.2 3 -2 2-1.8-.6c-.4-.1-.8 0-1 .3l-.3.3 2.5 1.5 1.5 2.5.3-.3c.3-.3.4-.7.3-1l-.6-1.8 2-2 3 5.2.5-.3c.4-.2.6-.6.5-1.1z"/></svg> Search flights: ${esc(query)}</a></div>`;
 }
 
-// ─── HuggingFace Space Results ────────────────────
+// --- HuggingFace Space Results --------------------
 function renderHFResult(hfData){
   const result=hfData.result||{};
   const space=esc(hfData.space||'');
@@ -3595,7 +3581,7 @@ function renderHFResult(hfData){
         <img src="${result.data}" style="max-width:100%;max-height:512px;border-radius:8px;" alt="HuggingFace generated image">
       </div>
       <div style="padding:6px 12px 8px;display:flex;gap:8px;">
-        <a href="${result.data}" download="hf_output.png" style="font-size:10px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:4px;cursor:pointer;">⬇ Download</a>
+        <a href="${result.data}" download="hf_output.png" style="font-size:10px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:4px;cursor:pointer;">? Download</a>
       </div>
     </div>`;
   }
@@ -3656,7 +3642,7 @@ function renderHFLoading(info){
   </div>`;
 }
 
-// ─── Stock Cards ──────────────────────────────────
+// --- Stock Cards ----------------------------------
 function renderStockCard(ticker, prefetchedData){
   ticker=ticker.trim().toUpperCase();
   const cardId='stock_'+ticker+'_'+Date.now().toString(36);
@@ -3667,7 +3653,7 @@ function renderStockCard(ticker, prefetchedData){
     // Fallback: client-side fetch (shouldn't happen in normal flow)
     setTimeout(()=>_fetchStockData(ticker,cardId),50);
   }
-  return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer">⚠️ <strong>Not financial advice.</strong> This is for informational and educational purposes only. AI-generated analysis may be inaccurate or outdated. Always do your own research and consult a licensed financial advisor before making investment decisions. You could lose money.</div></div>`;
+  return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer">?? <strong>Not financial advice.</strong> This is for informational and educational purposes only. AI-generated analysis may be inaccurate or outdated. Always do your own research and consult a licensed financial advisor before making investment decisions. You could lose money.</div></div>`;
 }
 function _stockHealthColor(score){
   if(score>=70)return'#22c55e';
@@ -3691,7 +3677,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     } else {
       const r=await fetch('/api/stock/'+encodeURIComponent(ticker));
       d=await r.json();
-      if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ ${esc(d.error)}</div>`;return;}
+      if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">?? ${esc(d.error)}</div>`;return;}
     }
     const up=d.change>=0;
     const arrow=up?'▲':'▼';
@@ -3700,14 +3686,14 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     const fmtNumRaw=(n)=>{if(n==null)return'—';if(n>=1e12)return(n/1e12).toFixed(2)+'T';if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString();};
     const fmtPct=(n)=>n!=null?(n*100).toFixed(2)+'%':'—';
 
-    // ── Verdict banner ──
+    // -- Verdict banner --
     const verdict=d.verdict||'hold';
     const verdictLabel={buy:'BUY',hold:'HOLD',sell:'SELL'}[verdict]||'HOLD';
     const verdictCls={buy:'stock-verdict-buy',hold:'stock-verdict-hold',sell:'stock-verdict-sell'}[verdict]||'stock-verdict-hold';
     const hs=d.health&&d.health.score;
     const scoreTag=hs!=null?`<span class="stock-verdict-score">${hs}/100</span>`:'';
 
-    // ── Risk badge ──
+    // -- Risk badge --
     let riskBadge='';
     if(d.risk){
       const riskMap={low:'Low Risk',moderate:'Moderate',high:'High Risk',very_high:'Very High'};
@@ -3715,7 +3701,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       riskBadge=`<span class="stock-risk-badge ${riskCls[d.risk]||'stock-risk-mod'}">${riskMap[d.risk]||d.risk}</span>`;
     }
 
-    // ── Key metrics ──
+    // -- Key metrics --
     const metrics=[
       {label:'Open',value:d.open!=null?'$'+d.open.toFixed(2):'—'},
       {label:'Day Range',value:(d.dayLow!=null&&d.dayHigh!=null)?'$'+d.dayLow.toFixed(2)+' – $'+d.dayHigh.toFixed(2):'—'},
@@ -3729,7 +3715,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       {label:'Beta',value:d.beta!=null?d.beta.toFixed(2):'—'},
     ];
 
-    // ── Technical indicators ──
+    // -- Technical indicators --
     const p=d.perf||{};
     const tc=d.technicals||{};
     const techItems=[];
@@ -3742,7 +3728,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     }
     if(tc.macd!=null){
       const macdUp=tc.macd_histogram>0;
-      techItems.push(`<span class="stock-tech-item">MACD: <b class="${macdUp?'stock-up':'stock-down'}">${tc.macd.toFixed(2)}</b> <small style="opacity:.7">(${macdUp?'▲ bullish':'▼ bearish'})</small></span>`);
+      techItems.push(`<span class="stock-tech-item">MACD: <b class="${macdUp?'stock-up':'stock-down'}">${tc.macd.toFixed(2)}</b> <small style="opacity:.7">(${macdUp?'? bullish':'? bearish'})</small></span>`);
     }
     if(tc.bb_pctb!=null){
       const bbCls=tc.bb_pctb>0.8?'stock-down':tc.bb_pctb<0.2?'stock-up':'stock-neutral';
@@ -3758,17 +3744,17 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     }
     let techHtml=techItems.length?`<div class="stock-tech-section"><span class="stock-section-title">Technical Indicators</span><div class="stock-tech-row">${techItems.join('')}</div></div>`:'';
 
-    // ── 52-week position ──
+    // -- 52-week position --
     let pos52Html='';
     if(d.pos52!=null&&d.low52!=null&&d.high52!=null){
       pos52Html=`<div class="stock-52w"><span class="stock-52w-label">52W Range</span><div class="stock-52w-bar-wrap"><span class="stock-52w-lo">$${d.low52.toFixed(2)}</span><div class="stock-52w-track"><div class="stock-52w-fill" style="width:${Math.max(Math.min(d.pos52,100),0)}%"></div><div class="stock-52w-dot" style="left:${Math.max(Math.min(d.pos52,100),0)}%"></div></div><span class="stock-52w-hi">$${d.high52.toFixed(2)}</span></div></div>`;
     }
 
-    // ── Performance bars ──
+    // -- Performance bars --
     const perfItems=[_stockPerfBar('1W',p['1w']),_stockPerfBar('1M',p['1m']),_stockPerfBar('3M',p['3m']),_stockPerfBar('6M',p['6m']),_stockPerfBar('YTD',p['ytd']),_stockPerfBar('1Y',p['1y'])].filter(x=>x);
     let perfHtml=perfItems.length?`<div class="stock-perf-section"><span class="stock-section-title">Performance</span><div class="stock-perf-grid">${perfItems.join('')}</div></div>`:'';
 
-    // ── Financial health ──
+    // -- Financial health --
     const h=d.health||{};
     const hItems=[];
     if(h.profitMargin!=null) hItems.push({l:'Profit Margin',v:fmtPct(h.profitMargin),good:h.profitMargin>0.1});
@@ -3782,7 +3768,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     if(h.priceToBook!=null) hItems.push({l:'P/B Ratio',v:h.priceToBook.toFixed(2),good:h.priceToBook<3});
     let healthDetailHtml=hItems.length?`<div class="stock-health-detail"><span class="stock-section-title">Financial Health</span><div class="stock-health-grid">${hItems.map(i=>`<div class="stock-health-item"><span>${i.l}</span><span class="${i.good?'stock-up':'stock-down'}">${i.v}</span></div>`).join('')}</div></div>`:'';
 
-    // ── Analyst targets ──
+    // -- Analyst targets --
     let targetHtml='';
     if(d.targetPrice){
       const upside=((d.targetPrice-d.price)/d.price*100).toFixed(1);
@@ -3805,11 +3791,11 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       +`</div>`;
     }
 
-    // ── Earnings ──
+    // -- Earnings --
     let earningsHtml='';
     if(d.earningsDate) earningsHtml=`<span class="stock-earnings">Earnings: ${esc(d.earningsDate)}</span>`;
 
-    // ── Collapsible details content ──
+    // -- Collapsible details content --
     const detailsContent=pos52Html+techHtml
       +`<div class="stock-card-metrics">${metrics.map(m=>`<div class="stock-metric"><span class="stock-metric-label">${m.label}</span><span class="stock-metric-value">${m.value}</span></div>`).join('')}</div>`
       +perfHtml+healthDetailHtml+targetHtml;
@@ -3817,12 +3803,12 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     const detailId=cardId+'_det';
 
     el.querySelector('.stock-card').innerHTML=
-      // ── Verdict banner ──
+      // -- Verdict banner --
       `<div class="stock-verdict-banner ${verdictCls}">`
         +`<span class="stock-verdict-label">${verdictLabel}</span>`
         +scoreTag
       +`</div>`
-      // ── Header: ticker, price, badges ──
+      // -- Header: ticker, price, badges --
       +`<div class="stock-card-header">`
         +`<div class="stock-card-title-row">`
           +`<div class="stock-card-title"><span class="stock-ticker">${esc(d.ticker)}</span><span class="stock-name">${esc(d.name)}</span></div>`
@@ -3832,21 +3818,21 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
           +`<div class="stock-card-price"><span class="stock-price">$${d.price.toFixed(2)}</span><span class="stock-change ${cls}">${arrow} $${Math.abs(d.change).toFixed(2)} (${Math.abs(d.changePct).toFixed(2)}%)</span></div>`
         +`</div>`
       +`</div>`
-      // ── Collapsible details toggle ──
-      +`<button class="stock-details-toggle" onclick="var det=document.getElementById('${detailId}');var open=det.classList.toggle('open');this.querySelector('.stock-toggle-arrow').textContent=open?'▾':'▸';this.querySelector('.stock-toggle-text').textContent=open?'Hide Details':'View Details'">`
-        +`<span class="stock-toggle-arrow">▸</span> <span class="stock-toggle-text">View Details</span>`
+      // -- Collapsible details toggle --
+      +`<button class="stock-details-toggle" onclick="var det=document.getElementById('${detailId}');var open=det.classList.toggle('open');this.querySelector('.stock-toggle-arrow').textContent=open?'📎':'?';this.querySelector('.stock-toggle-text').textContent=open?'Hide Details':'View Details'">`
+        +`<span class="stock-toggle-arrow">?</span> <span class="stock-toggle-text">View Details</span>`
       +`</button>`
       +`<div class="stock-details-body" id="${detailId}">`
         +detailsContent
       +`</div>`
-      // ── Footer ──
+      // -- Footer --
       +`<div class="stock-card-footer">`
         +earningsHtml
         +`${d.sector?`<span class="stock-sector">${esc(d.sector)}${d.industry?' · '+esc(d.industry):''}</span>`:''}`
-        +`<a class="stock-yahoo-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener">Yahoo Finance ↗</a>`
+        +`<a class="stock-yahoo-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener">Yahoo Finance ?</a>`
       +`</div>`;
   }catch(e){
-    if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">⚠️ Failed to load stock data for ${esc(ticker)}</div>`;
+    if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">?? Failed to load stock data for ${esc(ticker)}</div>`;
   }
 }
 
@@ -3917,7 +3903,7 @@ function renderChoiceWizard(choiceBlocks){
   }).join('');
   const multiHint=first.multi?'<div class="cq-multi-hint">Select multiple, then press Next</div>':'';
   const progressHTML=total>1?`<div class="cq-progress"><span class="cq-step-label">Question <span class="cq-step-num">1</span> of ${total}</span><div class="cq-progress-bar"><div class="cq-progress-fill" style="width:${(1/total)*100}%"></div></div></div>`:'';
-  const nextBtnHTML=first.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next →</button>`:'';
+  const nextBtnHTML=first.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next ?</button>`:'';
   return `<div class="cq-wizard" data-blocks="${blocksJSON}" data-current="0" data-total="${total}" data-answers="[]">`
     +progressHTML
     +`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
@@ -4002,7 +3988,7 @@ function wizardNext(el){
         +`</button>`;
     }).join('');
     const multiHint=nb.multi?'<div class="cq-multi-hint">Select multiple, then press Next</div>':'';
-    const nextBtnHTML=nb.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next →</button>`:'';
+    const nextBtnHTML=nb.multi?`<button class="cq-next-btn" onclick="wizardNext(this)" disabled>Next ?</button>`:'';
     card.outerHTML=`<div class="cq-card" ${multiAttr}>${qHTML}${multiHint}<div class="cq-opts">${optsHTML}</div>`
       +nextBtnHTML+`</div>`;
     // Update progress
@@ -4057,6 +4043,12 @@ function stripMetaBlocks(text){
     .replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'')
     .replace(/<<<DEEP_RESEARCH>>>/g,'')
     .replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'')
+    .replace(/<<<SOURCES>>>[\s\S]*?(<<<END_SOURCES>>>|$)/g,'')
+    .replace(/<<<FOLLOWUPS>>>[\s\S]*?(<<<END_FOLLOWUPS>>>|$)/g,'')
+    .replace(/<<<\/?SOURCES\/?>>>/g,'')
+    .replace(/<<<\/?END_SOURCES\/?>>>/g,'')
+    .replace(/<<<\/?FOLLOWUPS\/?>>>/g,'')
+    .replace(/<<<\/?END_FOLLOWUPS\/?>>>/g,'')
     .trim();
 }
 
@@ -4076,7 +4068,7 @@ function fmtLive(raw){
   // Escape HTML entities
   html=html.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-  // ── Inline media markers: [[[MEDIA:kind:index:info]]] ──
+  // -- Inline media markers: [[[MEDIA:kind:index:info]]] --
   // These are injected by the media_loading handler during streaming.
   // Render as actual content (if loaded) or loading card (if still pending).
   const _liveBlocks=[];
@@ -4110,7 +4102,7 @@ function fmtLive(raw){
   html=html.replace(/%%%IMAGE_SEARCH:[^%]*?(?:&gt;&gt;&gt;|%%%)/g,'');
   html=html.replace(/&lt;&lt;&lt;IMAGE_GENERATE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🎨</span> Generating image...</div>');
   html=html.replace(/&lt;&lt;&lt;MAP:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📍</span> Loading map...</div>');
-  html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈️</span> Finding flights...</div>');
+  html=html.replace(/&lt;&lt;&lt;FLIGHTS:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">✈</span> Finding flights...</div>');
   html=html.replace(/&lt;&lt;&lt;STOCK:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/%%%STOCKBLOCK:\d+%%%/g,'<div class="stream-placeholder"><span class="sp-icon">📈</span> Loading stock data...</div>');
   html=html.replace(/&lt;&lt;&lt;HF_SPACE:[^&]*?&gt;&gt;&gt;/g,'<div class="stream-placeholder"><span class="sp-icon">🤗</span> Running HuggingFace Space...</div>');
@@ -4118,23 +4110,28 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;CONTINUE&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_STOCK_RATINGS&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;STOCK_RATINGS&gt;&gt;&gt;[\s\S]*$/,'');
+  // Strip SOURCES/FOLLOWUPS blocks (may still have escaped tags after HTML escaping)
+  html=html.replace(/&lt;&lt;&lt;SOURCES&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_SOURCES&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;SOURCES&gt;&gt;&gt;[\s\S]*$/,'');
+  html=html.replace(/&lt;&lt;&lt;FOLLOWUPS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_FOLLOWUPS&gt;&gt;&gt;/g,'');
+  html=html.replace(/&lt;&lt;&lt;FOLLOWUPS&gt;&gt;&gt;[\s\S]*$/,'');
   // Completed CODE_EXECUTE blocks — show code + executing indicator
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
-    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙️</span> '+esc(langLabel)+' — Running...</div><pre class="stream-code-exec-body"><code>'+code+'</code></pre><div class="stream-code-exec-status"><div class="dots"><span></span><span></span><span></span></div> Executing...</div></div>';
+    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> '+esc(langLabel)+' — Running...</div><pre class="stream-code-exec-body"><code>'+code+'</code></pre><div class="stream-code-exec-status"><div class="dots"><span></span><span></span><span></span></div> Executing...</div></div>';
   });
   // Unclosed CODE_EXECUTE block (still streaming) — show the code being written
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*)$/,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
-    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙️</span> Writing '+esc(langLabel)+' code...</div><pre class="stream-code-exec-body"><code>'+code+'</code><span class="stream-cursor"></span></pre></div>';
+    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> Writing '+esc(langLabel)+' code...</div><pre class="stream-code-exec-body"><code>'+code+'</code><span class="stream-cursor"></span></pre></div>';
   });
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){
-    html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating mind map...</div>');
+    html=html.replace(/```mermaid\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">🗺</span> Generating mind map...</div>');
   }
   // Unclosed todolist block
   if(/```todolist\n/i.test(html)&&!(/```todolist\n[\s\S]*?```/.test(html))){
-    html=html.replace(/```todolist\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Generating task list...</div>');
+    html=html.replace(/```todolist\n[\s\S]*$/,'<div class="stream-placeholder"><span class="sp-icon">✅</span> Generating task list...</div>');
   }
   // Unclosed generic code block — show artifact generating
   if(hasUnclosedCodeFence(html)){
@@ -4142,11 +4139,11 @@ function fmtLive(raw){
     const fenceMatch=html.match(/```(\w+)\n(?![\s\S]*```)/);
     const lang=fenceMatch?fenceMatch[1]:'code';
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','json':'JSON','markdown':'Markdown','md':'Markdown','sql':'SQL','bash':'Shell','sh':'Shell','typescript':'TypeScript','ts':'TypeScript'}[lang.toLowerCase()]||lang;
-    html=html.replace(/```\w*\n[^]*$/,'<div class="stream-placeholder"><span class="sp-icon">●</span> Writing '+esc(langLabel)+' artifact...</div>');
+    html=html.replace(/```\w*\n[^]*$/,'<div class="stream-placeholder"><span class="sp-icon">🗺</span> Writing '+esc(langLabel)+' artifact...</div>');
   }
 
   // Completed mermaid blocks — show placeholder until fmt() renders the real diagram
-  html=html.replace(/```mermaid\n[\s\S]*?```/g,'<div class="stream-placeholder"><span class="sp-icon">🗺️</span> Mind map ready — rendering...</div>');
+  html=html.replace(/```mermaid\n[\s\S]*?```/g,'<div class="stream-placeholder"><span class="sp-icon">🗺</span> Mind map ready — rendering...</div>');
   // Completed todolist blocks — show placeholder until fmt() renders the interactive list
   html=html.replace(/```todolist\n[\s\S]*?```/g,'<div class="stream-placeholder"><span class="sp-icon">✅</span> Task list ready — rendering...</div>');
   // Completed code blocks: render styled
@@ -4154,20 +4151,80 @@ function fmtLive(raw){
     return '<pre class="stream-code"><code>'+c+'</code></pre>';
   });
 
-  // Markdown tables — protect in live blocks to avoid <br> inside <table>
-  html=html.replace(/(?:^|\n)(\|.+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|.+\|[ \t]*(?:\n|$))+)/gm,(match)=>{
+  // Custom <<<TABLE>>> format — compact, efficient, no pipes/separators
+  // Complete tables: <<<TABLE caption="...">>>...<<<END_TABLE>>>
+  html=html.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*?)<<<END_TABLE>{3,}/g,(_,caption,body)=>{
+    const lines=body.trim().split('\n').filter(l=>l.trim());
+    if(lines.length<1)return _;
+    const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:1px 4px;border-radius:3px;font-size:11px">$1</code>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
+    const headers=lines[0].split(';;').map(c=>c.trim());
+    const dataLines=lines.slice(1);
+    let tbl='';
+    if(caption)tbl+='<div style="font-weight:600;font-size:12px;margin:8px 0 2px;color:var(--text-secondary)">'+esc(caption)+'</div>';
+    tbl+='<table style="border-collapse:collapse;width:100%;margin:4px 0 8px;font-size:12px"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
+    for(const line of dataLines){
+      if(!line.trim())continue;
+      const cells=line.split(';;').map(c=>c.trim());
+      while(cells.length<headers.length)cells.push('');
+      tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
+    }
+    tbl+='</tbody></table>';
+    _liveBlocks.push(tbl);
+    return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
+  });
+  // Incomplete/streaming <<<TABLE>>> — show generating placeholder
+  if(/<<<TABLE(?:\s+caption[=:]"[^"]*")?>{3,}/.test(html)&&!/<<<END_TABLE>{3,}/.test(html)){
+    html=html.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*)$/,(_,caption,body)=>{
+      const lines=body.trim().split('\n').filter(l=>l.trim());
+      if(lines.length<1)return '<div class="stream-placeholder"><span class="sp-icon">📊</span> Generating '+(caption||'table')+'...</div>';
+      const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent)">$1</a>');
+      const headers=lines[0].split(';;').map(c=>c.trim());
+      const dataLines=lines.slice(1);
+      let tbl='';
+      if(caption)tbl+='<div style="font-weight:600;font-size:12px;margin:8px 0 2px;color:var(--text-secondary)">'+esc(caption)+'</div>';
+      tbl+='<table style="border-collapse:collapse;width:100%;margin:4px 0 8px;font-size:12px;opacity:0.7"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
+      for(const line of dataLines){
+        if(!line.trim())continue;
+        const cells=line.split(';;').map(c=>c.trim());
+        while(cells.length<headers.length)cells.push('');
+        tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
+      }
+      tbl+='</tbody></table><div style="font-size:11px;color:var(--text-tertiary);font-style:italic">? Loading more rows...</div>';
+      _liveBlocks.push(tbl);
+      return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
+    });
+  }
+
+  // Markdown tables — unified handler for both complete and streaming tables (legacy fallback)
+  // Matches any table structure: header row + separator + zero or more data rows (even incomplete)
+  html=html.replace(/(?:^|\n)(\|[^\n]+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|[^\n]*(?:\n|$))*)/gm,(match)=>{
     const lines=match.trim().split('\n').filter(l=>l.trim());
-    if(lines.length<3)return match;
+    if(lines.length<2)return match;
     const parseRow=line=>line.replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
     const fmtCell=c=>c.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:1px 4px;border-radius:3px;font-size:11px">$1</code>');
     const headers=parseRow(lines[0]);
     if(!/^[\s|:\-]+$/.test(lines[1].replace(/\|/g,'')))return match;
-    const rows=lines.slice(2).map(parseRow);
+    const dataLines=lines.slice(2);
     let tbl='<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:12px"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
-    for(const row of rows)tbl+='<tr>'+row.map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
+    for(const line of dataLines){
+      if(!line.trim())continue;
+      const cells=parseRow(line);
+      // Pad cells to match header count for incomplete rows
+      while(cells.length<headers.length)cells.push('');
+      tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
+    }
     tbl+='</tbody></table>';
     _liveBlocks.push(tbl);
     return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
+  });
+
+  // Catch any remaining partial table row at end of text (orphaned from table above)
+  html=html.replace(/\n(\|[^\n]*)$/,(match,row)=>{
+    if(row.trim().startsWith('|')){
+      _liveBlocks.push('');
+      return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%`;
+    }
+    return match;
   });
 
   // Bold
@@ -4175,6 +4232,8 @@ function fmtLive(raw){
   // Inline code
   html=html.replace(/`(.+?)`/g,'<code class="stream-inline-code">$1</code>');
   // Links — absolute and relative /api/ URLs
+  // First, strip vertexaisearch proxy URLs (they're just google redirects, not useful for display)
+  html=html.replace(/\[([^\]]+)\]\(https?:\/\/vertexaisearch[^)]+\)/g,'$1');
   html=html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   html=html.replace(/\[([^\]]+)\]\((\/api\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Workspace file links: [text](filename.ext) — convert to download URLs
@@ -4183,6 +4242,8 @@ function fmtLive(raw){
     return `<a href="${dlUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${label}</a>`;
   });
   // Bare URLs — auto-link any https?:// not already inside an <a> tag
+  // First strip bare vertexaisearch proxy URLs (long ugly redirects from Google grounding)
+  html=html.replace(/(?<!href=")(?<!src=")(?<!">)https?:\/\/vertexaisearch[^\s<"']+/g,'');
   html=html.replace(/(?<!href=")(?<!src=")(?<!">)(https?:\/\/[^\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Headings (### at start of line)
   html=html.replace(/^(#{1,3})\s+(.+)$/gm,(_,h,text)=>{
@@ -4194,6 +4255,10 @@ function fmtLive(raw){
   html=html.replace(/^([*\-])\s+(.+)$/gm,'<div style="display:flex;gap:8px;padding:1px 0"><span style="color:var(--accent);flex-shrink:0">•</span><span>$2</span></div>');
   // Numbered lists — 1. at start of line
   html=html.replace(/^(\d+)\.\s+(.+)$/gm,'<div style="display:flex;gap:8px;padding:1px 0"><span style="color:var(--accent);flex-shrink:0;min-width:16px;text-align:right">$1.</span><span>$2</span></div>');
+  // Horizontal rules — collapse consecutive ---/=== lines into a single <hr>
+  html=html.replace(/^[\-]{3,}$/gm,'<hr style="border:none;border-top:1px solid var(--border);margin:8px 0">');
+  html=html.replace(/^[=]{3,}$/gm,'<hr style="border:none;border-top:1px solid var(--border);margin:8px 0">');
+  html=html.replace(/(<hr[^>]*>[\s\n]*){2,}/g,'<hr style="border:none;border-top:1px solid var(--border);margin:8px 0">');
   // Newlines
   html=html.replace(/\n/g,'<br>');
   // Restore live media blocks (protected from markdown processing)
@@ -4415,7 +4480,7 @@ async function sendMessage(opts){
     }
   }
 
-  // ── Research when explicitly activated via tool ──
+  // -- Research when explicitly activated via tool --
   // Research agent silently enhances the prompt — no visible plan/modal
   // It's sent as part of activeTools in the normal chat flow
 
@@ -4457,7 +4522,7 @@ async function sendMessage(opts){
     activeTools.clear();
     renderToolBadges();
 
-    // ── Research tool: send to AI with tool hint instead of launching directly ──
+    // -- Research tool: send to AI with tool hint instead of launching directly --
     // The AI will decide whether to trigger <<<DEEP_RESEARCH: query>>> based on
     // the tool instructions injected into the system prompt by the backend.
 
@@ -4521,11 +4586,11 @@ async function sendMessage(opts){
     let buffer='',fullText='',thinkText='',isThinking=false;
     const _streamDevRaw=devRawMode;  // Snapshot dev mode at stream start to prevent mid-stream format switches
     let _genFailures=[];
-    // ── Multi-turn thinking state ──
+    // -- Multi-turn thinking state --
     let _thinkTurn=0;              // Current thinking turn number (incremented each time thinking restarts)
     let _thinkTurns={};            // {turnNum: {panel, textEl, text}}
     let _turnThinkText='';         // Current turn's thinking text
-    // ── Mid-stream media loading state ──
+    // -- Mid-stream media loading state --
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
@@ -4548,7 +4613,12 @@ async function sendMessage(opts){
           msgDiv.remove();
           setChatRunning(targetChatId,false);
           area.removeEventListener('scroll',_onUserScroll);
-          setTimeout(()=>sendMessage({...opts,message:text,_retryCount:_retryCount+1,targetChat:targetChatId}),1500*(_retryCount+1));
+          const _retryTid=setTimeout(()=>{
+            const cur=runningStreams.get(targetChatId);
+            if(cur&&cur.streamId!==streamId)return;
+            sendMessage({...opts,message:text,_retryCount:_retryCount+1,targetChat:targetChatId});
+          },1500*(_retryCount+1));
+          const _pList2=_pendingReprompts.get(targetChatId)||[];_pList2.push(_retryTid);_pendingReprompts.set(targetChatId,_pList2);
           return;
         }
         const cur=runningStreams.get(targetChatId);
@@ -4720,7 +4790,7 @@ async function sendMessage(opts){
                 _autoScroll();
               });
             }
-          // ── Mid-stream media loading event ──
+          // -- Mid-stream media loading event --
           }else if(data.type==='media_loading'){
             _mediaLoadingCount++;
             // Insert an inline marker into fullText so fmtLive renders a loading card
@@ -4741,7 +4811,7 @@ async function sendMessage(opts){
           }else if(data.type==='done'){
             _doneReceived=true;
             clearInterval(_stallTimer);
-            // Immediately mark chat as not running so UI updates (stop button → send button)
+            // Immediately mark chat as not running so UI updates (stop button ? send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse ALL live thinking panels
             contentEl.querySelectorAll('.live-think-panel').forEach(p=>{
@@ -4831,22 +4901,22 @@ async function sendMessage(opts){
                   }
                   filesHtml+='</div>';
                 }
-                finalHTML+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'✓ Executed':'✗ Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
+                finalHTML+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'? Executed':'? Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
               }
             }
             if(data.memory_added?.length)finalHTML+=`<div class="mops">Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
-            // ── Handle reminders set by AI ──
+            // -- Handle reminders set by AI --
             if(data.reminders_set?.length){
               const state=loadProductivityState();
               for(const r of data.reminders_set){
                 state.reminders.push({id:'r_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),due:r.due||'',text:r.text||'',done:false,created:new Date().toISOString()});
               }
               saveProductivityState(state);
-              finalHTML+=`<div class="mops">⏰ ${data.reminders_set.length} reminder${data.reminders_set.length!==1?'s':''} set</div>`;
+              finalHTML+=`<div class="mops">? ${data.reminders_set.length} reminder${data.reminders_set.length!==1?'s':''} set</div>`;
               refreshHomeWidgets();
             }
 
-            // ── Image search — show loading placeholders for pending images ──
+            // -- Image search — show loading placeholders for pending images --
             if(!_streamDevRaw&&data.pending_images?.length){
               for(const pi of data.pending_images){
                 const loaderId=`img-loader-${pi.index}`;
@@ -4879,7 +4949,7 @@ async function sendMessage(opts){
               }
             }
 
-            // ── AI image generation — show loading placeholders ──
+            // -- AI image generation — show loading placeholders --
             if(!_streamDevRaw&&data.pending_generations?.length){
               for(const pg of data.pending_generations){
                 const loaderId=`imggen-loader-${pg.index}`;
@@ -4907,7 +4977,7 @@ async function sendMessage(opts){
               }
             }
 
-            // ── Stock data — ensure loading placeholders exist for pending stocks ──
+            // -- Stock data — ensure loading placeholders exist for pending stocks --
             if(!_streamDevRaw&&data.pending_stocks?.length){
               for(const ps of data.pending_stocks){
                 const loaderId=`stock-loader-${ps.index}`;
@@ -4939,7 +5009,7 @@ async function sendMessage(opts){
               }
             }
 
-            // ── HuggingFace results — render inline ──
+            // -- HuggingFace results — render inline --
             if(!_streamDevRaw&&data.hf_results?.length){
               for(const hr of data.hf_results){
                 const hfHTML=renderHFResult(hr);
@@ -4952,7 +5022,7 @@ async function sendMessage(opts){
               }
             }
 
-            // ── AI-triggered research agent ──
+            // -- AI-triggered research agent --
             if(data.research_trigger&&!choiceBlocks.length){
               const rq=data.research_trigger;
               // Show the AI's text first
@@ -4986,7 +5056,7 @@ async function sendMessage(opts){
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
-              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
+              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">? Retry</button></div>`;
               renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               // Animate content in smoothly
@@ -5005,7 +5075,18 @@ async function sendMessage(opts){
                 },450);
               });
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
-              try{Promise.resolve(mermaid.run()).then(()=>enhanceMermaidDiagrams())}catch{}
+              // Render mermaid diagrams scoped to this message
+              setTimeout(()=>{
+                const mermaidEls=contentEl.querySelectorAll('pre.mermaid:not([data-processed])');
+                if(mermaidEls.length){
+                  try{
+                    mermaid.run({nodes:mermaidEls}).then(()=>enhanceMermaidDiagrams()).catch(()=>enhanceMermaidDiagrams());
+                  }catch(e){
+                    console.log('Mermaid render error:',e);
+                    enhanceMermaidDiagrams();
+                  }
+                }
+              },100);
               // Apply preloaded media results that arrived during streaming (before done)
               if(window._streamMediaResults){
                 for(const [key,result] of Object.entries(window._streamMediaResults)){
@@ -5040,7 +5121,7 @@ async function sendMessage(opts){
               }
             }
             refreshChats();
-            // ── Auto-reprompt after code execution ──
+            // -- Auto-reprompt after code execution --
             // When code was executed, automatically send execution results back to the AI
             // so it can respond accurately (present files on success, debug on failure)
             if(data.code_auto_reprompt&&_codeRepromptCount<_MAX_CODE_REPROMPTS){
@@ -5048,15 +5129,20 @@ async function sendMessage(opts){
               const summary=data.code_execution_summary||'Code execution completed.';
               let repromptMsg;
               if(data.code_all_success){
-                repromptMsg=`[SYSTEM] Code execution completed. Results:\n${summary}\n\nPresent the created files to the user. Link to files using [text](/api/files/download?path=FILENAME) format. Do NOT regenerate the code — just describe what was created and provide the download link(s).`;
+                repromptMsg=`[SYSTEM] Code execution completed. Results:\n${summary}\n\nPresent the created files to the user. Link to files using [text](/api/files/download?path=FILENAME) format. Do NOT regenerate the code — just describe what was created and provide the download link(s). Do NOT trigger <<<DEEP_RESEARCH>>> or any other tools.`;
               }else{
-                repromptMsg=`[SYSTEM] Code execution FAILED. Results:\n${summary}\n\nThe code you wrote failed to execute. Do NOT claim it was successful. Analyze the error, explain what went wrong to the user, and provide a corrected version of the code using <<<CODE_EXECUTE: python>>>...<<<END_CODE>>> tags.`;
+                repromptMsg=`[SYSTEM] Code execution FAILED. Results:\n${summary}\n\nThe code you wrote failed to execute. Do NOT claim it was successful. Analyze the error, explain what went wrong to the user, and provide a corrected version of the code using <<<CODE_EXECUTE: python>>>...<<<END_CODE>>> tags. Do NOT trigger <<<DEEP_RESEARCH>>> or any other tools.`;
               }
               setStatus(data.code_all_success?'Code executed — presenting results...':'Code failed — retrying...');
               const _repromptChatId=targetChatId;
-              setTimeout(()=>{
+              const _repromptStreamId=streamId;
+              const _tid=setTimeout(()=>{
+                // Guard: only fire if this stream is still the active one
+                const cur=runningStreams.get(_repromptChatId);
+                if(cur&&cur.streamId!==_repromptStreamId)return;
                 sendMessage({silent:true,noThinking:data.code_all_success,message:repromptMsg,targetChat:_repromptChatId});
               },800);
+              const _pList=_pendingReprompts.get(_repromptChatId)||[];_pList.push(_tid);_pendingReprompts.set(_repromptChatId,_pList);
             }
             setStatus('Done. Ask a follow-up or start something new.');
             // If user navigated away and back, reload the chat so they see the response
@@ -5220,7 +5306,7 @@ async function sendMessage(opts){
             }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
               if(loader){
-                loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">⚠️ Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
+                loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">?? Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
                 loader.classList.remove('stock-loading-placeholder');
               }
             }
@@ -5365,7 +5451,7 @@ async function sendMessage(opts){
     }
   }finally{
     clearInterval(_stallTimer);
-    // ── Handle stream ending without a done event (connection drop, timeout, etc.) ──
+    // -- Handle stream ending without a done event (connection drop, timeout, etc.) --
     if(!_doneReceived&&canRender()){
       stopThinkingPhrases();
       // Collapse any still-active thinking panel
@@ -5426,7 +5512,7 @@ function renderThinkBlock(thinkText,opts){
   const passBadge=passLabel?`<span class="think-pass-tag">${esc(passLabel)}</span>`:'';
   const passClass=passNum?` think-pass-${passNum}`:'';
   return `<div class="think-block${passClass}" onclick="this.classList.toggle('expanded')">
-    <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">▾</span></div>
+    <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">?</span></div>
     <div class="think-content">${_fmtThink(thinkText)}</div>
   </div>`;
 }
@@ -5472,10 +5558,10 @@ function addMsg(role,text,files,extra={}){
   // Detect research/stock agent messages early — skip fmt() for these since the card replaces everything
   const _isResearchMsg=!!(extra.research_agent||(role==='kairo'&&/^## (?:Intelligence Gathering|📋 Intelligence Brief)/m.test(displayText)));
   const _isStockMsg=!!extra.stock_agent;
-  // Long user text → collapsible file block (only for code, not regular text)
+  // Long user text ? collapsible file block (only for code, not regular text)
   const _looksLikeCode=(function(t){
     if(t.length<=600)return false;
-    // Explicit code fences → definitely code
+    // Explicit code fences ? definitely code
     if(/```/.test(t))return true;
     const lines=t.split('\n');
     // Single-line pastes are never "code files"
@@ -5503,7 +5589,7 @@ function addMsg(role,text,files,extra={}){
     const lines=displayText.split('\n');
     const preview=lines.slice(0,3).join('\n');
     html+=`<div class="user-paste-file"><div class="upf-header" onclick="this.parentElement.classList.toggle('upf-expanded')">`
-      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">▾</span></div>`
+      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">?</span></div>`
       +`<div class="upf-preview">${esc(preview)}${lines.length>3?'\n…':''}</div>`
       +`<div class="upf-full"><pre>${esc(displayText)}</pre></div></div>`;
   } else if(devRawMode&&role==='kairo'){
@@ -5540,7 +5626,7 @@ function addMsg(role,text,files,extra={}){
         }
         filesHtml+='</div>';
       }
-      html+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'✓ Executed':'✗ Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
+      html+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'? Executed':'? Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
     }
   }
   if(extra.memory_added?.length)html+=`<div class="mops">Remembered: ${extra.memory_added.map(esc).join('; ')}</div>`;
@@ -5613,7 +5699,7 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="editMsg(this)">✎ Edit</button></div>`;
+  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="editMsg(this)">? Edit</button></div>`;
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -5662,9 +5748,9 @@ function addMsg(role,text,files,extra={}){
           // Remove disclaimer from body if present
           let body=step.body||'';
           body=body.replace(/\n---\n\*Not financial advice[\s\S]*$/,'').trim();
-          saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">✓ done</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
+          saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">? done</span><span class="sa-section-chevron">✓</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
         });
-        saHtml+='</div><div class="stock-disclaimer sa-disclaimer">⚠️ <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
+        saHtml+='</div><div class="stock-disclaimer sa-disclaimer">?? <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
         html=`<div class="lbl">gyro</div>`+saHtml;
       } else if(_isStockMsg) {
         html+=fmt(displayText);
@@ -5672,7 +5758,7 @@ function addMsg(role,text,files,extra={}){
     }
     // Render research_agent messages with styled sections on reload
     if(_isResearchMsg){
-      const raIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋'];
+      const raIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋','📝'];
       let steps=[];
       if(extra.research_agent_steps&&extra.research_agent_steps.length){
         steps=extra.research_agent_steps;
@@ -5696,17 +5782,20 @@ function addMsg(role,text,files,extra={}){
         const findings=extra.research_agent_findings||[];
         const durations=extra.research_agent_durations||[];
         const totalWordsH=extra.research_agent_words||0;
-        const followups=extra.research_agent_followups||[];
+        const isPartial=!!extra.research_agent_partial;
         let raHtml=`<div class="ra-container">`;
         // Badge
-        raHtml+=`<div class="ra-badge ra-badge-done">✅ Research Complete</div>`;
+        raHtml+=`<div class="ra-badge ra-badge-done">${isPartial?'?? Research Incomplete':'? Research Complete'}</div>`;
         // Progress container (done state)
-        raHtml+=`<div class="ra-progress"><div class="ra-header"><span class="ra-title">${esc(rQuery)}</span><span class="ra-pct" style="color:#22c55e">100%</span></div><div class="ra-bar-track"><div class="ra-bar-fill" style="width:100%"></div></div><div class="ra-steps">`;
-        raHtml+=`<div class="ra-steps-line"><div class="ra-steps-line-fill" style="width:100%"></div></div>`;
-        for(let i=0;i<Math.min(steps.length,8);i++){
-          raHtml+=`<div class="ra-step done"><div class="ra-step-dot">✓</div><div class="ra-step-label">${esc(['Intelligence Gathering','Deep Source Analysis','Fact Verification','Expert Analysis','Data & Comparative','Synthesis & Insights','Strategic Assessment','Final Brief'][i]||'Step '+(i+1))}</div></div>`;
+        const pct=isPartial?Math.round((steps.length/9)*100):100;
+        raHtml+=`<div class="ra-progress"><div class="ra-header"><span class="ra-title">${esc(rQuery)}</span><span class="ra-pct" style="color:${isPartial?'#eab308':'#22c55e'}">${pct}%</span></div><div class="ra-bar-track"><div class="ra-bar-fill" style="width:${pct}%"></div></div><div class="ra-steps">`;
+        raHtml+=`<div class="ra-steps-line"><div class="ra-steps-line-fill" style="width:${pct}%"></div></div>`;
+        const stepNamesList=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
+        for(let i=0;i<9;i++){
+          const isDone=i<steps.length;
+          raHtml+=`<div class="ra-step${isDone?' done':''}"><div class="ra-step-dot">${isDone?'✓':'·'}</div><div class="ra-step-label">${esc(stepNamesList[i]||'Step '+(i+1))}</div></div>`;
         }
-        raHtml+=`</div><div class="ra-stats-row"><span>📚 <strong>${sources.length}</strong> sources</span><span>📝 <strong>${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</strong> words</span></div><div class="ra-activity"><span class="ra-complete-icon">✅</span> Research complete — ${sources.length} sources, ${totalWordsH.toLocaleString()} words analyzed</div></div>`;
+        raHtml+=`</div><div class="ra-stats-row"><span>?? <strong>${sources.length}</strong> sources</span><span>?? <strong>${findings.length}</strong> findings</span></div><div class="ra-activity"><span class="ra-complete-icon">${isPartial?'📚':'📝'}</span> ${isPartial?'Research interrupted':'Research complete'} — ${sources.length} sources, ${findings.length} findings</div></div>`;
         // Summary card (TL;DR)
         const lastBody=steps[steps.length-1]?.body||'';
         const plainLast=(lastBody||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
@@ -5714,13 +5803,16 @@ function addMsg(role,text,files,extra={}){
         const tldrMatch=plainLast.match(/TL;DR[:\s]*([\s\S]*?)(?=Executive Summary|Key Findings|$)/i);
         if(tldrMatch) tldr=tldrMatch[1].trim().split(/\n\n/)[0].trim();
         if(!tldr) tldr=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
-        if(tldr) raHtml+=`<div class="ra-summary"><div class="ra-summary-hd">⚡ Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div></div>`;
+        if(tldr) raHtml+=`<div class="ra-summary"><div class="ra-summary-hd">? Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div></div>`;
         // Dashboard
-        raHtml+=`<div class="ra-dashboard"><div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Intelligence Brief Complete</span></div><div class="ra-dash-stats"><div class="ra-dash-stat"><div class="ra-dash-stat-val">${steps.length}/${steps.length}</div><div class="ra-dash-stat-lbl">Steps</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${sources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</div><div class="ra-dash-stat-lbl">Words</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${findings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">🟢 High</div><div class="ra-dash-stat-lbl">Confidence</div></div></div>`;
+        const _hSrc=Math.min(sources.length/30,1),_hStp=steps.length/9,_hWrd=Math.min(totalWordsH/8000,1),_hFnd=Math.min(findings.length/20,1);
+        const _hConf=Math.round((_hSrc*0.3+_hStp*0.25+_hWrd*0.2+_hFnd*0.25)*100);
+        const _hConfLbl=_hConf>=90?'High':_hConf>=75?'Good':_hConf>=55?'Moderate':_hConf>=35?'Low':'Very Low';
+        raHtml+=`<div class="ra-dashboard"><div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Research Confidence</span></div><div class="ra-dash-stats"><div class="ra-dash-stat"><div class="ra-dash-stat-val">${steps.length} steps</div><div class="ra-dash-stat-lbl">Coverage</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${sources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</div><div class="ra-dash-stat-lbl">Words</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${findings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${_hConfLbl}</div><div class="ra-dash-stat-lbl">Confidence</div></div></div>`;
         // Timing chart
         if(durations.length){
           const maxDur=Math.max(...durations.map(d=>d.elapsed),1);
-          raHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">⏱️ Step Performance</div><div class="ra-timing-chart">`;
+          raHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">?? Step Performance</div><div class="ra-timing-chart">`;
           durations.forEach(d=>{
             const pct=Math.round((d.elapsed/maxDur)*100);
             raHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
@@ -5728,30 +5820,30 @@ function addMsg(role,text,files,extra={}){
           raHtml+=`</div></div>`;
         }
         raHtml+=`</div>`;
-        // Key findings panel
+        // Key findings panel (collapsible)
         if(findings.length){
-          raHtml+=`<div class="ra-findings-panel"><div class="ra-findings-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')"><span class="ra-findings-icon">💡</span><span class="ra-findings-title">Key Findings</span><span class="ra-findings-count">${findings.length}</span><span class="ra-findings-chevron">▾</span></div><div class="ra-findings-list">`;
+          raHtml+=`<div class="ra-findings-panel ra-menu-bar ra-findings-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')"><span class="ra-menu-icon">💡</span><span class="ra-menu-title">Key Findings</span><span class="ra-menu-count">${findings.length}</span><span class="ra-menu-chevron">?</span></div><div class="ra-menu-body"><div class="ra-findings-list">`;
           findings.forEach(f=>{
             raHtml+=`<div class="ra-finding-item"><span class="ra-finding-step">💡</span><span class="ra-finding-text">${esc(typeof f==='string'?f:(f.text||''))}</span></div>`;
           });
-          raHtml+=`</div></div>`;
+          raHtml+=`</div></div></div>`;
         }
         raHtml+=`<div class="ra-output">`;
         steps.forEach((step,i)=>{
           let body=step.body||'';
-          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">✓ done</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
+          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">? done</span><span class="ra-section-chevron">✓</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
         });
         raHtml+=`</div>`;
-        // Source cards
+        // Source cards (collapsible)
         if(sources.length){
-          raHtml+=`<div class="ra-sources-panel"><div class="ra-sources-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')"><span class="ra-sources-icon">📚</span><span class="ra-sources-title">Sources</span><span class="ra-sources-count">${sources.length}</span><span class="ra-sources-chevron">▾</span></div><div class="ra-sources-list">`;
+          raHtml+=`<div class="ra-sources-panel ra-menu-bar ra-src-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')"><span class="ra-menu-icon">??</span><span class="ra-menu-title">Sources</span><span class="ra-menu-count">${sources.length}</span><span class="ra-menu-chevron">?</span></div><div class="ra-menu-body"><div class="ra-sources-list">`;
           sources.forEach(src=>{
             try{
               const domain=new URL(src.url).hostname.replace('www.','');
               raHtml+=`<a class="ra-src-card" href="${esc(src.url)}" target="_blank" rel="noopener noreferrer"><img class="ra-src-favicon" src="https://www.google.com/s2/favicons?domain=${esc(domain)}&sz=32" alt="" onerror="this.style.display='none'"><div class="ra-src-info"><div class="ra-src-name">${esc(src.title.length>60?src.title.slice(0,60)+'…':src.title)}</div><div class="ra-src-domain">${esc(domain)}</div></div></a>`;
             }catch(e){}
           });
-          raHtml+=`</div></div>`;
+          raHtml+=`</div></div></div>`;
         }
         raHtml+=`</div>`;
         html=`<div class="lbl">gyro</div>`+raHtml;
@@ -5760,7 +5852,7 @@ function addMsg(role,text,files,extra={}){
         html+=fmt(displayText);
       }
     }
-    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">⎘ Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">↺ Retry</button></div>`;
+    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">? Retry</button></div>`;
   }
   div.dataset.text=text||'';
   div.innerHTML=html;renderMathInElementSafe(div);area.appendChild(div);area.scrollTop=area.scrollHeight;
@@ -5796,7 +5888,7 @@ function sanitizeMermaidSource(src){
   return out.join('\n');
 }
 
-// ─── Inline interactive todo lists ─────────────────
+// --- Inline interactive todo lists -----------------
 function countTodoItems(items){
   let total=0,done=0;
   for(const it of items){total++;if(it.done)done++;if(it.subtasks)for(const s of it.subtasks){total++;if(s.done)done++;}}
@@ -5812,7 +5904,7 @@ function renderTodoRowHTML(listId,item,isSub,parentId){
   let h=`<div class="chat-todo-row ${doneClass} ${subClass}" data-item-id="${item.id}"${pAttr}>`;
   h+=`<button class="chat-todo-check ${checked}" onclick="toggleChatTodo('${listId}','${item.id}'${pArg})"><span>${item.done?'✓':''}</span></button>`;
   h+=`<span class="chat-todo-text" ondblclick="editChatTodo('${listId}','${item.id}',this${pArg})">${esc(item.text)}</span>`;
-  if(!isSub)h+=`<button class="chat-todo-addsub" onclick="addSubtask('${listId}','${item.id}')" title="Add subtask">⊕</button>`;
+  if(!isSub)h+=`<button class="chat-todo-addsub" onclick="addSubtask('${listId}','${item.id}')" title="Add subtask">✕</button>`;
   h+=`<button class="chat-todo-del" onclick="deleteChatTodo('${listId}','${item.id}'${pArg})" title="Delete">✕</button>`;
   h+=`</div>`;
   return h;
@@ -6041,7 +6133,18 @@ function addSubtask(listId,parentId){
 
 function fmt(text){
   if(!text)return'';let t=text.replace(/<<<REMINDER:\s*[\s\S]*?>>>/g,'');
+  t=t.replace(/<<<DEEP_RESEARCH[:\s][\s\S]*?>>>/g,'');
   t=t.replace(/<<<STOCK_RATINGS>>>[\s\S]*?<<<END_STOCK_RATINGS>>>/g,'');
+  t=t.replace(/<<<SOURCES>>>[\s\S]*?<<<END_SOURCES>>>/g,'');
+  t=t.replace(/<<<FOLLOWUPS>>>[\s\S]*?<<<END_FOLLOWUPS>>>/g,'');
+  t=t.replace(/<<<\/?(?:SOURCES|END_SOURCES|FOLLOWUPS|END_FOLLOWUPS)\/?>>>/g,'');
+  // Convert [[[MEDIA:...]]] inline markers to %%%BLOCK%%% placeholders BEFORE HTML escaping
+  t=t.replace(/\[\[\[MEDIA:(\w+):(\d+):(.*?)\]\]\]/g,(_,kind,idx,info)=>{
+    if(kind==='image_search') return `%%%IMGBLOCK:${idx}%%%`;
+    if(kind==='stock') return `%%%STOCKBLOCK:${idx}%%%`;
+    if(kind==='image_gen') return `%%%IMGGEN:${idx}%%%`;
+    return '';
+  });
   t=t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let blocks=[];
   // Timeline blocks: ```timeline\ndate | title | description\n```
@@ -6065,13 +6168,13 @@ function fmt(text){
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   t=t.replace(/```mermaid\n([\s\S]*?)```/g,(_,c)=>{
-    let restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').trim();
+    let restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').trim();
     // Sanitize mindmap source to fix common syntax issues
     if(/^\s*mindmap\b/i.test(restored)) restored=sanitizeMermaidSource(restored);
     const mindId='mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
     const title=inferMindMapTitle(restored,blocks.length+1);
     mindMapStore.set(mindId,{title,source:restored});
-    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button class="mm-copy" onclick="copyMermaidPng(this)" title="Copy to clipboard">📋</button><a class="mm-download" href="#" onclick="return false" title="Download PNG">⬇</a></div><pre class="mermaid">${restored}</pre></div>`);
+    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button class="mm-copy" onclick="copyMermaidPng(this)" title="Copy to clipboard">📋</button><a class="mm-download" href="#" onclick="return false" title="Download PNG">?</a></div><pre class="mermaid">${restored}</pre></div>`);
     // Auto-open in canvas so user can interact with it
     if(!_suppressCanvasAutoOpen) setTimeout(()=>openMindMapCanvas(mindId),150);
     return `%%%BLOCK${blocks.length-1}%%%`;
@@ -6117,10 +6220,12 @@ function fmt(text){
   // Markdown images: ![alt](url)
   t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g,(_,alt,url)=>{
     const safeAlt=alt.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
-    blocks.push(`<div class="msg-img-wrap"><img src="${url}" alt="${safeAlt}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-sm)" loading="lazy" onerror="this.parentElement.style.display='none'" onclick="openImageLightbox(this.src,this.alt)"><button class="img-expand-btn" onclick="openImageLightbox('${url}','${safeAlt.replace(/'/g,"\\'")}')">⤢</button></div>`);
+    blocks.push(`<div class="msg-img-wrap"><img src="${url}" alt="${safeAlt}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-sm)" loading="lazy" onerror="this.parentElement.style.display='none'" onclick="openImageLightbox(this.src,this.alt)"><button class="img-expand-btn" onclick="openImageLightbox('${url}','${safeAlt.replace(/'/g,"\\'")}')">?</button></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   // Markdown links: [text](url) — supports both absolute and relative URLs
+  // Strip vertexaisearch proxy links (show just the title text)
+  t=t.replace(/\[([^\]]+)\]\(https?:\/\/vertexaisearch[^)]+\)/g,'$1');
   t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   t=t.replace(/\[([^\]]+)\]\((\/api\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Workspace file links: [text](filename.ext) or [text](path/file.ext) — convert to download URLs
@@ -6128,7 +6233,8 @@ function fmt(text){
     const dlUrl='/api/files/download?path='+encodeURIComponent(path.replace(/&amp;/g,'&'));
     return `<a href="${dlUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${label}</a>`;
   });
-  // Bare URLs — auto-link any https?:// not already inside an <a> tag
+  // Bare URLs — strip vertexaisearch proxy URLs, auto-link the rest
+  t=t.replace(/(?<!href=")(?<!src=")(?<!">)https?:\/\/vertexaisearch[^\s<"']+/g,'');
   t=t.replace(/(?<!href=")(?<!src=")(?<!">)(https?:\/\/[^\s<"']+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
   // Map embeds: <<<MAP: query>>> or <<<MAP: query | label>>>
   t=t.replace(/&lt;&lt;&lt;MAP:\s*(.+?)&gt;&gt;&gt;/g,(_,raw)=>{
@@ -6155,7 +6261,27 @@ function fmt(text){
     blocks.push(`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${idx}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading stock data...</span></div></div></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
-  // Markdown tables — extract to blocks to protect from <br> conversion
+  // Custom <<<TABLE>>> format — compact, efficient, no pipes/separators
+  t=t.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*?)<<<END_TABLE>{3,}/g,(_,caption,body)=>{
+    const lines=body.trim().split('\n').filter(l=>l.trim());
+    if(lines.length<1)return _;
+    const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
+    const headers=lines[0].split(';;').map(c=>c.trim());
+    const dataLines=lines.slice(1);
+    let tbl='';
+    if(caption)tbl+='<div style="font-weight:600;font-size:13px;margin:10px 0 4px;color:var(--text-secondary)">'+caption.replace(/</g,'&lt;')+'</div>';
+    tbl+='<table><thead><tr>'+headers.map(h=>`<th>${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
+    for(const line of dataLines){
+      if(!line.trim())continue;
+      const cells=line.split(';;').map(c=>c.trim());
+      while(cells.length<headers.length)cells.push('');
+      tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td>${fmtCell(c)}</td>`).join('')+'</tr>';
+    }
+    tbl+='</tbody></table>';
+    blocks.push(tbl);
+    return `\n%%%BLOCK${blocks.length-1}%%%\n`;
+  });
+  // Markdown tables — extract to blocks to protect from <br> conversion (legacy fallback)
   t=t.replace(/(?:^|\n)(\|.+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|.+\|[ \t]*(?:\n|$))+)/gm,(match)=>{
     const lines=match.trim().split('\n').filter(l=>l.trim());
     if(lines.length<3)return match;
@@ -6318,7 +6444,7 @@ function inferMindMapTitle(source,fallbackIndex=1){
   return `Mind map ${fallbackIndex}`;
 }
 
-// ─── Settings ─────────────────────────────────────
+// --- Settings -------------------------------------
 async function openSettings(){
   document.getElementById('settingsModal').classList.add('open');
   const dark=document.getElementById('themeBtn_dark');
@@ -6377,7 +6503,7 @@ async function saveName(){
   showToast('Profile updated.','success');
 }
 
-// ─── Connectors ───────────────────────────────────
+// --- Connectors -----------------------------------
 async function loadConnectors(){
   try{
     const r=await fetch('/api/connectors');
@@ -6451,7 +6577,7 @@ async function disconnectHF(){
   loadConnectors();
 }
 
-// ─── Memory ───────────────────────────────────────
+// --- Memory ---------------------------------------
 async function openMemory(){
   document.getElementById('settingsModal').classList.add('open');
   const r=await fetch('/api/memory');const m=await r.json();
@@ -6468,7 +6594,7 @@ async function addMem(){
 
 async function delMem(i){await fetch(`/api/memory/${i}`,{method:'DELETE'});openMemory()}
 
-// ─── My Data ──────────────────────────────────────
+// --- My Data --------------------------------------
 async function openData(){
   document.getElementById('settingsModal').classList.add('open');
   const r=await fetch('/api/auth/data');const d=await r.json();
@@ -6532,7 +6658,7 @@ async function deleteAllChats(){
   showToast(`All ${count} chats deleted.`,'success');
 }
 
-// ─── Export / Import Chats ────────────────────────
+// --- Export / Import Chats ------------------------
 async function exportChats(){
   if(!allChats.length){showToast('No chats to export.','info');return;}
   showToast('Preparing export…','info');
@@ -6588,7 +6714,7 @@ async function importChats(input){
   }catch(e){showToast('Import failed: '+e.message,'error');}
 }
 
-// ─── Files ────────────────────────────────────────
+// --- Files ----------------------------------------
 async function openFiles(){
   document.getElementById('settingsModal').classList.add('open');
   const r=await fetch('/api/files');const d=await r.json();
@@ -6597,7 +6723,7 @@ async function openFiles(){
   ).join('')||'<div style="color:var(--text-muted);font-size:11px">No workspace files found.</div>';
 }
 
-// ─── File Browser ─────────────────────────────────
+// --- File Browser ---------------------------------
 function openFileBrowser(){
   document.getElementById('fileBrowser').classList.add('open');
   document.getElementById('fileBrowserOverlay').classList.add('open');
@@ -6670,7 +6796,7 @@ async function refreshWorkspaceFiles(){
     for(const fld of sortedFolders){
       if(!folders[fld])continue;
       if(fld){
-        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">▾</span><span class="fb-folder-icon" style="color:var(--accent)">▸</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
+        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">✕</span><span class="fb-folder-icon" style="color:var(--accent)">?</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">?</button></div><div class="fb-folder-body">`;
       }
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
@@ -6704,7 +6830,7 @@ async function refreshChatFiles(){
       html+='<div class="fb-section-title">Generated Files</div>';
       for(const f of genFiles){
         const name=f.path.split('/').pop()||f.path;
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">◆</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
+        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">✕</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
       }
     }
     if(uploads.length){
@@ -6718,7 +6844,7 @@ async function refreshChatFiles(){
   }catch{el.innerHTML='<div class="fb-empty">Could not load chat files.</div>';}
 }
 async function createUserFolder(){
-  const name=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});
+  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});
   if(!name?.trim())return;
   await fetch('/api/user-files/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:name.trim()})});
   refreshWorkspaceFiles();
@@ -6727,7 +6853,7 @@ async function createUserFolder(){
 async function deleteUserFile(encodedPath,isFolder){
   const path=decodeURIComponent(encodedPath);
   const type=isFolder?'folder and all its contents':'file';
-  const ok=await _dlg({title:`Delete ${type}?`,msg:`Are you sure you want to delete "${path}"?`,icon:'▸',iconType:'warn',confirmText:'Delete',cancelText:'Cancel'});
+  const ok=await _dlg({title:`Delete ${type}?`,msg:`Are you sure you want to delete "${path}"?`,icon:'🗑️',iconType:'warn',confirmText:'Delete',cancelText:'Cancel'});
   if(!ok)return;
   await fetch('/api/user-files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
   refreshWorkspaceFiles();
@@ -6765,7 +6891,7 @@ async function openWorkspaceFile(encodedPath){
   }
 }
 
-// ─── Chat Settings Drawer ──────────────────────────
+// --- Chat Settings Drawer --------------------------
 function openChatDrawer(){
   if(!curChat){showToast('Open a chat first.','info');return;}
   document.getElementById('chatDrawer').classList.add('open');
@@ -6786,7 +6912,7 @@ async function loadChatDrawer(){
     const pinnedEl=document.getElementById('pinnedFilesList');
     const pinned=chat.pinned_files||[];
     pinnedEl.innerHTML=pinned.length
-      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>▪ ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">✕</button></div>`;}).join('')
+      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>? ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">▪</button></div>`;}).join('')
       :'<div class="fb-empty">No pinned files.</div>';
     // Populate folder select
     const sel=document.getElementById('chatFolderSelect');
@@ -6808,7 +6934,7 @@ async function openPinFilePicker(){
     const files=d.files||[];
     if(!files.length){showToast('No files to pin.','info');return;}
     const list=files.map(f=>f.path).join('\n');
-    const chosen=await _dlg({title:'Pin a file',msg:'Available: '+files.map(f=>f.path).join(', '),icon:'▸',iconType:'info',inputLabel:'File path',inputDefault:files[0]?.path||'',inputPlaceholder:'e.g. notes/research/topic.md',confirmText:'Pin',cancelText:'Cancel'});
+    const chosen=await _dlg({title:'Pin a file',msg:'Available: '+files.map(f=>f.path).join(', '),icon:'✏️',iconType:'info',inputLabel:'File path',inputDefault:files[0]?.path||'',inputPlaceholder:'e.g. notes/research/topic.md',confirmText:'Pin',cancelText:'Cancel'});
     if(!chosen?.trim())return;
     // Fetch current chat to get existing pins
     const cr=await apiFetch(`/api/chats/${curChat}`);
@@ -6837,7 +6963,7 @@ async function moveChatToFolder(folder){
   showToast(folder?`Moved to ${folder}.`:'Removed from folder.','success');
 }
 async function createAndMoveFolder(){
-  const name=await _dlg({title:'New folder',msg:'',icon:'▸',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create & Move',cancelText:'Cancel'});
+  const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. Work, Projects…',confirmText:'Create & Move',cancelText:'Cancel'});
   if(!name?.trim())return;
   await fetch(`/api/chats/${curChat}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:name.trim()})});
   await refreshChats();
@@ -6845,7 +6971,7 @@ async function createAndMoveFolder(){
   showToast(`Moved to ${name.trim()}.`,'success');
 }
 
-// ─── Image Gen ────────────────────────────────────
+// --- Image Gen ------------------------------------
 function openImageGen(){document.getElementById('imageModal').classList.add('open')}
 
 async function genImage(){
@@ -6859,7 +6985,7 @@ async function genImage(){
   }catch(e){el.innerHTML=`<div style="color:var(--red);font-size:12px">${esc(e.message)}</div>`}
 }
 
-// ─── Modals ───────────────────────────────────────
+// --- Modals ---------------------------------------
 function closeM(id){document.getElementById(id).classList.remove('open')}
 
 document.addEventListener('DOMContentLoaded',()=>{
@@ -6868,18 +6994,18 @@ document.addEventListener('DOMContentLoaded',()=>{
   }));
 });
 
-// ─── Voice (stub) ─────────────────────────────────
+// --- Voice (stub) ---------------------------------
 function toggleTTS(){}
 function speak(){}
 function toggleMic(){}
 function closeOrb(){}
 
-// ─── Guest Limit (stub) ───────────────────────────
+// --- Guest Limit (stub) ---------------------------
 function showGuestLimit(){}
 function toggleGuestAuthMode(){}
 async function doGuestAuth(){}
 
-// ─── Canvas ───────────────────────────────────────
+// --- Canvas ---------------------------------------
 let canvasIsCode=false;
 let canvasSelection=null; // {start,end,text} from user selection in canvas editor
 let _suppressCanvasAutoOpen=false; // true during history load to prevent auto-opening
@@ -6971,7 +7097,7 @@ function closeCanvas(){
   closeCanvasOutput();
 }
 
-/* ─── Canvas File Explorer ──────────────────────── */
+/* --- Canvas File Explorer ------------------------ */
 function toggleCanvasFiles(){
   const panel=document.getElementById('canvasFilesPanel');
   if(!panel)return;
@@ -6993,7 +7119,7 @@ async function refreshCanvasFiles(){
     const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
     for(const fld of sortedFolders){
       if(!folders[fld])continue;
-      if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ ${esc(fld)}</div><div>`;
+      if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">? ${esc(fld)}</div><div>`;
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
         const isImg=['png','jpg','jpeg','gif','webp','svg','bmp','ico'].includes(ext);
@@ -7006,7 +7132,7 @@ async function refreshCanvasFiles(){
   }catch{body.innerHTML='<div style="padding:10px;font-size:10px;color:var(--text-muted)">Error loading files.</div>';}
 }
 
-/* ─── Image viewing in canvas ───────────────────── */
+/* --- Image viewing in canvas --------------------- */
 function showCanvasImage(url,title){
   const panel=document.getElementById('canvasPanel');
   const editor=document.getElementById('canvasEditor');
@@ -7023,7 +7149,7 @@ function showCanvasImage(url,title){
   document.getElementById('canvasResizer').classList.add('visible');
 }
 
-// ─── Canvas drag-to-resize ────────────────────────
+// --- Canvas drag-to-resize ------------------------
 (function initCanvasResizer(){
   const resizer=document.getElementById('canvasResizer');
   if(!resizer)return;
@@ -7085,7 +7211,7 @@ function showCanvasImage(url,title){
   });
 })();
 
-// ─── Canvas select-to-edit ────────────────────────
+// --- Canvas select-to-edit ------------------------
 (function initCanvasSelectToEdit(){
   const editor=document.getElementById('canvasEditor');
   if(!editor)return;
@@ -7140,7 +7266,7 @@ function updateCanvasStats(){
   document.getElementById('canvasChars').textContent=words+' words · '+text.length+' chars';
 }
 
-// ─── Canvas presets ───────────────────────────────
+// --- Canvas presets -------------------------------
 function toggleCanvasPresets(){
   const popup=document.getElementById('canvasPresetsPopup');
   popup.classList.toggle('open');
@@ -7205,7 +7331,7 @@ async function canvasPresetEdit(type){
   }
 }
 
-// ─── Canvas run / preview ─────────────────────────
+// --- Canvas run / preview -------------------------
 function closeCanvasOutput(){
   const el=document.getElementById('canvasRunOutput');
   if(el)el.style.display='none';
@@ -7248,7 +7374,7 @@ async function runCanvasCode(){
   bodyEl.textContent='Run not supported for this file type.';
 }
 
-// ─── Canvas: get selection context for main chat ──
+// --- Canvas: get selection context for main chat --
 function getCanvasContext(){
   const panel=document.getElementById('canvasPanel');
   if(!panel||!panel.classList.contains('open'))return null;
@@ -7451,7 +7577,7 @@ function renderProductivityHub(){
   const visionList=document.getElementById('visionList');
   if(todoList){
     todoList.innerHTML=state.todos.length
-      ?state.todos.map(t=>`<div class="todo-item ${t.done?'done':''}"><button class="todo-check" onclick="toggleTodoItem('${t.id}')">${t.done?'✓':'○'}</button><div class="todo-text">${esc(t.text)}</div><button class="todo-del" onclick="deleteTodoItem('${t.id}')">✕</button></div>`).join('')
+      ?state.todos.map(t=>`<div class="todo-item ${t.done?'done':''}"><button class="todo-check" onclick="toggleTodoItem('${t.id}')">${t.done?'✓':'✕'}</button><div class="todo-text">${esc(t.text)}</div><button class="todo-del" onclick="deleteTodoItem('${t.id}')">?</button></div>`).join('')
       :'<div class="todo-empty">No tasks yet. Add one to get moving.</div>';
   }
   if(visionList){
@@ -7637,7 +7763,7 @@ function insertProductivityPrompt(kind){
   setDraft(prompts[kind]||prompts.day);
 }
 
-// ─── Reminder CRUD ────────────────────────────────
+// --- Reminder CRUD --------------------------------
 function addReminder(due,text){
   if(!text)return;
   const state=loadProductivityState();
@@ -7696,7 +7822,7 @@ function checkAndShowReminderToast(){
   showToast('⏰ Reminder: '+pick.text,'info');
 }
 
-// ─── Mermaid ──────────────────────────────────────
+// --- Mermaid --------------------------------------
 function initMermaidTheme(){
   if(!window.mermaid)return;
   const light=theme==='light';
@@ -7739,7 +7865,7 @@ function initMermaidTheme(){
 document.addEventListener('DOMContentLoaded',()=>{initMermaidTheme();});
 document.addEventListener('DOMContentLoaded',()=>{renderProductivityHub();});
 
-// ─── Reminder Notifications ──────────────────────
+// --- Reminder Notifications ----------------------
 document.addEventListener('DOMContentLoaded',()=>{
   // Check for overdue reminders on page load (small delay so toasts don't pile up on login)
   setTimeout(()=>checkAndShowReminderToast(),3000);
@@ -7747,7 +7873,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   setInterval(()=>checkAndShowReminderToast(),300000);
 });
 
-// ─── Keep-alive ping to prevent Render from sleeping while user is active ───
+// --- Keep-alive ping to prevent Render from sleeping while user is active ---
 (function(){
   const PING_INTERVAL=4*60*1000; // every 4 minutes
   let pingTimer=null;

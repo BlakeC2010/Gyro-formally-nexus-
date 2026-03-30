@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Gyro - The Flow-State Architect"""
 
 import sys
@@ -18,7 +18,7 @@ def _import_openai():
 def _import_anthropic():
     import anthropic; return anthropic
 
-# ─── Firebase / Firestore init ────────────────────────────────────────────────
+# --- Firebase / Firestore init ------------------------------------------------
 import firebase_admin
 from firebase_admin import credentials, firestore, storage as fb_storage
 
@@ -77,7 +77,7 @@ def _init_firebase():
         except Exception as fs_err:
             print(f"  [!] Firebase authenticated but Firestore unreachable: {fs_err}")
             print("      Make sure you've created a Firestore database in Firebase Console.")
-            print("      Go to: https://console.firebase.google.com → Your project → Firestore Database → Create database")
+            print("      Go to: https://console.firebase.google.com ? Your project ? Firestore Database ? Create database")
             print("      Falling back to local file storage.")
             db = None
             FIREBASE_ENABLED = False
@@ -95,7 +95,7 @@ def _storage_bucket():
     except Exception:
         return None
 
-# ─── Local file storage (fallback when Firebase not configured) ───────────────
+# --- Local file storage (fallback when Firebase not configured) ---------------
 
 def _local_user_dir(uid):
     d = DATA_DIR / "users" / uid
@@ -230,13 +230,13 @@ def handle_exception(e):
     print(f"  [!] Unhandled error: {e}")
     return jsonify({"error": f"Server error: {str(e)[:200]}"}), 500
 
-# ─── Auth helpers ─────────────────────────────────────────────────────────────
+# --- Auth helpers -------------------------------------------------------------
 
 def _hash_pw(pw, salt=None):
     salt = salt or secrets.token_hex(16)
     return hashlib.sha256((salt + pw).encode()).hexdigest(), salt
 
-# ─── Firestore user helpers ───────────────────────────────────────────────────
+# --- Firestore user helpers ---------------------------------------------------
 
 def _users_col():
     if not FIREBASE_ENABLED: return None
@@ -330,7 +330,7 @@ def require_auth_or_guest(f):
         return f(*args, **kw)
     return dec
 
-# ~20k tokens/day ≈ 80 typical exchanges with the lite model
+# ~20k tokens/day ˜ 80 typical exchanges with the lite model
 GUEST_TOKEN_LIMIT = 20_000
 
 def _guest_runtime_state():
@@ -405,7 +405,7 @@ def _save_oauth(cfg):
         return
     db.collection("config").document("oauth").set(cfg)
 
-# ─── Per-user data ────────────────────────────────────────────────────────────
+# --- Per-user data ------------------------------------------------------------
 
 def _uid_doc(sub):
     """Return a Firestore DocumentReference for the current user's sub-document."""
@@ -568,7 +568,7 @@ def save_memory(m):
     m["updated"] = datetime.datetime.now().isoformat()
     ref.set(m)
 
-# ─── Connectors (HuggingFace, etc.) ──────────────────────────────────────────
+# --- Connectors (HuggingFace, etc.) ------------------------------------------
 
 def load_connectors():
     uid = session.get("user_id")
@@ -796,7 +796,7 @@ def create_new_chat(model=None, folder=""):
             "model": model or normalize_selected_model(s),
             "messages": [], "folder": folder}
 
-# ─── Workspace (shared) ──────────────────────────────────────────────────────
+# --- Workspace (shared) ------------------------------------------------------
 
 def read_workspace_files():
     files = {}; total = 0
@@ -816,7 +816,7 @@ def format_workspace_context(files):
     if not files: return "(The command center is empty.)"
     return "\n".join(f"=== FILE: {p} ===\n{c}\n" for p, c in sorted(files.items()))
 
-# ─── KAIRO System Prompt ─────────────────────────────────────────────────────
+# --- KAIRO System Prompt -----------------------------------------------------
 
 def _build_cross_chat_context(current_chat_id, max_chats=8):
     """Build a brief summary of other recent chats for cross-chat awareness."""
@@ -1029,8 +1029,8 @@ PLACEMENT: Images appear EXACTLY where you place the tag. Use this to weave imag
 WHEN TO USE image search (use it proactively — don't wait to be asked):
 - User asks to SEE something: "show me", "what does X look like", "picture of", "images of", "photo of"
 - Explaining physical objects, places, animals, people, landmarks, architecture, art, fashion, food, etc.
-- Tutorials or how-to guides where seeing the thing helps (e.g., "how to tie a bowline knot" → show the knot)
-- Comparing visual things: "difference between alligator and crocodile" → show both
+- Tutorials or how-to guides where seeing the thing helps (e.g., "how to tie a bowline knot" ? show the knot)
+- Comparing visual things: "difference between alligator and crocodile" ? show both
 - Historical figures, events, artifacts — show what they looked like
 - Science/nature topics: planets, cells, animals, geological formations, weather phenomena
 - Design, UI, or aesthetic discussions — show examples
@@ -1218,9 +1218,9 @@ MATH — When answering math questions:
 - For graphing questions, generate actual graph images with matplotlib code execution
 
 SCIENCE — When answering science questions:
-- Use proper notation: chemical formulas (H₂O, CO₂, NaCl), scientific units (m/s², kg·m/s, J/mol)
-- For chemical equations, write them clearly: 2H₂ + O₂ → 2H₂O
-- Use subscript/superscript Unicode when possible: ², ³, ₂, ₃, ⁺, ⁻
+- Use proper notation: chemical formulas (H2O, CO2, NaCl), scientific units (m/s², kg·m/s, J/mol)
+- For chemical equations, write them clearly: 2H2 + O2 ? 2H2O
+- Use subscript/superscript Unicode when possible: ², ³, 2, 3, ?, ?
 - Include relevant diagrams (mermaid), timelines for discoveries/history, and image searches for visual concepts
 - Label topics with context: [Biology], [Chemistry], [Physics] when covering multiple subjects
 - For physics equations, use KaTeX: $F = ma$, $E = mc^2$, $PV = nRT$
@@ -1277,7 +1277,7 @@ STOCK ANALYSIS RULES:
    - Fetch real-time data from Yahoo Finance server-side
    - VALIDATE stocks against user criteria (price, sector, etc.) — stocks that fail are filtered out
    - Automatically launch the Stock Analysis Agent on PASSING stocks only
-   - The agent handles: Market Snapshot → News → Technical → Fundamental → Deep Research → Risk → Valuation → Final Verdict
+   - The agent handles: Market Snapshot ? News ? Technical ? Fundamental ? Deep Research ? Risk ? Valuation ? Final Verdict
    So keep your initial message VERY SHORT — just embed the tags and one sentence. The agent does ALL the analysis work.
 
 4. NEVER make up or guess stock prices, P/E ratios, market caps, or other financial data. The agent will use the real data.
@@ -1471,7 +1471,7 @@ def generate_chat_title(api_key, provider, model_name, base_url, user_text, assi
     except Exception:
         return fallback_chat_title(user_text, assistant_text)
 
-# ─── File Operations ─────────────────────────────────────────────────────────
+# --- File Operations ---------------------------------------------------------
 
 def execute_file_operations(text):
     ops = []
@@ -1511,7 +1511,7 @@ def extract_reminders(text):
     cleaned = pattern.sub(_replace, text)
     return cleaned, reminders
 
-# ─── Code Execution ──────────────────────────────────────────────────────────
+# --- Code Execution ----------------------------------------------------------
 
 def _save_uploaded_images(ctx):
     """Save uploaded images from user's message to _uploads/ so code execution can access them.
@@ -1752,7 +1752,7 @@ def generate_image_gemini(prompt, aspect_ratio="1:1", api_key=None, reference_im
     except Exception as e:
         return None, f"Image generation failed: {str(e)[:200]}"
 
-# ─── HuggingFace Space Connector ─────────────────────────────────────────────
+# --- HuggingFace Space Connector ---------------------------------------------
 
 def extract_hf_space_calls(text):
     """Extract <<<HF_SPACE: space_id | input text or JSON>>> tags from AI response.
@@ -1792,7 +1792,7 @@ def run_hf_space(space_id, user_input, params=None, hf_token=None):
       or {"success": False, "error": "..."}
     """
     if not hf_token:
-        return {"success": False, "error": "No HuggingFace token configured. Set up the HuggingFace connector in Settings → Connectors."}
+        return {"success": False, "error": "No HuggingFace token configured. Set up the HuggingFace connector in Settings ? Connectors."}
     try:
         from gradio_client import Client, handle_file
         client = Client(space_id, hf_token=hf_token)
@@ -1829,7 +1829,7 @@ def run_hf_space(space_id, user_input, params=None, hf_token=None):
     except Exception as e:
         err = str(e)
         if "token" in err.lower() or "401" in err or "403" in err:
-            return {"success": False, "error": f"HuggingFace authentication failed. Check your token in Settings → Connectors. ({err[:150]})"}
+            return {"success": False, "error": f"HuggingFace authentication failed. Check your token in Settings ? Connectors. ({err[:150]})"}
         if "not found" in err.lower() or "404" in err:
             return {"success": False, "error": f"Space '{space_id}' not found. Check the Space ID (format: username/space-name). ({err[:150]})"}
         if "queue" in err.lower() or "timeout" in err.lower():
@@ -1953,7 +1953,7 @@ def _process_hf_file(filepath):
     except Exception as e:
         return {"success": False, "error": f"Failed to process output file: {str(e)[:200]}"}
 
-# ─── End HuggingFace Connector ───────────────────────────────────────────────
+# --- End HuggingFace Connector -----------------------------------------------
 
 def extract_image_searches(text):
     """Extract <<<IMAGE_SEARCH: query>>> or <<<IMAGE_SEARCH: query | count=N>>> tags.
@@ -2115,7 +2115,7 @@ def _google_contents_from_messages(messages, types):
         parts = []
         if msg.get("text"):
             parts.append(types.Part.from_text(text=msg["text"]))
-        # YouTube URLs → Gemini FileData so the model can watch the video
+        # YouTube URLs ? Gemini FileData so the model can watch the video
         for yt_url in msg.get("youtube_urls", []):
             try:
                 parts.append(types.Part.from_uri(file_uri=yt_url, mime_type="video/*"))
@@ -2278,19 +2278,30 @@ def _build_tool_instructions(active_tools):
             "8. Always print clear, formatted output showing the answer"
         ),
         "research": (
-            "[TOOL ACTIVE: RESEARCH AGENT — MUST TRIGGER]\n"
-            "The user has specifically activated the Research Agent tool for this message. "
-            "You MUST trigger the multi-step Research Agent by emitting <<<DEEP_RESEARCH: detailed query>>>.\n"
-            "Write a brief 1-2 sentence acknowledgment, then immediately emit the tag. "
-            "Rephrase the user's request into a detailed, specific research query for the tag.\n"
-            "Example: 'I'll launch a deep research investigation into that for you.\n<<<DEEP_RESEARCH: comprehensive analysis of [topic] including [specific angles]>>>'\n"
-            "CRITICAL: You MUST emit <<<DEEP_RESEARCH: ...>>> — do NOT attempt to research the topic yourself. "
-            "The Research Agent handles real web searching, URL deep-reading, cross-referencing, and report generation.\n"
-            "The ONLY exception is if the user's message is a simple greeting with no research intent (e.g. 'hi', 'hello').\n\n"
-            "⚠️ ABSOLUTE PRIORITY RULE: Do NOT generate any files (PDFs, images, documents), run any CODE_EXECUTE blocks, "
-            "or create any content before triggering <<<DEEP_RESEARCH>>>. The Research Agent MUST run FIRST. "
-            "Once research is complete, the final intelligence brief from the research agent can then be turned into a PDF if requested. "
-            "Generating a file BEFORE research means the content will be shallow and inaccurate — NEVER do this."
+            "[TOOL ACTIVE: RESEARCH AGENT]\n"
+            "You have access to the Research Agent — a powerful multi-step pipeline that does real web searching, "
+            "URL deep-reading, cross-referencing, and report generation.\n\n"
+            "You have TWO options:\n"
+            "A) If the request is clear enough, trigger research IMMEDIATELY by emitting <<<DEEP_RESEARCH: detailed query>>>.\n"
+            "B) If you need clarification, ask 2-3 brief questions naturally in your response. Do NOT emit any tags. "
+            "The user will answer, and on your next turn you will trigger research.\n\n"
+            "When triggering: Write a brief 1-2 sentence acknowledgment, then emit the tag.\n"
+            "Example: 'I'll launch a deep research investigation into that for you.\n"
+            "<<<DEEP_RESEARCH: comprehensive analysis of [topic] including [specific angles]>>>'\n\n"
+            "?? Do NOT generate files, run CODE_EXECUTE, or create content before triggering <<<DEEP_RESEARCH>>>. "
+            "Research MUST run FIRST. Once research completes, content like PDFs can be generated."
+        ),
+        "research_go": (
+            "[TOOL ACTIVE: RESEARCH AGENT — TRIGGER NOW]\n"
+            "You previously asked the user clarifying questions about their research topic. "
+            "The user has now answered. Using their answers and the original request, "
+            "you MUST now trigger the Research Agent by emitting <<<DEEP_RESEARCH: detailed refined query>>>.\n"
+            "Write a brief 1-2 sentence acknowledgment incorporating their answers, then emit the tag.\n"
+            "Rephrase everything into a detailed, specific research query that includes the user's preferences.\n\n"
+            "Example: 'Perfect, I'll focus on [user's chosen angle]. Launching the research now!\n"
+            "<<<DEEP_RESEARCH: comprehensive analysis of [topic] focusing on [user preferences] covering [scope]>>>'\n\n"
+            "CRITICAL: You MUST emit <<<DEEP_RESEARCH: ...>>> in this response. Do NOT ask more questions.\n"
+            "?? Do NOT generate files, run CODE_EXECUTE, or create content before <<<DEEP_RESEARCH>>>. Research MUST run FIRST."
         ),
         "imagegen": (
             "[TOOL ACTIVE: IMAGE GENERATION]\n"
@@ -2547,9 +2558,9 @@ def _build_full_stock_dump(stock_data_list):
         if not d or d.get("error"):
             continue
         try:
-            lines = [f"{'═'*60}", f"  {d.get('ticker','?')} — {d.get('name','Unknown')}", f"{'═'*60}"]
+            lines = [f"{'-'*60}", f"  {d.get('ticker','?')} — {d.get('name','Unknown')}", f"{'-'*60}"]
 
-            # ── Price & Trading ──
+            # -- Price & Trading --
             lines.append("\n📈 PRICE & TRADING")
             lines.append(f"  Price: ${d.get('price',0):.2f} | Change: ${d.get('change',0):.2f} ({d.get('changePct',0):+.2f}%)")
             lines.append(f"  Open: ${d['open']:.2f}" if d.get('open') else "  Open: N/A")
@@ -2560,7 +2571,7 @@ def _build_full_stock_dump(stock_data_list):
             lines.append(f"  Avg Volume (10D): {avg_vol:,}" if avg_vol else "  Avg Volume: N/A")
             if vol and avg_vol and avg_vol > 0:
                 vol_vs_avg = vol / avg_vol
-                lines.append(f"  Volume vs Average: {vol_vs_avg:.2f}x ({'⚡ UNUSUAL' if vol_vs_avg > 1.5 else '🔇 BELOW NORMAL' if vol_vs_avg < 0.5 else '📊 Normal'})")
+                lines.append(f"  Volume vs Average: {vol_vs_avg:.2f}x ({'? UNUSUAL' if vol_vs_avg > 1.5 else '?? BELOW NORMAL' if vol_vs_avg < 0.5 else '?? Normal'})")
             lines.append(f"  Currency: {d.get('currency','USD')} | Exchange: {d.get('exchange','N/A')}")
             lines.append(f"  Sector: {d.get('sector','N/A')} | Industry: {d.get('industry','N/A')}")
             mc = d.get('marketCap')
@@ -2568,7 +2579,7 @@ def _build_full_stock_dump(stock_data_list):
                 cap_category = "Mega Cap" if mc >= 200e9 else "Large Cap" if mc >= 10e9 else "Mid Cap" if mc >= 2e9 else "Small Cap" if mc >= 300e6 else "Micro Cap"
                 lines.append(f"  Market Cap: {_fmt_big(mc)} ({cap_category})")
 
-            # ── Valuation ──
+            # -- Valuation --
             lines.append("\n💰 VALUATION")
             lines.append(f"  P/E (TTM): {d['pe']:.2f}" if d.get('pe') else "  P/E (TTM): N/A")
             lines.append(f"  Forward P/E: {d['forwardPe']:.2f}" if d.get('forwardPe') else "  Forward P/E: N/A")
@@ -2582,7 +2593,7 @@ def _build_full_stock_dump(stock_data_list):
             lines.append(f"  EV/Revenue: {d['health']['evToRevenue']:.2f}" if d.get('health',{}).get('evToRevenue') else "  EV/Revenue: N/A")
             lines.append(f"  EV/EBITDA: {d['health']['evToEbitda']:.2f}" if d.get('health',{}).get('evToEbitda') else "  EV/EBITDA: N/A")
 
-            # ── Dividends ──
+            # -- Dividends --
             if d.get('dividend') or d.get('dividendRate'):
                 lines.append("\n💵 DIVIDENDS")
                 lines.append(f"  Yield: {d['dividend']*100:.2f}%" if d.get('dividend') else "  Yield: N/A")
@@ -2590,7 +2601,7 @@ def _build_full_stock_dump(stock_data_list):
                 lines.append(f"  Payout Ratio: {_fmt_pct(d.get('health',{}).get('payoutRatio'))}")
                 lines.append(f"  Ex-Dividend Date: {d.get('exDividendDate','N/A')}")
 
-            # ── Technical Indicators ──
+            # -- Technical Indicators --
             lines.append("\n📊 TECHNICAL INDICATORS")
             perf = d.get('perf', {})
             tech = d.get('technicals', {})
@@ -2641,7 +2652,7 @@ def _build_full_stock_dump(stock_data_list):
             if tech.get('resistance_20d'):
                 lines.append(f"  Resistance: ${tech['resistance_20d']:.2f} (20D) / ${tech.get('resistance_50d',0):.2f} (50D)" if tech.get('resistance_50d') else f"  Resistance: ${tech['resistance_20d']:.2f} (20D)")
 
-            # ── Performance ──
+            # -- Performance --
             if perf:
                 lines.append("\n📈 PERFORMANCE")
                 perf_items = [('1w','1W'),('1m','1M'),('3m','3M'),('6m','6M'),('ytd','YTD'),('1y','1Y')]
@@ -2653,7 +2664,7 @@ def _build_full_stock_dump(stock_data_list):
                 if perf_parts:
                     lines.extend(perf_parts)
 
-            # ── Recent 5-Day Prices ──
+            # -- Recent 5-Day Prices --
             rp = d.get('recentPrices', [])
             if rp:
                 lines.append("\n📅 LAST 5 TRADING DAYS")
@@ -2662,7 +2673,7 @@ def _build_full_stock_dump(stock_data_list):
                 for dp in rp:
                     lines.append(f"  {dp['date']} | ${dp['open']:>7.2f} | ${dp['high']:>7.2f} | ${dp['low']:>7.2f} | ${dp['close']:>7.2f} | {dp['volume']:>10,}")
 
-            # ── Financial Health ──
+            # -- Financial Health --
             h = d.get('health', {})
             if h:
                 lines.append("\n🏦 FINANCIAL HEALTH")
@@ -2686,10 +2697,10 @@ def _build_full_stock_dump(stock_data_list):
                 lines.append(f"  Total Debt: {_fmt_big(h.get('totalDebt'))}")
                 lines.append(f"  Revenue/Share: ${h['revenuePerShare']:.2f}" if h.get('revenuePerShare') is not None else "")
 
-            # ── Shares & Ownership ──
+            # -- Shares & Ownership --
             sh = d.get('shares', {})
             if sh and any(v for v in sh.values() if v is not None):
-                lines.append("\n🏛️ SHARES & OWNERSHIP")
+                lines.append("\n??? SHARES & OWNERSHIP")
                 if sh.get('outstanding'): lines.append(f"  Shares Outstanding: {sh['outstanding']:,}")
                 if sh.get('float'): lines.append(f"  Float: {sh['float']:,}")
                 if sh.get('institutionPct') is not None: lines.append(f"  Institutional Ownership: {sh['institutionPct']*100:.1f}%")
@@ -2698,7 +2709,7 @@ def _build_full_stock_dump(stock_data_list):
                 if sh.get('shortPctFloat') is not None: lines.append(f"  Short % of Float: {sh['shortPctFloat']*100:.2f}%")
                 if sh.get('shortRatio') is not None: lines.append(f"  Short Ratio (Days to Cover): {sh['shortRatio']:.1f}")
 
-            # ── Analyst Consensus ──
+            # -- Analyst Consensus --
             lines.append("\n🎯 ANALYST CONSENSUS")
             lines.append(f"  Recommendation: {d.get('recommendation','N/A').upper()}")
             lines.append(f"  Number of Analysts: {d.get('numAnalysts','N/A')}")
@@ -2714,7 +2725,7 @@ def _build_full_stock_dump(stock_data_list):
             lines.append(f"  Risk Level: {d.get('risk','N/A')}")
             lines.append(f"  Beta: {d['beta']:.2f}" if d.get('beta') else "  Beta: N/A")
 
-            # ── Earnings History ──
+            # -- Earnings History --
             eh = d.get('earningsHistory', [])
             if eh:
                 lines.append("\n📋 RECENT EARNINGS")
@@ -2729,9 +2740,9 @@ def _build_full_stock_dump(stock_data_list):
                         except (TypeError, ValueError):
                             surprise_f = None
                         beat = "✅ BEAT" if (surprise_f and surprise_f > 0) else "❌ MISS" if (surprise_f and surprise_f < 0) else ""
-                        lines.append(f"  {qtr}: Est ${eps_est} → Actual ${eps_act} ({surprise_f:+.1f}% {beat})" if surprise_f is not None else f"  {qtr}: ${eps_act}")
+                        lines.append(f"  {qtr}: Est ${eps_est} ? Actual ${eps_act} ({surprise_f:+.1f}% {beat})" if surprise_f is not None else f"  {qtr}: ${eps_act}")
 
-            # ── Insider Trades ──
+            # -- Insider Trades --
             ins = d.get('insiderTrades', [])
             if ins:
                 lines.append("\n👤 RECENT INSIDER TRADES")
@@ -2839,7 +2850,7 @@ def _stock_agent_steps(stock_data_list, user_query):
             "   - Performance trend (1M/3M/YTD — is it trending up or down?)\n"
             "   - 52-week position (near lows = weak, near highs = strong)\n"
             "3. **Quick Fundamental Check**: Health score, analyst recommendation, revenue growth\n\n"
-            "**Verdict for each stock:** ✅ PASS / ⚠️ CAUTION / ❌ FAIL\n\n"
+            "**Verdict for each stock:** ? PASS / ?? CAUTION / ? FAIL\n\n"
             "**📊 Power Ranking** (CRITICAL — rank ALL stocks from best to worst candidate):\n"
             "| Rank | Stock | Score /10 | Key Strength | Key Weakness |\n\n"
             "**Screening Summary:** Which stocks survived screening and deserve deep analysis? "
@@ -2913,7 +2924,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Is price ABOVE or BELOW the 50-day and 200-day moving averages?\n"
                     "- Golden cross (50 > 200) or Death cross (50 < 200)?\n"
                     "- Is the stock making HIGHER highs/lows or LOWER highs/lows?\n"
-                    "⚠️ A stock below BOTH its 50 and 200 SMA with negative YTD performance has a TERRIBLE chart. Flag it.\n\n"
+                    "?? A stock below BOTH its 50 and 200 SMA with negative YTD performance has a TERRIBLE chart. Flag it.\n\n"
                     "**Indicator Table:**\n"
                     "| Technical | " + " | ".join(tickers) + " | Edge |\n"
                     "|-----------|" + "|".join(["--------|"] * len(tickers)) + "------|\n"
@@ -2995,7 +3006,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "**Catalysts & Risks:**\n"
                     "For each stock:\n"
                     "- 🔼 Next catalyst (earnings date, etc.)\n"
-                    "- ⚠️ Biggest risk factor\n\n"
+                    "- ?? Biggest risk factor\n\n"
                     "**Risk-Adjusted Winner:** Which offers better risk/reward?"
                 ),
             },
@@ -3064,7 +3075,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Deep Dive, "
                     "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
                     "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings on the frontrunner — into your final call.\n\n"
-                    "⚠️ CRITICAL RULES FOR YOUR VERDICT:\n"
+                    "?? CRITICAL RULES FOR YOUR VERDICT:\n"
                     "1. If the user specified price criteria and a stock FAILS it, rate it SELL regardless of other merits.\n"
                     "2. If a stock has a TERRIBLE CHART (below both SMAs, negative YTD, negative 1Y, near 52-week lows), "
                     "it should NOT receive a BUY rating. A cheap stock with a bad chart is cheap for a reason.\n"
@@ -3089,7 +3100,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "### Bottom Line\n"
                     "2-3 sentences. Clear winner, clear action, specific price levels. "
                     "Reference the most compelling news/catalyst that tips the scale.\n\n"
-                    "### ⚠️ MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "### ?? MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
                     "<<<STOCK_RATINGS>>>\n"
                     '{"ratings":{' + ','.join(f'"{t}":{{"score":0,"verdict":"hold"}}' for t in tickers) + '},"winner":"' + (tickers[0] if tickers else '?') + '"}\n'
                     "<<<END_STOCK_RATINGS>>>\n"
@@ -3188,7 +3199,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Golden cross or death cross?\n"
                     "- 52-week position — near highs = strong trend, near lows = danger\n"
                     "- YTD performance — is this stock delivering returns or destroying value?\n"
-                    "⚠️ If the stock is below BOTH moving averages with negative YTD/1Y performance, "
+                    "?? If the stock is below BOTH moving averages with negative YTD/1Y performance, "
                     "this is a TERRIBLE chart and should be flagged as high-risk regardless of price.\n\n"
                     "**Trend Analysis:**\n"
                     "- Moving averages: Price vs SMA 50, SMA 200, EMA 12, EMA 26\n"
@@ -3204,7 +3215,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Resistance: 20D and 50D resistance levels\n"
                     "- How far from each? Which is the stock gravitating toward?\n\n"
                     "**Performance Momentum** (use table with emoji):\n"
-                    "1W → 1M → 3M → YTD → 1Y — is the trend accelerating or fading?\n\n"
+                    "1W ? 1M ? 3M ? YTD ? 1Y — is the trend accelerating or fading?\n\n"
                     "**Technical Verdict:** 🟢 Bullish / 🟡 Neutral / 🔴 Bearish\n"
                     "One paragraph connecting all the dots. Be HONEST — if the chart looks bad, say it clearly."
                 ),
@@ -3299,10 +3310,10 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Target range (low to high) — what does the spread tell us about uncertainty?\n"
                     "- Current recommendation\n\n"
                     "**Valuation Math:**\n"
-                    "- Current P/E vs Forward P/E → Are earnings expected to grow or shrink?\n"
-                    "- PEG ratio → Paying a fair price for growth?\n"
-                    "- Book value vs price → Any margin of safety?\n"
-                    "- EV/EBITDA → How does the enterprise value compare?\n\n"
+                    "- Current P/E vs Forward P/E ? Are earnings expected to grow or shrink?\n"
+                    "- PEG ratio ? Paying a fair price for growth?\n"
+                    "- Book value vs price ? Any margin of safety?\n"
+                    "- EV/EBITDA ? How does the enterprise value compare?\n\n"
                     "**Fair Value Range:**\n"
                     "Based on the data, give a specific price range you consider fair value.\n"
                     "Explain your reasoning using the metrics above.\n\n"
@@ -3356,7 +3367,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Analysis, "
                     "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
                     "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings — into your final call.\n\n"
-                    "⚠️ CRITICAL RULES FOR YOUR VERDICT:\n"
+                    "?? CRITICAL RULES FOR YOUR VERDICT:\n"
                     "1. If the user specified price criteria and this stock FAILS it, rate it SELL regardless of other merits.\n"
                     "2. If the chart is TERRIBLE (below both SMAs, negative YTD/1Y, near 52-week lows), "
                     "it should NOT receive a BUY rating — cheap + bad chart = value trap.\n"
@@ -3404,7 +3415,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "### Bottom Line\n"
                     "2-3 sentences. Crystal clear. No ambiguity. What should the investor DO? "
                     "Reference the most compelling news/catalyst that tips the scale.\n\n"
-                    "### ⚠️ MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "### ?? MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
                     "<<<STOCK_RATINGS>>>\n"
                     + ('{"ratings":{"' + tickers[0] + '":{"score":0,"verdict":"hold"}},"winner":"' + tickers[0] + '"}\n' if tickers else '{"ratings":{},"winner":""}\n') +
                     "<<<END_STOCK_RATINGS>>>\n"
@@ -3587,6 +3598,31 @@ def prepare_chat_turn(chat, payload):
         )
         if _math_indicators:
             active_tools = list(active_tools) + ['code']
+
+    # --- Auto-enable research agent for deep research requests ---
+    # Don't auto-enable for system reprompts (code execution results, etc.)
+    if 'research' not in active_tools and user_text:
+        _is_system_reprompt = user_text.startswith('[SYSTEM]')
+        if not _is_system_reprompt:
+            _research_indicators = re.search(
+                r'(?i)\b(deep\s+research|research\s+report|comprehensive\s+research|'
+                r'investigat(?:e|ion)\s+(?:and|on|into)|in[- ]?depth\s+(?:research|analysis|report))\b',
+                user_text
+            )
+            if _research_indicators:
+                active_tools = list(active_tools) + ['research']
+
+    # --- Auto-enable research_go if chat has pending research (AI asked questions, user answered) ---
+    # Only activate once — clear the flag immediately so it doesn't persist across multiple turns
+    if 'research' not in active_tools and 'research_go' not in active_tools:
+        if chat.get("research_pending"):
+            active_tools = list(active_tools) + ['research_go']
+            del chat["research_pending"]
+            save_chat(chat)
+
+    # Strip research/research_go from active_tools for system reprompts to prevent re-triggering
+    if user_text and user_text.startswith('[SYSTEM]'):
+        active_tools = [t for t in active_tools if t not in ('research', 'research_go')]
 
     # --- Enable web search if search or research tools are active ---
     # Also enable by default for all queries so AI can access current info
@@ -3835,12 +3871,12 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
                 existing.add(f["path"])
         chat["generated_files"] = chat_files
     save_chat(chat)
-    # Track token usage for guests (estimate: 1 token ≈ 4 chars)
+    # Track token usage for guests (estimate: 1 token ˜ 4 chars)
     if session.get("guest") and not session.get("user_id"):
         _add_guest_tokens((len(ctx.get("user_text", "")) + len(clean)) // 4)
     return clean, executed, new_facts, code_results, clean_with_placeholders
 
-# ─── Context Helpers ────────────────────────────────────────────────────────
+# --- Context Helpers --------------------------------------------------------
 
 import re as _re
 _STOPWORDS = {"the","and","for","that","this","with","from","have","will","are",
@@ -3850,14 +3886,14 @@ _STOPWORDS = {"the","and","for","that","this","with","from","have","will","are",
 def _detect_complex_query(text):
     """Return a thinking level string if the query looks complex, else None."""
     lo = text.lower()
-    # High-complexity signals → medium thinking
+    # High-complexity signals ? medium thinking
     deep_signals = ["prove ","derive ","proof","formal ","theorem","contradict",
                     "critique ","evaluate the ","what are the flaws","steel man",
                     "compare and contrast","trade-offs","tradeoffs","implications of",
                     "step by step","walk me through","break down","in depth",
                     "comprehensive","thorough","detailed analysis","deep dive"]
     if any(s in lo for s in deep_signals): return "medium"
-    # Medium-complexity signals → low thinking
+    # Medium-complexity signals ? low thinking
     signals = ["why ","how does","analyze","analyse","compare","difference",
                "explain","debug ","optimize","design ","architecture","algorithm",
                "prove","calculate","implement","refactor","what if ",
@@ -4224,14 +4260,14 @@ def _detect_workflow_patterns(chats):
 
     # --- Phase 5: Detect recurring workflow sequences ---
     if len(recent_types) >= 2:
-        pair = f"{recent_types[1]}→{recent_types[0]}"
+        pair = f"{recent_types[1]}?{recent_types[0]}"
         common_flows = {
-            "research→brainstorm": "You often brainstorm after research — this is becoming your flow!",
-            "brainstorm→plan": "You like to plan right after brainstorming — nice workflow!",
-            "plan→write": "Planning then writing — your systematic approach is working!",
-            "decide→write": "Making decisions then documenting — great habit!",
-            "research→write": "Research then write — you work fast from findings to output!",
-            "brainstorm→write": "Brainstorm then write — creative to concrete, solid pattern!",
+            "research?brainstorm": "You often brainstorm after research — this is becoming your flow!",
+            "brainstorm?plan": "You like to plan right after brainstorming — nice workflow!",
+            "plan?write": "Planning then writing — your systematic approach is working!",
+            "decide?write": "Making decisions then documenting — great habit!",
+            "research?write": "Research then write — you work fast from findings to output!",
+            "brainstorm?write": "Brainstorm then write — creative to concrete, solid pattern!",
         }
         if pair in common_flows:
             patterns.append({
@@ -4422,7 +4458,7 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions):
         return None
 
 
-# ─── Provider Calls ──────────────────────────────────────────────────────────
+# --- Provider Calls ----------------------------------------------------------
 
 def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
@@ -4686,7 +4722,7 @@ def generate_image_google(api_key, prompt):
         return base64.b64encode(r.generated_images[0].image.image_bytes).decode()
     return None
 
-# ─── Routes: Static ──────────────────────────────────────────────────────────
+# --- Routes: Static ----------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -4714,7 +4750,7 @@ def add_no_cache_headers(resp):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     return resp
 
-# ─── Routes: Auth ─────────────────────────────────────────────────────────────
+# --- Routes: Auth -------------------------------------------------------------
 
 @app.route("/api/auth/register", methods=["POST"])
 def register():
@@ -4991,7 +5027,7 @@ def save_profile_onboarding():
 
     return jsonify({"ok": True, "profile": profile, "user": {"name": profile["preferred_name"]}})
 
-# ─── Routes: OAuth Config ────────────────────────────────────────────────────
+# --- Routes: OAuth Config ----------------------------------------------------
 
 @app.route("/api/oauth-config")
 def get_oauth_cfg():
@@ -5012,7 +5048,7 @@ def save_oauth_cfg():
     _save_oauth(cfg)
     return jsonify({"ok": True})
 
-# ─── Routes: Settings ────────────────────────────────────────────────────────
+# --- Routes: Settings --------------------------------------------------------
 
 @app.route("/api/settings")
 @require_auth
@@ -5075,7 +5111,7 @@ def get_models():
                        "base_url": ep.get("base_url"), "model": ep.get("model")})
     return jsonify({"models": result, "selected": normalize_selected_model(s)})
 
-# ─── Routes: Connectors ──────────────────────────────────────────────────────
+# --- Routes: Connectors ------------------------------------------------------
 
 @app.route("/api/connectors")
 @require_auth
@@ -5158,7 +5194,7 @@ def run_hf_space_route():
         return jsonify({"error": "No space_id provided"}), 400
     token = _hf_token()
     if not token:
-        return jsonify({"error": "HuggingFace connector not configured. Go to Settings → Connectors to set up your HuggingFace token."}), 400
+        return jsonify({"error": "HuggingFace connector not configured. Go to Settings ? Connectors to set up your HuggingFace token."}), 400
     result = run_hf_space(space_id, user_input, hf_token=token)
     return jsonify(result)
 
@@ -5171,7 +5207,7 @@ def delete_hf_connector():
     save_connectors(c)
     return jsonify({"ok": True})
 
-# ─── Routes: Chats ────────────────────────────────────────────────────────────
+# --- Routes: Chats ------------------------------------------------------------
 
 @app.route("/api/chats")
 @require_auth_or_guest
@@ -5271,7 +5307,7 @@ def delete_all_chats():
             deleted += 1
     return jsonify({"ok": True, "deleted": deleted})
 
-# ─── Chat Export / Import ─────────────────────────────────────────────────────
+# --- Chat Export / Import -----------------------------------------------------
 
 @app.route("/api/chats/export", methods=["GET"])
 @require_auth_or_guest
@@ -5553,6 +5589,9 @@ def chat_message(chat_id):
 
     original_resp = resp
     resp, research_query = extract_research_trigger(resp)
+    # Clear research_pending flag once research actually triggers
+    if research_query and chat.get("research_pending"):
+        del chat["research_pending"]
     resp, image_searches = extract_image_searches(resp)
     resp, image_generations = extract_image_generation(resp)
     resp, stock_tickers_sync = extract_stock_tickers(resp)
@@ -5594,6 +5633,10 @@ def chat_message(chat_id):
             if hf_res.get("success"):
                 hf_results_sync.append({"space": entry['space'], "index": entry['index'], "result": hf_res})
     clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, resp, original_raw=original_resp)
+    # If research tool was active but AI didn't trigger it (asked questions instead), set pending flag
+    if 'research' in ctx.get('active_tools', []) and not research_query:
+        chat["research_pending"] = True
+        save_chat(chat)
     if image_results:
         chat["messages"][-1]["image_results"] = image_results
     if gen_results:
@@ -6013,7 +6056,7 @@ def stock_agent():
     model = resolved.get("actual_model")
     base_url = resolved.get("base_url")
 
-    # ── Validate stocks against user criteria (price range etc.) ──
+    # -- Validate stocks against user criteria (price range etc.) --
     criteria = _extract_price_criteria(user_query)
     passing, failing = _validate_stocks_against_criteria(stock_data_list, criteria)
 
@@ -6025,7 +6068,7 @@ def stock_agent():
             parts.append(f"MAX price: ${criteria['max_price']:.2f}")
         if criteria.get('min_price'):
             parts.append(f"MIN price: ${criteria['min_price']:.2f}")
-        criteria_note = f"⚠️ USER'S PRICE CRITERIA: {', '.join(parts)}\n"
+        criteria_note = f"?? USER'S PRICE CRITERIA: {', '.join(parts)}\n"
 
     # Build screening report for stocks that fail criteria
     screening_report = ""
@@ -6033,14 +6076,14 @@ def stock_agent():
         fail_lines = []
         for d in failing:
             price = d.get('price') or d.get('currentPrice') or 0
-            fail_lines.append(f"  ❌ {d.get('ticker','?')} — ${price:.2f} (FAILS criteria)")
+            fail_lines.append(f"  ? {d.get('ticker','❌')} — ${price:.2f} (FAILS criteria)")
         screening_report = "STOCKS THAT FAIL USER'S CRITERIA:\n" + "\n".join(fail_lines) + "\n"
     if passing:
         pass_lines = []
         for d in passing:
             price = d.get('price') or d.get('currentPrice') or 0
             chart_score, chart_verdict = _assess_chart_health(d)
-            pass_lines.append(f"  ✅ {d.get('ticker','?')} — ${price:.2f} (passes criteria) | Chart: {chart_verdict} ({chart_score}/100)")
+            pass_lines.append(f"  ? {d.get('ticker','✅')} — ${price:.2f} (passes criteria) | Chart: {chart_verdict} ({chart_score}/100)")
         screening_report += "STOCKS THAT PASS USER'S CRITERIA:\n" + "\n".join(pass_lines) + "\n"
 
     # Assess chart health for all stocks and add to dump
@@ -6225,7 +6268,7 @@ def chat_message_stream(chat_id):
             "- You can AND SHOULD use <<<THINKING>>> and <<<END_THINKING>>> tags MULTIPLE TIMES throughout your response\n"
             "- Think deeply at the start, then respond, then if you need to reconsider, analyze deeper, \n"
             "  or verify something mid-response, open another <<<THINKING>>>...<<<END_THINKING>>> block\n"
-            "- Pattern: Think → Respond → Think again → Respond more → Think again if needed → ...\n"
+            "- Pattern: Think ? Respond ? Think again ? Respond more ? Think again if needed ? ...\n"
             "- Each thinking block should focus on a specific aspect: planning, verifying, reconsidering, exploring edge cases\n"
             "- Think through problems from MULTIPLE angles, self-verify claims, and course-correct if needed\n"
             "- Consider edge cases, counterarguments, and alternative approaches\n"
@@ -6271,9 +6314,9 @@ def chat_message_stream(chat_id):
         pieces = []
         thinking_pieces = []
         _in_openai_think = False
-        # ── Mid-stream media detection: detect image/stock/gen tags AS tokens arrive,
+        # -- Mid-stream media detection: detect image/stock/gen tags AS tokens arrive,
         #    start async fetches immediately, and yield result events interleaved with
-        #    text deltas so the frontend can render media inline while streaming. ──
+        #    text deltas so the frontend can render media inline while streaming. --
         from concurrent.futures import ThreadPoolExecutor
         emit_buffer = ""
         _media_executor = ThreadPoolExecutor(max_workers=4)
@@ -6433,7 +6476,7 @@ def chat_message_stream(chat_id):
                         continue
                     pieces.append(chunk)
                     emit_buffer += chunk
-                    # ── Extract <<<THINKING>>> blocks for OpenAI-style inline thinking ──
+                    # -- Extract <<<THINKING>>> blocks for OpenAI-style inline thinking --
                     _THINK_OPEN = "<<<THINKING>>>"
                     _THINK_CLOSE = "<<<END_THINKING>>>"
                     while _THINK_OPEN in emit_buffer or (_in_openai_think and _THINK_CLOSE in emit_buffer):
@@ -6562,7 +6605,7 @@ def chat_message_stream(chat_id):
             _media_fetches.clear()
             _media_executor.shutdown(wait=False)
 
-            # ── Post-stream processing ──
+            # -- Post-stream processing --
             raw_text = "".join(pieces)
             all_thinking = thinking_pieces
             if all_thinking:
@@ -6571,13 +6614,16 @@ def chat_message_stream(chat_id):
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             original_raw_text = raw_text
             raw_text, research_query = extract_research_trigger(raw_text)
+            # Clear research_pending flag once research triggers
+            if research_query and chat.get("research_pending"):
+                del chat["research_pending"]
             raw_text, image_searches = extract_image_searches(raw_text)
             raw_text, image_generations = extract_image_generation(raw_text)
             raw_text, stock_tickers = extract_stock_tickers(raw_text)
             raw_text, hf_space_calls = extract_hf_space_calls(raw_text)
             raw_text, stream_reminders = extract_reminders(raw_text)
 
-            # ── Execute HuggingFace Space calls (stop-and-wait, like code execution) ──
+            # -- Execute HuggingFace Space calls (stop-and-wait, like code execution) --
             _hf_results_stream = []
             if hf_space_calls:
                 hf_token = _hf_token()
@@ -6596,10 +6642,14 @@ def chat_message_stream(chat_id):
                         except Exception as e:
                             yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": str(e)[:200]})
                     else:
-                        yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": "HuggingFace connector not configured. Go to Settings → Connectors to add your token."})
+                        yield event({"type": "hf_space_failed", "space": call['space'], "index": call['index'], "error": "HuggingFace connector not configured. Go to Settings ? Connectors to add your token."})
 
             has_pending_ops = bool(image_searches or image_generations or stock_tickers or hf_space_calls)
             clean, executed, new_facts, code_results, clean_wp = finalize_chat_response(chat, ctx, raw_text, original_raw=original_raw_text)
+            # If research tool was active but AI didn't trigger it (asked questions), set pending flag
+            if 'research' in ctx.get('active_tools', []) and not research_query:
+                chat["research_pending"] = True
+                save_chat(chat)
             done_payload = {
                 "type": "done",
                 "reply": clean_wp if (image_searches or image_generations or stock_tickers or hf_space_calls) else clean,
@@ -6841,7 +6891,7 @@ def canvas_run():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ─── Routes: Image, Upload, Memory, Files ────────────────────────────────────
+# --- Routes: Image, Upload, Memory, Files ------------------------------------
 
 @app.route("/api/generate-image", methods=["POST"])
 @require_auth
@@ -6930,7 +6980,7 @@ def upload_file():
             try:
                 from PIL import Image
                 if mime == "image/svg+xml":
-                    # SVG → PNG via cairosvg if available, else Pillow can't handle SVG
+                    # SVG ? PNG via cairosvg if available, else Pillow can't handle SVG
                     try:
                         import cairosvg  # type: ignore[import-unresolved]  # optional dependency
                         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1024)
@@ -6946,7 +6996,7 @@ def upload_file():
                             pass
                         converted = True  # skip base64 image encoding for SVG text
                 else:
-                    # BMP, TIFF, ICO, etc. → PNG via Pillow
+                    # BMP, TIFF, ICO, etc. ? PNG via Pillow
                     img = Image.open(io.BytesIO(file_bytes))
                     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
                         img = img.convert('RGBA')
@@ -7114,7 +7164,7 @@ def get_folders():
         if parent != ".": folders.add(parent)
     return jsonify({"folders": sorted(folders)})
 
-# ─── Version & Changelog ──────────────────────────────────────────────────────
+# --- Version & Changelog ------------------------------------------------------
 gyro_VERSION = "3.4"
 gyro_CHANGELOG = [
     {
@@ -7229,12 +7279,12 @@ def get_greeting():
             f"Morning focus, steady pace{name_part}.",
             f"Fresh morning energy{name_part}.",
             f"New day, new momentum{name_part}.",
-            f"Rise and build{name_part}. ☀️",
+            f"Rise and build{name_part}. ??",
             f"Morning brain is the best brain{name_part}.",
             f"Let's make today count{name_part}.",
             f"Good morning{name_part}. What's the plan?",
             f"The day is yours{name_part}.",
-            f"Coffee and ideas{name_part}? ☕",
+            f"Coffee and ideas{name_part}? ?",
             f"Starting fresh{name_part}.",
             f"Clear mind, full day ahead{name_part}.",
         ],
@@ -7287,7 +7337,7 @@ def home_widgets_route():
     plan = _fallback_home_widgets(user.get("name", ""), profile, chats, todos, visions, reminders=reminders)
     return jsonify(plan)
 
-# ─── Research Agent (multi-step with web search + URL context) ────────────────
+# --- Research Agent (multi-step with web search + URL context) ----------------
 
 def _research_agent_steps(query):
     """Return the multi-step prompts for the research agent. 8 steps with web search and URL context."""
@@ -7302,7 +7352,7 @@ def _research_agent_steps(query):
         "2. Cite EVERY major claim with [Source Title](URL). No uncited assertions.\n"
         "3. Use exact numbers, dates, names, direct quotes from sources. Vague claims = failure.\n"
         "4. Clearly distinguish: confirmed fact vs. expert opinion vs. analysis vs. speculation\n"
-        "5. Rich markdown: **bold** key findings, tables for comparisons, bullet lists for data points\n"
+        "5. Rich markdown: **bold** key findings, bullet lists for data points\n"
         "6. NO disclaimers, NO 'I'm an AI', NO hedging. Be authoritative and decisive.\n"
         "7. When sources conflict: present both sides, explain which is more credible and why\n"
         "8. At the end of your response, include a SOURCE LIST in this exact format:\n"
@@ -7310,7 +7360,28 @@ def _research_agent_steps(query):
         "   - [Source Title](URL) — one-line description\n"
         "   - [Source Title](URL) — one-line description\n"
         "   <<<END_SOURCES>>>\n"
-        "   This helps track all references across steps."
+        "   This helps track all references across steps.\n\n"
+        "TABLE FORMAT — CRITICAL:\n"
+        "NEVER use standard markdown tables (the |---|---| pipe format). They are broken in our renderer.\n"
+        "Instead, ALWAYS use this custom table format for ALL tabular data:\n"
+        "<<<TABLE caption=\"Your Table Title\">>>\n"
+        "Column1 ;; Column2 ;; Column3\n"
+        "data1 ;; data2 ;; data3\n"
+        "data4 ;; data5 ;; data6\n"
+        "<<<END_TABLE>>>\n\n"
+        "Rules for tables:\n"
+        "- First row = column headers. Remaining rows = data.\n"
+        "- Use ;; (double semicolon) to separate columns. NO pipes |.\n"
+        "- NO separator rows (no --- rows). The first row is automatically the header.\n"
+        "- The caption attribute is optional but recommended for context.\n"
+        "- Keep cells concise. Use **bold** for emphasis within cells.\n"
+        "- You can use links [Title](URL) inside cells.\n"
+        "- Example:\n"
+        "  <<<TABLE caption=\"Key Statistics\">>>\n"
+        "  Metric ;; Value ;; Source ;; Trend\n"
+        "  GDP Growth ;; 3.2% ;; [BLS](https://bls.gov) ;; 📈\n"
+        "  Unemployment ;; 4.1% ;; [Fed](https://fed.gov) ;; 📉\n"
+        "  <<<END_TABLE>>>\n"
     )
 
     return [
@@ -7337,10 +7408,11 @@ def _research_agent_steps(query):
                 "Example query strategies: [topic], [topic + statistics], [topic + expert opinion], "
                 "[topic + controversy OR criticism], [topic + 2024 OR 2025], [topic + research paper].\n\n"
                 "**2. Source Mapping:**\n"
-                "For every source found, document:\n"
-                "| Source | Type | Recency | Why Relevant |\n"
-                "|--------|------|---------|-------------|\n"
-                "| [Title](URL) | News/Academic/Official/Industry | Date | Brief reason |\n\n"
+                "For every source found, document in a table:\n"
+                "<<<TABLE caption=\"Source Mapping\">>>\n"
+                "Source ;; Type ;; Recency ;; Why Relevant\n"
+                "[Title](URL) ;; News/Academic/Official/Industry ;; Date ;; Brief reason\n"
+                "<<<END_TABLE>>>\n\n"
                 "Aim for 10-15+ diverse sources.\n\n"
                 "**3. Initial Findings:**\n"
                 "What are the key themes emerging? What's the current state of knowledge on this topic?\n\n"
@@ -7403,9 +7475,10 @@ def _research_agent_steps(query):
                 f"RESEARCH MISSION: {query}\n\n"
                 "Verify and cross-reference all findings:\n\n"
                 "**1. Claim Verification Matrix:**\n"
-                "| Claim | Sources Confirming | Sources Contradicting | Confidence |\n"
-                "|-------|-------------------|----------------------|------------|\n"
-                "| [Key claim] | [Source1], [Source2] | [Source3] or None | High/Med/Low |\n\n"
+                "<<<TABLE caption=\"Claim Verification\">>>\n"
+                "Claim ;; Sources Confirming ;; Sources Contradicting ;; Confidence\n"
+                "[Key claim] ;; [Source1], [Source2] ;; [Source3] or None ;; High/Med/Low\n"
+                "<<<END_TABLE>>>\n\n"
                 "Check EVERY major claim from previous steps.\n\n"
                 "**2. Contradiction Analysis:**\n"
                 "Where sources disagree, investigate further:\n"
@@ -7424,7 +7497,7 @@ def _research_agent_steps(query):
             ),
         },
         {
-            "title": "Expert & Stakeholder Analysis",
+            "title": "Perspectives & Context",
             "icon": "👥",
             "system": base_system + (
                 "\n\nYour role: EXPERT OPINION ANALYST. "
@@ -7444,8 +7517,9 @@ def _research_agent_steps(query):
                 "- Direct quotes with attribution and URLs\n\n"
                 "**2. Stakeholder Map:**\n"
                 "Who are the key stakeholders and what are their interests?\n"
-                "| Stakeholder | Position | Motivation | Credibility |\n"
-                "|-------------|----------|------------|-------------|\n\n"
+                "<<<TABLE caption=\"Stakeholder Map\">>>\n"
+                "Stakeholder ;; Position ;; Motivation ;; Credibility\n"
+                "<<<END_TABLE>>>\n\n"
                 "**3. Schools of Thought:**\n"
                 "Are there distinct perspectives or camps on this topic?\n"
                 "- What does each side argue?\n"
@@ -7458,13 +7532,13 @@ def _research_agent_steps(query):
             ),
         },
         {
-            "title": "Data & Comparative Analysis",
+            "title": "Evidence & Data Analysis",
             "icon": "📊",
             "system": base_system + (
                 "\n\nYour role: DATA ANALYST. "
                 "Compile all quantitative data, create comparisons, and identify patterns. "
                 "Search for additional statistics, benchmarks, and metrics. "
-                "Present data in clear tables and structured formats."
+                "Present data using the <<<TABLE>>> format — NEVER use standard markdown tables."
             ),
             "web_search": True,
             "url_context": True,
@@ -7473,14 +7547,15 @@ def _research_agent_steps(query):
                 "Compile and analyze all data:\n\n"
                 "**1. Key Metrics Dashboard:**\n"
                 "Create a comprehensive data summary table with all statistics found:\n"
-                "| Metric | Value | Source | Date | Trend |\n"
-                "|--------|-------|--------|------|-------|\n\n"
+                "<<<TABLE caption=\"Key Metrics Dashboard\">>>\n"
+                "Metric ;; Value ;; Source ;; Date ;; Trend\n"
+                "<<<END_TABLE>>>\n\n"
                 "**2. Comparative Analysis:**\n"
                 "If applicable, compare across:\n"
                 "- Different time periods (trends)\n"
                 "- Different regions/markets/entities\n"
                 "- Different approaches/solutions/options\n"
-                "Use tables for all comparisons.\n\n"
+                "Use <<<TABLE>>> format for all comparisons.\n\n"
                 "**3. Pattern Recognition:**\n"
                 "- What trends emerge from the data?\n"
                 "- Are there any surprising outliers?\n"
@@ -7517,8 +7592,9 @@ def _research_agent_steps(query):
                 "What patterns or connections emerge when combining different research threads? "
                 "What might others miss?\n\n"
                 "**3. Risk & Opportunity Assessment:**\n"
-                "| Factor | Type | Likelihood | Impact | Evidence |\n"
-                "|--------|------|-----------|--------|---------|\n\n"
+                "<<<TABLE caption=\"Risk & Opportunity Assessment\">>>\n"
+                "Factor ;; Type ;; Likelihood ;; Impact ;; Evidence\n"
+                "<<<END_TABLE>>>\n\n"
                 "**4. Confidence Dashboard:**\n"
                 "- Overall research confidence: [High/Medium/Low]\n"
                 "- Strongest evidence areas: [list]\n"
@@ -7529,7 +7605,7 @@ def _research_agent_steps(query):
             ),
         },
         {
-            "title": "Strategic Assessment",
+            "title": "Conclusions & Assessment",
             "icon": "🎯",
             "system": (
                 "You are a strategic advisor. Based on all research, provide forward-looking analysis, "
@@ -7551,8 +7627,9 @@ def _research_agent_steps(query):
                 "Number each recommendation and explain the rationale.\n\n"
                 "**3. What to Watch:**\n"
                 "Key indicators, dates, or events to monitor going forward.\n"
-                "| Indicator | Why It Matters | Timeline |\n"
-                "|-----------|---------------|----------|\n\n"
+                "<<<TABLE caption=\"What to Watch\">>>\n"
+                "Indicator ;; Why It Matters ;; Timeline\n"
+                "<<<END_TABLE>>>\n\n"
                 "**4. Second-Order Effects:**\n"
                 "What are the ripple effects and downstream implications that aren't obvious?"
             ),
@@ -7565,14 +7642,14 @@ def _research_agent_steps(query):
                 "intelligence brief. It must be comprehensive yet scannable, authoritative yet accessible, "
                 "and immediately actionable. This is the document that matters — make it exceptional. "
                 "Include ALL sources with clickable URLs. Use clear hierarchy, bold key points, and "
-                "tables where appropriate."
+                "<<<TABLE>>> format for tabular data. NEVER use standard markdown pipe tables."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
                 "You have completed 7 research steps: Intelligence Gathering, Deep Source Analysis, "
-                "Fact Verification, Expert Analysis, Data Analysis, Synthesis, and Strategic Assessment.\n\n"
+                "Fact Verification, Perspectives & Context, Evidence & Data Analysis, Synthesis, and Conclusions.\n\n"
                 "Now produce the DEFINITIVE intelligence brief:\n\n"
                 "## 📋 Intelligence Brief\n"
                 f"**Subject:** {query}\n\n"
@@ -7585,7 +7662,7 @@ def _research_agent_steps(query):
                 "Detailed coverage organized by theme. Each section needs:\n"
                 "- Clear subheading\n"
                 "- Key facts with source citations as [Title](URL)\n"
-                "- Data tables and statistics where available\n"
+                "- Data tables (using <<<TABLE>>> format) and statistics where available\n"
                 "- Expert perspectives with direct quotes\n"
                 "- Confidence indicator (🟢/🟡/🔴)\n\n"
                 "### 🎯 Analysis & Implications\n"
@@ -7605,6 +7682,52 @@ def _research_agent_steps(query):
                 "---\n"
                 "Make this the kind of intelligence brief that would be presented to a CEO, "
                 "policymaker, or board of directors. Every sentence must earn its place."
+            ),
+        },
+        {
+            "title": "Comprehensive Report",
+            "icon": "📝",
+            "system": (
+                "You are an expert report writer producing the final comprehensive document. "
+                "Combine ALL findings from the previous 8 research steps into one unified, "
+                "well-structured, publication-ready report. Use rich markdown formatting: "
+                "headers, bold, <<<TABLE>>> format for tabular data, bullet lists, blockquotes for key quotes. "
+                "NEVER use standard markdown pipe tables — always use <<<TABLE>>>...<<<END_TABLE>>> format. "
+                "Every claim must be cited with [Source Title](URL). "
+                "Be thorough — this is the definitive document the reader will reference."
+            ),
+            "web_search": False,
+            "url_context": False,
+            "prompt": (
+                f"RESEARCH MISSION: {query}\n\n"
+                "You have completed 8 research steps. Now write the COMPREHENSIVE FINAL REPORT.\n\n"
+                "This report must cover EVERYTHING discovered across all steps in a single, "
+                "flowing document. Structure it as follows:\n\n"
+                "## ?? Comprehensive Research Report\n"
+                f"**Topic:** {query}\n\n"
+                "---\n\n"
+                "### Executive Overview\n"
+                "A thorough 8-12 sentence overview covering all major findings.\n\n"
+                "### Detailed Findings\n"
+                "Cover every major topic area discovered during research. For each:\n"
+                "- Clear subheading\n"
+                "- Detailed explanation with specific facts, dates, numbers\n"
+                "- Direct quotes from sources with attribution\n"
+                "- Data in <<<TABLE>>> format where appropriate\n"
+                "- Confidence indicators (??/??/??)\n\n"
+                "### Analysis & Implications\n"
+                "- What do the findings mean?\n"
+                "- How do different pieces connect?\n"
+                "- What are the key patterns and trends?\n"
+                "- Risk and opportunity assessment\n\n"
+                "### Conclusions & Recommendations\n"
+                "- Numbered list of actionable conclusions\n"
+                "- Specific recommendations based on evidence\n"
+                "- Scenario analysis (best/base/worst case)\n\n"
+                "### Complete Source List\n"
+                "List ALL sources used with clickable links:\n"
+                "- [Source Title](URL) — what it contributed\n\n"
+                "Make this report comprehensive, authoritative, and immediately useful."
             ),
         },
     ]
@@ -7813,15 +7936,19 @@ def research_agent():
                 findings.append(f)
         return findings[:12]
 
+    # Shared state for partial save on disconnect
+    _research_state = {"all_research": [], "all_sources": [], "all_findings": [],
+                        "step_durations": [], "total_word_count": 0, "done": False}
+
     def generate():
         import time as _time
         import itertools
         import threading
         import queue as _queue
-        all_research = []
-        all_sources = []
-        all_findings = []
-        step_durations = []
+        all_research = _research_state["all_research"]
+        all_sources = _research_state["all_sources"]
+        all_findings = _research_state["all_findings"]
+        step_durations = _research_state["step_durations"]
         seen_urls = set()
         total_word_count = 0
         STEP_TIMEOUT = 300  # 5 minute timeout per step
@@ -7882,6 +8009,7 @@ def research_agent():
             step_pieces = []
             step_success = False
             _last_err = None
+            _grounding_sources = []  # Collect actual URLs from Gemini grounding metadata
             MAX_TURNS_PER_STEP = 3  # Allow multi-turn per step
 
             for _att_idx, _att in enumerate(_attempts):
@@ -7920,6 +8048,38 @@ def research_agent():
                         _cfg = types.GenerateContentConfig(**_cfg_args)
 
                         # Multi-turn loop: let the model do multiple rounds per step
+                        # Track for repetition detection
+                        _repetition_detected = False
+                        def _check_repetition(pieces):
+                            """Detect degenerate repeating patterns (e.g. endless --- or ===).
+                            Must NOT trigger on markdown tables (which use | and - heavily)."""
+                            text = "".join(pieces[-20:]) if len(pieces) > 20 else "".join(pieces)
+                            if len(text) < 400:
+                                return False
+                            tail = text[-400:] if len(text) >= 400 else text
+                            # If tail contains pipe characters, it's likely a table — skip detection
+                            if '|' in tail:
+                                return False
+                            # Check for repeating short patterns (----, ====, etc.)
+                            for pat_len in (1, 2, 3, 4, 5, 6, 8, 10):
+                                if len(tail) < pat_len * 20:
+                                    continue
+                                seg = tail[-pat_len:]
+                                count = 0
+                                for ci in range(len(tail) - pat_len, -1, -pat_len):
+                                    if tail[ci:ci+pat_len] == seg:
+                                        count += 1
+                                    else:
+                                        break
+                                if count >= 20:
+                                    return True
+                            # Check if the last 300 chars are just separator-like characters (no pipes)
+                            last300 = tail[-300:]
+                            non_sep = last300.replace('-', '').replace('=', '').replace(' ', '').replace('\n', '').replace('*', '').replace('_', '').replace('~', '').strip()
+                            if len(non_sep) < 5:
+                                return True
+                            return False
+
                         for _turn in range(MAX_TURNS_PER_STEP):
                             _turn_pieces = []
 
@@ -7960,6 +8120,19 @@ def research_agent():
                                     raise chunk
                                 try:
                                     for candidate in (chunk.candidates or []):
+                                        # Extract grounding metadata (actual source URLs from Google Search)
+                                        try:
+                                            gm = getattr(candidate, 'grounding_metadata', None)
+                                            if gm:
+                                                for gc in getattr(gm, 'grounding_chunks', []) or []:
+                                                    web = getattr(gc, 'web', None)
+                                                    if web:
+                                                        uri = getattr(web, 'uri', '') or ''
+                                                        title = getattr(web, 'title', '') or ''
+                                                        if uri and 'vertexaisearch' not in uri:
+                                                            _grounding_sources.append({"title": title.strip() or uri, "url": uri.strip()})
+                                        except Exception:
+                                            pass
                                         for part in (candidate.content.parts or []):
                                             if getattr(part, "thought", None) and part.text:
                                                 yield evt({"type": "agent_thinking", "step": i + 1, "text": part.text})
@@ -7968,16 +8141,25 @@ def research_agent():
                                                 _turn_pieces.append(part.text)
                                                 step_pieces.append(part.text)
                                                 yield evt({"type": "agent_delta", "step": i + 1, "text": part.text})
+                                                if _check_repetition(step_pieces):
+                                                    _repetition_detected = True
                                 except (AttributeError, TypeError):
                                     text = getattr(chunk, "text", "") or ""
                                     if text:
                                         _turn_pieces.append(text)
                                         step_pieces.append(text)
                                         yield evt({"type": "agent_delta", "step": i + 1, "text": text})
+                                        if _check_repetition(step_pieces):
+                                            _repetition_detected = True
+                                if _repetition_detected:
+                                    print(f"  [research] Step {i+1}: repetition detected, truncating")
+                                    break
 
                             _turn_text = "".join(_turn_pieces).strip()
                             if not _turn_text:
                                 break  # Empty response, stop turns
+                            if _repetition_detected:
+                                break  # Repetitive content detected, stop this step
 
                             # Check if the model wants to continue (has search results to analyze, etc.)
                             # Continue if: response is short AND has web tools AND this isn't the last allowed turn
@@ -8025,8 +8207,16 @@ def research_agent():
                             step_pieces.append(full)
                             yield evt({"type": "agent_delta", "step": i + 1, "text": full})
 
-                    # If we got here with content, success
-                    if "".join(step_pieces).strip():
+                    # If we got here with content, success — UNLESS repetition was detected
+                    if _repetition_detected:
+                        # Repetition detected = treat as failure, RESTART the step
+                        _last_err = Exception("Repetitive pattern detected — restarting step")
+                        print(f"  [research] Step {i+1} attempt {_att_idx+1}: repetition detected, RESTARTING step...")
+                        # Re-emit agent_step running to tell frontend to CLEAR old content
+                        yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
+                                    "icon": step.get("icon", "📄"), "status": "running"})
+                        continue  # Try next attempt
+                    elif "".join(step_pieces).strip():
                         step_success = True
                         break
                     else:
@@ -8044,6 +8234,12 @@ def research_agent():
                 all_research.append(f"## {step['title']}\n{display_result}")
 
                 new_sources = _extract_sources(step_result)
+                # Add grounding metadata sources (actual URLs from Google Search, not vertex proxies)
+                for gs in _grounding_sources:
+                    if gs["url"] not in seen_urls and 'vertexaisearch' not in gs["url"]:
+                        new_sources.append(gs)
+                # Filter out vertexaisearch proxy URLs from all sources
+                new_sources = [s for s in new_sources if 'vertexaisearch.cloud.google.com' not in s.get("url", "") and 'vertexaisearch.google.com' not in s.get("url", "")]
                 for src in new_sources:
                     if src["url"] not in seen_urls:
                         seen_urls.add(src["url"])
@@ -8061,6 +8257,7 @@ def research_agent():
 
                 step_word_count = len(step_result.split())
                 total_word_count += step_word_count
+                _research_state["total_word_count"] = total_word_count
                 elapsed = round(_time.time() - step_start, 1)
                 step_durations.append({"step": i + 1, "title": step["title"], "elapsed": elapsed})
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
@@ -8080,6 +8277,8 @@ def research_agent():
                     "sources": all_sources, "total_sources": len(all_sources),
                     "total_words": total_word_count, "step_durations": step_durations,
                     "findings": all_findings})
+
+        _research_state["done"] = True
 
         # Save to chat history
         if chat_id:
@@ -8114,7 +8313,36 @@ def research_agent():
         try:
             yield from generate()
         except GeneratorExit:
-            pass  # Client disconnected, normal cleanup
+            # Client disconnected — save partial results if not already saved
+            if not _research_state["done"] and chat_id and _research_state["all_research"]:
+                try:
+                    chat, _ = load_chat(chat_id)
+                    if chat:
+                        all_r = _research_state["all_research"]
+                        step_breakdown = []
+                        for entry in all_r:
+                            nl = entry.find('\n')
+                            if nl > 0:
+                                step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
+                            else:
+                                step_breakdown.append({"title": entry[3:].strip(), "body": ""})
+                        chat["messages"].append({
+                            "role": "model",
+                            "text": "\n\n".join(all_r),
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "research_agent": True,
+                            "research_agent_steps": step_breakdown,
+                            "research_agent_query": query,
+                            "research_agent_sources": _research_state["all_sources"],
+                            "research_agent_findings": _research_state["all_findings"],
+                            "research_agent_durations": _research_state["step_durations"],
+                            "research_agent_words": _research_state["total_word_count"],
+                            "research_agent_partial": True,
+                        })
+                        save_chat(chat)
+                        print(f"  [research] Saved partial results ({len(all_r)} steps) on client disconnect")
+                except Exception as save_err:
+                    print(f"  [research] Failed to save partial results: {save_err}")
         except Exception as e:
             print(f"  [research] FATAL generator error: {e}")
             import traceback; traceback.print_exc()
@@ -8133,7 +8361,7 @@ def research_agent():
 
 
 
-# ─── Pre-warm heavy modules (.pyc compilation) ──────────────────────────────
+# --- Pre-warm heavy modules (.pyc compilation) ------------------------------
 def _prewarm_modules():
     """Background thread that imports heavy packages once so .pyc files are cached."""
     import threading
@@ -8154,7 +8382,7 @@ def _prewarm_modules():
 _prewarm_modules()
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# --- Main ---------------------------------------------------------------------
 if __name__ == "__main__":
     _ensure_dirs()
     print("\n  +----------------------------------------------+")
