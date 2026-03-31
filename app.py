@@ -145,7 +145,7 @@ SERVER_FILES = {"app.py", "requirements.txt", "Procfile", "render.yaml",
                 ".env", ".gitignore", ".gyro_session_secret", ".nexus_session_secret"}
 SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
-               "static", "templates", "logos"}
+               "static", "templates", "logos", "_code_output"}
 MAX_CONTEXT_CHARS = 900_000
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_CREATOR_ORIGIN_STORY = "Blake Cary built Gyro after his brother shared AI ideas that inspired him to create this workspace."
@@ -981,20 +981,107 @@ IMPORTANT: ALWAYS read filenames from the UPLOADED_IMAGES env var or list the _u
 <<<CODE_EXECUTE: python>>>
 print('Hello world')
 <<<END_CODE>>>
-The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 45-second timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
-When generating files (images, PDFs, etc.), save them to the current working directory. The system will automatically detect new files and display them to the user with download links (images are shown inline).
-PDF GENERATION: Use fpdf2 (import as: from fpdf import FPDF). For Unicode text, use pdf.set_font('Helvetica') — do NOT try to load custom .ttf fonts unless the user provides them. Always call pdf.output() with a filename to save.
+The code runs server-side and the output is shown to the user. Use print() for visible output. You can use multiple CODE_EXECUTE blocks per response. Available: all Python standard library modules (math, json, csv, datetime, random, collections, itertools, re, statistics, os, sys, etc.) PLUS installed packages: requests, beautifulsoup4, fpdf2, lxml, Pillow (from PIL import Image, ImageDraw, etc.), numpy, matplotlib (use 'Agg' backend: import matplotlib; matplotlib.use('Agg')). You can also pip install additional packages at the start of your code: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name']). 3-minute timeout. USE THIS PROACTIVELY — don't just show code and tell the user to run it. If you write code, EXECUTE it.
+When generating files (images, PDFs, etc.), save them to the current working directory (which is the `_code_output/` folder). The system will automatically detect new files and display them to the user with download links (images are shown inline). All your code runs with `_code_output/` as the working directory, so just use relative paths like `output.pdf` or `images/photo.jpg` — they will be placed inside `_code_output/` automatically.
+
+MINI-FOLDER SYSTEM — ORGANIZING GENERATED FILES:
+You can create subdirectories to organize multi-file projects. This is ESSENTIAL for complex outputs like PDFs with images, research packets, or multi-file deliverables.
+```python
+import os
+os.makedirs('project_assets', exist_ok=True)        # create a folder for images/resources
+os.makedirs('project_assets/images', exist_ok=True)  # nested folders work too
+# Save resources there, then reference them in your main output (e.g., PDF)
+```
+Use cases:
+- PDF with images: download/generate images into `assets/`, then embed them in the PDF
+- Research packet: create `research_output/` with the PDF, charts, and data files
+- Mind maps: generate the mind map as a PNG with matplotlib/graphviz, save to `assets/`, embed in PDF
+All files inside these folders are auto-detected and shown to the user with download links.
+
+DOWNLOADING IMAGES FOR USE IN FILES:
+When you need real images (photos, logos, diagrams) for a PDF or other file, you can download them directly:
+```python
+import requests
+from PIL import Image
+from io import BytesIO
+
+# Download an image from a URL
+def download_image(url, save_path):
+    headers = {{'User-Agent': 'Mozilla/5.0'}}
+    resp = requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    img = Image.open(BytesIO(resp.content))
+    img.save(save_path)
+    print(f"Downloaded image: {{save_path}} ({{img.size[0]}}x{{img.size[1]}})")
+    return save_path
+
+# To find images, use DuckDuckGo image search:
+from duckduckgo_search import DDGS
+def search_and_download_images(query, folder='assets', max_results=5):
+    os.makedirs(folder, exist_ok=True)
+    with DDGS() as ddgs:
+        results = list(ddgs.images(query, max_results=max_results))
+    paths = []
+    for i, r in enumerate(results):
+        try:
+            ext = '.jpg'
+            path = f"{{folder}}/{{query.replace(' ','_')[:30]}}_{{i}}{{ext}}"
+            download_image(r['image'], path)
+            paths.append(path)
+        except Exception as e:
+            print(f"Skipped image {{i}}: {{e}}")
+    return paths
+```
+IMPORTANT: When the user asks for images in a document, you MUST actually download real images and embed them. Do NOT skip images because of library limitations — download them as files and embed them using the PDF library's image support.
+
+MIND MAP GENERATION IN FILES:
+When the user asks for a mind map in a PDF or as a standalone image, generate it programmatically:
+```python
+# Option 1: Using matplotlib for mind maps (always available)
+import matplotlib; matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+# Draw nodes, connections, and labels programmatically
+
+# Option 2: Install and use graphviz for complex mind maps
+import subprocess
+subprocess.check_call(['pip', 'install', '-q', 'graphviz'])
+import graphviz
+dot = graphviz.Digraph(format='png')
+dot.node('A', 'Main Topic')
+dot.node('B', 'Subtopic 1')
+dot.edge('A', 'B')
+dot.render('mindmap', cleanup=True)
+```
+
+PDF GENERATION — USE reportlab FOR PROFESSIONAL DOCUMENTS:
+For high-quality PDFs, ALWAYS install and use reportlab instead of fpdf2. reportlab produces far superior output with proper image embedding, vector graphics, precise typography, and professional layouts.
+```python
+import subprocess
+subprocess.check_call(['pip', 'install', '-q', 'reportlab'])
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch, mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak, HRFlowable
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+```
+
 PDF QUALITY STANDARDS — ALL PDFs MUST look immaculate and professional:
-- TITLE PAGE: Large bold title (24-28pt), subtitle/date (14pt), clean spacing. Use set_font('Helvetica','B',28) for titles.
-- SECTION HEADERS: Bold 16-18pt with a colored underline or separator line. Use pdf.set_draw_color() and pdf.line() for dividers.
-- BODY TEXT: 11-12pt with proper line_height (1.5x font size). Use multi_cell() for paragraph text, not cell().
-- SPACING: Add proper margins (left=20, top=20). Add spacing between sections (pdf.ln(8) between paragraphs, pdf.ln(15) between major sections).
-- VISUAL HIERARCHY: Use bold for key terms, italic for emphasis. Vary font sizes for different heading levels (H1=18pt, H2=14pt, H3=12pt bold).
-- COLOR ACCENTS: Use subtle color for headers (e.g. dark blue pdf.set_text_color(20,60,120)) and reset to black for body text.
-- PAGE NUMBERS: Add page numbers at the bottom: pdf.set_y(-15); pdf.cell(0,10,f'Page {{pdf.page_no()}}',align='C')
-- TABLES: Use alternating row colors for readability. Draw cell borders with pdf.cell(w,h,text,border=1).
-- NEVER produce a plain text-dump PDF. Every PDF should look like a polished report that could be submitted to a teacher or executive.
-- When making a RESEARCH document: include a table of contents, numbered sections, proper citations, and a references section at the end.
+- USE reportlab's platypus (SimpleDocTemplate + Flowables). This gives you automatic pagination, proper text flow, and professional layouts.
+- TITLE PAGE: Create a dedicated first page with large title (28-36pt), subtitle, date, author info. Use Spacer() for vertical centering. Add a colored horizontal rule or decorative element.
+- SECTION HEADERS: Bold 16-20pt with colored accent. Use HRFlowable for divider lines. Add Spacer(1, 12) after headers.
+- BODY TEXT: 11-12pt with justified alignment (TA_JUSTIFY). Use ParagraphStyle with spaceAfter=8, leading=16 for proper line spacing.
+- COLOR THEME: Pick a consistent 2-3 color palette. Use colors.HexColor('#1a365d') for headers, black for body. Add subtle accent colors for highlights.
+- PAGE NUMBERS & HEADERS: Override the build method to add page numbers, headers/footers on every page.
+- IMAGES: Use reportlab.platypus.Image() to embed downloaded images. Set width/height to fit nicely (e.g., 5*inch wide). Images MUST be real files — download them first.
+- TABLES: Use Table with TableStyle for alternating row colors, header styling, grid lines. Set colWidths explicitly.
+- TABLE OF CONTENTS: For research documents, build a TOC with clickable section references.
+- BULLET POINTS: Use ListFlowable/ListItem or Paragraph with bullet characters for proper indented lists.
+- MARGINS: Use doc = SimpleDocTemplate(filename, pagesize=letter, leftMargin=0.75*inch, rightMargin=0.75*inch, topMargin=1*inch, bottomMargin=0.75*inch)
+- NEVER produce a plain text-dump PDF. Every PDF should look like a polished report that could be submitted to a teacher, boss, or client.
+- When the user asks for images in the PDF, you MUST download real images and embed them. No exceptions.
+- When the user asks for mind maps, you MUST generate them as images and embed them. No exceptions.
 
 CRITICAL CODE EXECUTION RULES:
 - ALWAYS use print() to log EVERY meaningful result — even when generating files. If you create an image, print what you created: print(f"Created {{filename}} ({{width}}x{{height}})")
@@ -1592,14 +1679,15 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
             continue
         try:
             # Snapshot workspace files before execution to detect new/modified files
+            code_output_dir_pre = WORKSPACE / "_code_output"
+            code_output_dir_pre.mkdir(exist_ok=True)
             pre_snapshot = {}
-            for p in WORKSPACE.rglob('*'):
-                if p.is_file() and not any(part in _ignore_dirs for part in p.relative_to(WORKSPACE).parts):
-                    if p.name not in _ignore_files:
-                        try:
-                            pre_snapshot[str(p.relative_to(WORKSPACE))] = p.stat().st_mtime
-                        except Exception:
-                            pass
+            for p in code_output_dir_pre.rglob('*'):
+                if p.is_file():
+                    try:
+                        pre_snapshot[str(p.relative_to(WORKSPACE))] = p.stat().st_mtime
+                    except Exception:
+                        pass
 
             # Build optimised wrapper: pre-import heavy libs so cached .pyc is used
             _needs_sympy = 'sympy' in code or ' sp.' in code or 'sp.Symbol' in code
@@ -1622,11 +1710,14 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
             # Pass uploaded image paths so code can find them
             if uploaded_image_paths:
                 exec_env["UPLOADED_IMAGES"] = ",".join(uploaded_image_paths)
+            # Run code in _code_output/ subfolder to keep workspace root clean
+            code_output_dir = WORKSPACE / "_code_output"
+            code_output_dir.mkdir(exist_ok=True)
             result = subprocess.run(
                 [sys.executable, "-u", tmp_path],
-                capture_output=True, text=True, timeout=45,
+                capture_output=True, text=True, timeout=180,
                 env=exec_env,
-                cwd=str(WORKSPACE),
+                cwd=str(code_output_dir),
             )
             os.unlink(tmp_path)
             output = result.stdout
@@ -1637,33 +1728,31 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
                 filtered_stderr = "\n".join(stderr_lines).strip()
                 if filtered_stderr:
                     output += ("\n" if output else "") + filtered_stderr
-            # Detect new/modified files after execution
+            # Detect new/modified files after execution (only in _code_output/)
             generated_files = []
-            for p in WORKSPACE.rglob('*'):
-                if p.is_file() and not any(part in _ignore_dirs for part in p.relative_to(WORKSPACE).parts):
-                    if p.name not in _ignore_files and not p.name.startswith('.'):
-                        try:
-                            rel = str(p.relative_to(WORKSPACE)).replace('\\', '/')
-                            if rel in _exclude:
-                                continue
-                            mtime = p.stat().st_mtime
-                            if rel not in pre_snapshot or mtime > pre_snapshot[rel]:
-                                # Determine if it's viewable (image) or just downloadable
-                                ext = p.suffix.lower()
-                                is_image = ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
-                                generated_files.append({
-                                    "path": rel,
-                                    "name": p.name,
-                                    "size": p.stat().st_size,
-                                    "is_image": is_image,
-                                })
-                        except Exception:
-                            pass
+            for p in code_output_dir.rglob('*'):
+                if p.is_file() and not p.name.startswith('.'):
+                    try:
+                        rel = str(p.relative_to(WORKSPACE)).replace('\\', '/')
+                        if rel in _exclude:
+                            continue
+                        mtime = p.stat().st_mtime
+                        if rel not in pre_snapshot or mtime > pre_snapshot[rel]:
+                            ext = p.suffix.lower()
+                            is_image = ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
+                            generated_files.append({
+                                "path": rel,
+                                "name": p.name,
+                                "size": p.stat().st_size,
+                                "is_image": is_image,
+                            })
+                    except Exception:
+                        pass
             results.append({"language": lang, "code": code, "output": output.strip() or "(no output)", "success": result.returncode == 0, "files": generated_files})
         except subprocess.TimeoutExpired:
             try: os.unlink(tmp_path)
             except Exception: pass
-            results.append({"language": lang, "code": code, "output": "Execution timed out (45s limit).", "success": False, "files": []})
+            results.append({"language": lang, "code": code, "output": "Execution timed out (3 minute limit).", "success": False, "files": []})
         except Exception as e:
             results.append({"language": lang, "code": code, "output": f"Error: {e}", "success": False, "files": []})
     return results
@@ -2235,7 +2324,48 @@ def _build_tool_instructions(active_tools):
             "sympy (symbolic math — solve equations, factor, expand, derivatives, integrals, limits, series, plotting). "
             "You can also install packages at the top of your code using: import subprocess; subprocess.check_call(['pip', 'install', '-q', 'package_name'])\n"
             "IMPORTANT: Do NOT use CODE_EXECUTE for web searching. Web search is a separate built-in capability.\n"
-            "Keep code focused and concise. The execution has a 45-second timeout.\n\n"
+            "The execution has a 3-minute timeout — plenty of time for complex operations like pip installs, image downloads, and PDF generation.\n\n"
+            "📦 MINI-FOLDER SYSTEM:\n"
+            "Your code runs in the `_code_output/` directory. Use relative paths — files go there automatically. "
+            "You can create subdirectories (os.makedirs('assets', exist_ok=True)) to organize multi-file outputs. "
+            "Use this for PDFs that include images, research packets, etc. All files in subfolders are auto-detected.\n\n"
+            "🖼️ DOWNLOADING IMAGES FOR USE IN FILES:\n"
+            "When you need real images for a PDF or document, download them using requests + DuckDuckGo image search:\n"
+            "```\n"
+            "import requests, os\n"
+            "from PIL import Image\n"
+            "from io import BytesIO\n"
+            "from duckduckgo_search import DDGS\n"
+            "os.makedirs('assets', exist_ok=True)\n"
+            "with DDGS() as ddgs:\n"
+            "    results = list(ddgs.images('search query', max_results=5))\n"
+            "for i, r in enumerate(results):\n"
+            "    resp = requests.get(r['image'], headers={'User-Agent':'Mozilla/5.0'}, timeout=15)\n"
+            "    img = Image.open(BytesIO(resp.content)); img.save(f'assets/img_{i}.jpg')\n"
+            "```\n"
+            "CRITICAL: When a user asks for images in a PDF, you MUST download real images and embed them. Never skip images.\n\n"
+            "📄 PDF GENERATION — USE REPORTLAB:\n"
+            "For professional PDFs, install and use reportlab (NOT fpdf2). It handles images, vector graphics, and precise typography:\n"
+            "```\n"
+            "import subprocess; subprocess.check_call(['pip', 'install', '-q', 'reportlab'])\n"
+            "from reportlab.lib.pagesizes import letter\n"
+            "from reportlab.lib import colors\n"
+            "from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle\n"
+            "from reportlab.lib.units import inch\n"
+            "from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak, HRFlowable\n"
+            "from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY\n"
+            "```\n"
+            "Every PDF MUST have: title page, section headers with color accents, proper paragraph spacing, page numbers, "
+            "and embedded images when requested. Use reportlab.platypus flowables for automatic pagination.\n\n"
+            "🗺️ MIND MAP GENERATION:\n"
+            "When asked for mind maps in files, generate them as PNG images using matplotlib or graphviz, then embed in PDFs:\n"
+            "```\n"
+            "subprocess.check_call(['pip', 'install', '-q', 'graphviz'])\n"
+            "import graphviz\n"
+            "dot = graphviz.Digraph(format='png')\n"
+            "# ... build the mind map ... \n"
+            "dot.render('mindmap', cleanup=True)\n"
+            "```\n\n"
             "🧮 MATH & GRAPHING CALCULATOR (CRITICAL — ALWAYS USE CODE FOR MATH):\n"
             "You have a BUILT-IN graphing calculator more powerful than Desmos. For ANY math question — "
             "algebra, calculus, graphing, equations, statistics, geometry, trig, etc. — you MUST use code execution. "
@@ -5299,12 +5429,34 @@ def bulk_delete_chats():
 @app.route("/api/chats/delete-all", methods=["POST"])
 @require_auth_or_guest
 def delete_all_chats():
-    """Delete every chat for the current user."""
-    chats = list_chats()
+    """Delete every chat for the current user, including transient/empty ones."""
     deleted = 0
+    # First delete via list_chats (handles Firebase and runtime state)
+    chats = list_chats()
     for c in chats:
         if delete_chat(c["id"]):
             deleted += 1
+    # Also directly purge ALL json files from the local chats directory
+    # (catches transient empty chats that list_chats filters out)
+    if session.get("guest") and not session.get("user_id"):
+        guest_id = session.get("guest_id")
+        if guest_id:
+            chats_dir = _guest_dir(guest_id) / "chats"
+            if chats_dir.exists():
+                for f in chats_dir.glob("*.json"):
+                    try: f.unlink(); deleted += 1
+                    except Exception: pass
+        state = _guest_runtime_state()
+        if state and "chats" in state:
+            state["chats"] = {}
+    else:
+        uid = session.get("user_id")
+        if uid and not FIREBASE_ENABLED:
+            chats_dir = _local_user_dir(uid) / "chats"
+            if chats_dir.exists():
+                for f in chats_dir.glob("*.json"):
+                    try: f.unlink(); deleted += 1
+                    except Exception: pass
     return jsonify({"ok": True, "deleted": deleted})
 
 # --- Chat Export / Import -----------------------------------------------------
@@ -7340,7 +7492,7 @@ def home_widgets_route():
 # --- Research Agent (multi-step with web search + URL context) ----------------
 
 def _research_agent_steps(query):
-    """Return the multi-step prompts for the research agent. 8 steps with web search and URL context."""
+    """Return the multi-step prompts for the research agent. 9 steps with web search and URL context."""
 
     base_system = (
         "You are an elite intelligence analyst at a Tier-1 research firm. "
@@ -7361,27 +7513,13 @@ def _research_agent_steps(query):
         "   - [Source Title](URL) — one-line description\n"
         "   <<<END_SOURCES>>>\n"
         "   This helps track all references across steps.\n\n"
-        "TABLE FORMAT — CRITICAL:\n"
-        "NEVER use standard markdown tables (the |---|---| pipe format). They are broken in our renderer.\n"
-        "Instead, ALWAYS use this custom table format for ALL tabular data:\n"
-        "<<<TABLE caption=\"Your Table Title\">>>\n"
-        "Column1 ;; Column2 ;; Column3\n"
-        "data1 ;; data2 ;; data3\n"
-        "data4 ;; data5 ;; data6\n"
-        "<<<END_TABLE>>>\n\n"
-        "Rules for tables:\n"
-        "- First row = column headers. Remaining rows = data.\n"
-        "- Use ;; (double semicolon) to separate columns. NO pipes |.\n"
-        "- NO separator rows (no --- rows). The first row is automatically the header.\n"
-        "- The caption attribute is optional but recommended for context.\n"
-        "- Keep cells concise. Use **bold** for emphasis within cells.\n"
-        "- You can use links [Title](URL) inside cells.\n"
-        "- Example:\n"
-        "  <<<TABLE caption=\"Key Statistics\">>>\n"
-        "  Metric ;; Value ;; Source ;; Trend\n"
-        "  GDP Growth ;; 3.2% ;; [BLS](https://bls.gov) ;; 📈\n"
-        "  Unemployment ;; 4.1% ;; [Fed](https://fed.gov) ;; 📉\n"
-        "  <<<END_TABLE>>>\n"
+        "TABLE FORMAT:\n"
+        "Use standard markdown tables when tabular data helps clarity.\n"
+        "Example:\n"
+        "| Metric | Value | Source | Trend |\n"
+        "|---|---:|---|---|\n"
+        "| GDP Growth | 3.2% | [BLS](https://bls.gov) | 📈 |\n"
+        "| Unemployment | 4.1% | [Fed](https://fed.gov) | 📉 |\n"
     )
 
     return [
@@ -7394,32 +7532,35 @@ def _research_agent_steps(query):
                 "Search for the topic from EVERY angle: breaking news, academic papers, industry reports, "
                 "government documents, social media discourse, expert blogs, think tank publications, "
                 "and international perspectives. Leave no stone unturned. "
-                "You MUST search the web at least 5 times with different queries."
+                "You MUST search the web at least 6 times with different queries. "
+                "Search in DIFFERENT CATEGORIES: factual queries, opinion queries, statistical queries, "
+                "historical queries, and counter-argument queries. Use quotation marks for exact phrases."
             ),
             "web_search": True,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Execute the initial intelligence sweep:\n\n"
-                "**1. Multi-Angle Search** (search the web AT LEAST 5 TIMES):\n"
-                "Run at least 5-6 different search queries approaching this topic from different angles. "
-                "Don't just search the obvious — search related terms, synonyms, expert names, "
-                "organizations involved, recent developments, technical terminology, AND counter-arguments.\n"
-                "Example query strategies: [topic], [topic + statistics], [topic + expert opinion], "
-                "[topic + controversy OR criticism], [topic + 2024 OR 2025], [topic + research paper].\n\n"
-                "**2. Source Mapping:**\n"
-                "For every source found, document in a table:\n"
-                "<<<TABLE caption=\"Source Mapping\">>>\n"
-                "Source ;; Type ;; Recency ;; Why Relevant\n"
-                "[Title](URL) ;; News/Academic/Official/Industry ;; Date ;; Brief reason\n"
-                "<<<END_TABLE>>>\n\n"
-                "Aim for 10-15+ diverse sources.\n\n"
-                "**3. Initial Findings:**\n"
-                "What are the key themes emerging? What's the current state of knowledge on this topic?\n\n"
+                "Execute the initial intelligence sweep. TARGET: 15+ diverse sources.\n\n"
+                "**1. Multi-Angle Search** (search the web AT LEAST 6 TIMES with DIFFERENT query types):\n"
+                "Run these specific types of searches:\n"
+                f"- FACTUAL: \"{query}\" — core topic\n"
+                f"- STATISTICAL: \"{query} statistics data numbers 2024 2025\"\n"
+                f"- EXPERT: \"{query} expert analysis opinion\"\n"
+                f"- CRITICAL: \"{query} criticism problems controversy\"\n"
+                f"- RECENT: \"{query} latest news developments\"\n"
+                f"- ACADEMIC: \"{query} research study report\"\n"
+                "Also search for specific sub-topics, related terminology, and key people/organizations involved.\n\n"
+                "**2. Source Mapping** (REQUIRED — create this exact table):\n"
+                "| # | Source | Type | Date | Credibility | Key Contribution |\n"
+                "|---|---|---|---|---|---|\n"
+                "| 1 | [Title](URL) | News/Academic/Gov/Industry | YYYY-MM | High/Med/Low | What this source uniquely adds |\n\n"
+                "Aim for 15+ sources across at least 4 different source types.\n\n"
+                "**3. Initial Findings** (bullet list of 8-12 key facts discovered):\n"
+                "For each finding, include the specific source: \"[fact statement] — [Source](URL)\"\n\n"
                 "**4. Research Gaps & Priority Targets:**\n"
-                "- What questions remain unanswered?\n"
-                "- Which sources need deep reading in the next step?\n"
-                "- What specific data/stats/quotes should we look for?"
+                "- List 3-5 specific unanswered questions\n"
+                "- Name 3-5 specific URLs that need deep reading in the next step\n"
+                "- Identify what specific data/statistics/quotes are still needed"
             ),
         },
         {
@@ -7430,33 +7571,37 @@ def _research_agent_steps(query):
                 "You have URL context ability — you can READ FULL WEB PAGES. Use this power. "
                 "Read the most important sources found in the previous step in their entirety. "
                 "Extract detailed data, statistics, quotes, methodologies, and evidence. "
-                "Don't just skim — read deeply and extract everything valuable."
+                "Don't just skim — read deeply and extract everything valuable. "
+                "For each source you read, write a detailed extraction brief with exact data."
             ),
             "web_search": True,
             "url_context": True,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Deep-read the most important sources. Extract everything:\n\n"
-                "**1. Primary Source Deep Dive** (read 3-5 key pages in full):\n"
-                "For each source you read deeply:\n"
-                "- **Source**: [Title](URL)\n"
-                "- **Key Data Points**: exact numbers, statistics, percentages\n"
-                "- **Direct Quotes**: important statements from experts/officials\n"
-                "- **Methodology/Evidence**: how claims are supported\n"
-                "- **Publication Context**: who published this, when, potential biases\n\n"
-                "**2. Additional Discovery:**\n"
-                "Search for additional sources that fill gaps from the first step. "
-                "Look specifically for:\n"
-                "- Statistical data and official reports\n"
-                "- Expert analysis and opinion pieces\n"
-                "- Counter-narratives and alternative viewpoints\n"
-                "- The most recent developments (last 6 months)\n\n"
-                "**3. Evidence Inventory:**\n"
-                "Create a structured inventory of all hard evidence collected:\n"
-                "- Statistics and data points (with sources)\n"
-                "- Expert quotes (with attribution)\n"
-                "- Key dates and timeline events\n"
-                "- Organizations and people involved"
+                "Deep-read the 5 most important sources from Step 1. Also search for 3-5 new sources.\n\n"
+                "**1. Primary Source Deep Dive** (read 5 key pages in full):\n"
+                "For EACH source, write a detailed extraction brief:\n"
+                "---\n"
+                "**Source: [Title](URL)**\n"
+                "- **Publisher/Author**: Who created this and their credibility\n"
+                "- **Date**: When published/updated\n"
+                "- **Key Data Points**: List every specific number, statistic, percentage, dollar amount\n"
+                "- **Direct Quotes** (copy exact words): \"quote\" — attribution\n"
+                "- **Methodology**: How did they get their data? Sample size? Timeframe?\n"
+                "- **Key Arguments**: What does this source argue/conclude?\n"
+                "- **Potential Bias**: Any agenda, funding source, or perspective bias?\n"
+                "- **Unique Contribution**: What does this source add that others don't?\n"
+                "---\n\n"
+                "**2. Gap-Filling Search** (search 3-5 more times for missing info):\n"
+                "Specifically search for:\n"
+                "- Statistics that were referenced but not fully detailed in initial sources\n"
+                "- The opposing viewpoint to the dominant narrative you found\n"
+                "- The most recent data available (last 3 months)\n"
+                "- Primary/original sources that secondary sources cited\n\n"
+                "**3. Evidence Inventory Table:**\n"
+                "| Evidence | Type | Source | Confidence | Verified By |\n"
+                "|---|---|---|---|---|\n"
+                "| [specific fact/stat] | Stat/Quote/Claim | [Source](URL) | 🟢/🟡/🔴 | [cross-ref] |"
             ),
         },
         {
@@ -7464,106 +7609,121 @@ def _research_agent_steps(query):
             "icon": "✅",
             "system": base_system + (
                 "\n\nYour role: FACT CHECKER AND SKEPTIC. "
-                "Cross-reference every major claim against multiple sources. "
+                "Cross-reference every major claim against multiple independent sources. "
                 "Look for contradictions, outdated information, and unsupported assertions. "
-                "Verify statistics by finding their original source. "
-                "Rate confidence in each finding. Be brutally honest about what's confirmed vs. uncertain."
+                "Verify statistics by finding their ORIGINAL source (not a secondary citation). "
+                "Rate confidence in each finding. Be brutally honest about what's confirmed vs. uncertain. "
+                "If a claim cannot be independently verified, flag it explicitly."
             ),
             "web_search": True,
             "url_context": True,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Verify and cross-reference all findings:\n\n"
-                "**1. Claim Verification Matrix:**\n"
-                "<<<TABLE caption=\"Claim Verification\">>>\n"
-                "Claim ;; Sources Confirming ;; Sources Contradicting ;; Confidence\n"
-                "[Key claim] ;; [Source1], [Source2] ;; [Source3] or None ;; High/Med/Low\n"
-                "<<<END_TABLE>>>\n\n"
-                "Check EVERY major claim from previous steps.\n\n"
-                "**2. Contradiction Analysis:**\n"
-                "Where sources disagree, investigate further:\n"
-                "- Search for the original/primary source of disputed claims\n"
-                "- Read source pages to understand the full context\n"
-                "- Determine which source is more authoritative and why\n\n"
-                "**3. Recency Check:**\n"
-                "- Are any findings based on outdated information?\n"
-                "- Search for the very latest developments on this topic\n"
-                "- Note anything that has changed recently\n\n"
-                "**4. Confidence Summary:**\n"
-                "Rate the overall research confidence:\n"
-                "- 🟢 **High Confidence**: Multiple independent sources confirm\n"
-                "- 🟡 **Medium Confidence**: Single authoritative source or partial corroboration\n"
-                "- 🔴 **Low Confidence**: Limited sources, potential bias, or contradictions"
+                "Verify and cross-reference ALL major findings from Steps 1-2.\n\n"
+                "**1. Claim Verification Matrix** (REQUIRED — check every major claim):\n"
+                "| # | Claim | Original Source | Confirming Sources | Contradicting Sources | Verdict |\n"
+                "|---|---|---|---|---|---|\n"
+                "| 1 | [Specific claim] | [Source](URL) | [Src2](URL), [Src3](URL) | None OR [Src](URL) | 🟢 Confirmed / 🟡 Partially / 🔴 Disputed |\n\n"
+                "Check at least 8-10 key claims.\n\n"
+                "**2. Contradiction Deep-Dive:**\n"
+                "For EACH contradiction found:\n"
+                "- What exactly do the sources disagree about?\n"
+                "- Search for the original/primary data source\n"
+                "- Read both sources in full to understand context\n"
+                "- Which source is more credible and why? (methodology, recency, authority)\n"
+                "- Final verdict with justification\n\n"
+                "**3. Recency Audit:**\n"
+                "- Search for the absolute latest developments (last 30 days if possible)\n"
+                "- Flag any findings based on data older than 12 months\n"
+                "- Note if the landscape has changed since sources were published\n\n"
+                "**4. Overall Confidence Assessment:**\n"
+                "| Area | Confidence | Basis | What Would Change This |\n"
+                "|---|---|---|---|\n"
+                "| [topic area] | 🟢/🟡/🔴 | [why] | [what evidence would change rating] |"
             ),
         },
         {
             "title": "Perspectives & Context",
             "icon": "👥",
             "system": base_system + (
-                "\n\nYour role: EXPERT OPINION ANALYST. "
+                "\n\nYour role: EXPERT OPINION ANALYST AND CONTEXTUALIZER. "
                 "Find what the leading experts, institutions, and stakeholders say about this topic. "
                 "Search for interviews, papers, and commentary from domain authorities. "
-                "Map out the different perspectives and schools of thought."
+                "Map out the different perspectives and schools of thought. "
+                "Search for expert names specifically — find their published positions and direct quotes. "
+                "Provide historical context: how did we get here, and what trajectory are we on?"
             ),
             "web_search": True,
             "url_context": True,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Map the expert landscape:\n\n"
-                "**1. Expert Voices:**\n"
-                "Search for and document what leading experts say:\n"
-                "- Who are the top 3-5 authorities on this topic?\n"
-                "- What are their stated positions?\n"
-                "- Direct quotes with attribution and URLs\n\n"
-                "**2. Stakeholder Map:**\n"
-                "Who are the key stakeholders and what are their interests?\n"
-                "<<<TABLE caption=\"Stakeholder Map\">>>\n"
-                "Stakeholder ;; Position ;; Motivation ;; Credibility\n"
-                "<<<END_TABLE>>>\n\n"
-                "**3. Schools of Thought:**\n"
-                "Are there distinct perspectives or camps on this topic?\n"
-                "- What does each side argue?\n"
-                "- What evidence do they cite?\n"
-                "- Where do they agree/disagree?\n\n"
-                "**4. Historical Context & Trajectory:**\n"
-                "- How has thinking on this topic evolved?\n"
-                "- What are the key milestones or turning points?\n"
-                "- What's the current trajectory and where is it heading?"
+                "Map the expert and stakeholder landscape comprehensively.\n\n"
+                "**1. Expert Voices** (search for experts BY NAME):\n"
+                "Identify and document the top 5-7 authorities:\n"
+                "| Expert | Title/Affiliation | Position | Key Quote | Source |\n"
+                "|---|---|---|---|---|\n"
+                "| [Name] | [Role at Org] | Pro/Against/Nuanced | \"exact quote\" | [Source](URL) |\n\n"
+                "Search for each expert by name + the topic to find their latest statements.\n\n"
+                "**2. Stakeholder Analysis:**\n"
+                "| Stakeholder | Interest | Position | Power/Influence | Likely Action |\n"
+                "|---|---|---|---|---|\n"
+                "| [Organization/Group] | [What they want] | [Support/Oppose/Neutral] | High/Med/Low | [What they'll do] |\n\n"
+                "**3. Competing Narratives:**\n"
+                "Map out 2-4 distinct perspectives/schools of thought:\n"
+                "For each:\n"
+                "- **Perspective name/label**: One-line summary\n"
+                "- **Key proponents**: Who champions this view?\n"
+                "- **Core arguments**: What evidence do they cite?\n"
+                "- **Weaknesses**: Where does this perspective fall short?\n"
+                "- **Resonance**: Who finds this perspective persuasive and why?\n\n"
+                "**4. Historical Timeline:**\n"
+                "Build a chronological context (key events, milestones, turning points):\n"
+                "| Date | Event | Significance | Source |\n"
+                "|---|---|---|---|\n\n"
+                "**5. Trajectory Analysis:**\n"
+                "- Where was this topic 5 years ago vs. now?\n"
+                "- What direction is momentum heading?\n"
+                "- What are the key inflection points coming up?"
             ),
         },
         {
             "title": "Evidence & Data Analysis",
             "icon": "📊",
             "system": base_system + (
-                "\n\nYour role: DATA ANALYST. "
-                "Compile all quantitative data, create comparisons, and identify patterns. "
-                "Search for additional statistics, benchmarks, and metrics. "
-                "Present data using the <<<TABLE>>> format — NEVER use standard markdown tables."
+                "\n\nYour role: SENIOR DATA ANALYST. "
+                "Compile ALL quantitative data found across all previous steps into structured tables. "
+                "Search for additional statistics, benchmarks, and metrics that haven't been found yet. "
+                "Look specifically for: government databases, industry reports with numbers, "
+                "academic papers with methodology, and official statistics. "
+                "Present data clearly using markdown tables. Identify trends, patterns, and outliers."
             ),
             "web_search": True,
             "url_context": True,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Compile and analyze all data:\n\n"
-                "**1. Key Metrics Dashboard:**\n"
-                "Create a comprehensive data summary table with all statistics found:\n"
-                "<<<TABLE caption=\"Key Metrics Dashboard\">>>\n"
-                "Metric ;; Value ;; Source ;; Date ;; Trend\n"
-                "<<<END_TABLE>>>\n\n"
-                "**2. Comparative Analysis:**\n"
-                "If applicable, compare across:\n"
-                "- Different time periods (trends)\n"
-                "- Different regions/markets/entities\n"
-                "- Different approaches/solutions/options\n"
-                "Use <<<TABLE>>> format for all comparisons.\n\n"
-                "**3. Pattern Recognition:**\n"
-                "- What trends emerge from the data?\n"
-                "- Are there any surprising outliers?\n"
-                "- What correlations or patterns are visible?\n\n"
-                "**4. Implications of Data:**\n"
-                "- What does the data tell us about the answer to the research question?\n"
-                "- What data is MISSING that would be valuable?\n"
-                "- How reliable are the data sources?"
+                "Compile, analyze, and present ALL data. Search for additional statistics.\n\n"
+                "**1. Master Data Table** (compile ALL numbers from every step):\n"
+                "| # | Metric/Indicator | Value | Date | Source | Trend | Notes |\n"
+                "|---|---|---:|---|---|---|---|\n"
+                "| 1 | [metric name] | [exact number] | [date] | [Source](URL) | ↑/↓/→ | [context] |\n\n"
+                "Include EVERY statistic, percentage, dollar amount, count, etc. found.\n\n"
+                "**2. Missing Data Search** (search 3-4 more times for gaps):\n"
+                f"Search specifically for: \"{query} statistics report data\" and variations.\n"
+                "Look for government data, industry reports, and academic datasets.\n\n"
+                "**3. Comparative Analysis Tables:**\n"
+                "Create comparison tables for the most meaningful dimensions:\n"
+                "- By time period (5y ago vs. 3y ago vs. now vs. projected)\n"
+                "- By region/market/entity (if applicable)\n"
+                "- By approach/method/option (if comparing alternatives)\n\n"
+                "**4. Pattern & Trend Analysis:**\n"
+                "- What are the 3-5 most significant trends in the data?\n"
+                "- Any surprising outliers or anomalies? What might explain them?\n"
+                "- What correlations are visible between different metrics?\n"
+                "- What does the data trajectory suggest about the future?\n\n"
+                "**5. Data Quality & Gaps:**\n"
+                "| Data Area | Coverage | Quality | Key Gap |\n"
+                "|---|---|---|---|\n"
+                "| [area] | Complete/Partial/Missing | High/Med/Low | [what's missing] |"
             ),
         },
         {
@@ -7575,158 +7735,169 @@ def _research_agent_steps(query):
                 "Identify the key themes, connect dots between different findings, and surface non-obvious insights. "
                 "Think like a senior advisor briefing a decision-maker. "
                 "Be BOLD — state what the evidence means, don't just summarize it. "
-                "Identify what others would miss. Challenge conventional wisdom where the evidence supports it."
+                "Identify what others would miss. Challenge conventional wisdom where the evidence supports it. "
+                "Your output should contain ZERO new searches — only synthesis of what's been found."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Synthesize ALL research into actionable intelligence:\n\n"
-                "**1. Core Findings** (the 5-8 most important discoveries):\n"
+                "Synthesize ALL research from Steps 1-5 into actionable intelligence.\n\n"
+                "**1. Core Findings** (exactly 6-8 of the MOST important discoveries):\n"
                 "For each finding:\n"
-                "- 📌 **Finding**: Clear, one-sentence statement\n"
-                "- **Evidence**: Supporting data/quotes from research\n"
-                "- **Confidence**: 🟢 High / 🟡 Medium / 🔴 Low\n"
-                "- **Source(s)**: Citation(s)\n\n"
+                "- 📌 **Finding**: Clear, one-sentence statement of the finding\n"
+                "- **Why It Matters**: One sentence on significance\n"
+                "- **Evidence**: 2-3 specific data points/quotes that support this\n"
+                "- **Confidence**: 🟢 High / 🟡 Medium / 🔴 Low — with reason\n"
+                "- **Source(s)**: [Citation1](URL), [Citation2](URL)\n\n"
                 "**2. Non-Obvious Connections:**\n"
-                "What patterns or connections emerge when combining different research threads? "
-                "What might others miss?\n\n"
-                "**3. Risk & Opportunity Assessment:**\n"
-                "<<<TABLE caption=\"Risk & Opportunity Assessment\">>>\n"
-                "Factor ;; Type ;; Likelihood ;; Impact ;; Evidence\n"
-                "<<<END_TABLE>>>\n\n"
+                "Identify 3-5 insights that only emerge from combining different research threads:\n"
+                "- What pattern connects findings from different steps?\n"
+                "- What does the combination of expert opinions + data + historical context reveal?\n"
+                "- What is everyone missing? What's the elephant in the room?\n\n"
+                "**3. Risk & Opportunity Matrix:**\n"
+                "| Factor | Type | Likelihood | Impact | Time Horizon | Evidence |\n"
+                "|---|---|---|---|---|---|\n"
+                "| [specific factor] | Risk/Opportunity | High/Med/Low | High/Med/Low | Near/Med/Long | [source] |\n\n"
                 "**4. Confidence Dashboard:**\n"
-                "- Overall research confidence: [High/Medium/Low]\n"
-                "- Strongest evidence areas: [list]\n"
-                "- Weakest evidence areas: [list]\n"
-                "- Number of independent sources consulted: [count]\n\n"
-                "**5. Open Questions:**\n"
-                "What remains genuinely uncertain or requires further investigation?"
+                "- Overall research confidence: [High/Medium/Low] — [justification]\n"
+                "- Strongest evidence: [top 3 areas where evidence is rock-solid]\n"
+                "- Weakest evidence: [top 3 areas where evidence is thin]\n"
+                "- Total independent sources: [count from all steps]\n"
+                "- Cross-referencing success rate: [how many claims verified?]\n\n"
+                "**5. Open Questions** (3-5 things that remain genuinely uncertain):\n"
+                "For each: what specific evidence would resolve the uncertainty?"
             ),
         },
         {
             "title": "Conclusions & Assessment",
             "icon": "🎯",
             "system": (
-                "You are a strategic advisor. Based on all research, provide forward-looking analysis, "
-                "scenario planning, and actionable recommendations. Think about implications, "
-                "second-order effects, and what the reader should actually DO with this information."
+                "You are a strategic advisor delivering forward-looking analysis to a senior decision-maker. "
+                "Based on all research, provide scenario planning, actionable recommendations, and "
+                "an assessment of what comes next. Think about implications, second-order effects, "
+                "and what the reader should actually DO with this information. "
+                "Be specific and concrete — no vague advice. Each recommendation must be actionable."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "Provide strategic analysis and recommendations:\n\n"
-                "**1. Scenario Analysis:**\n"
-                "Based on all evidence, what are the likely outcomes?\n"
-                "- 🟢 **Best Case**: What happens if things go well? (probability estimate)\n"
-                "- 🟡 **Base Case**: Most likely outcome (probability estimate)\n"
-                "- 🔴 **Worst Case**: What could go wrong? (probability estimate)\n\n"
-                "**2. Actionable Recommendations:**\n"
-                "What should the reader DO with this information? Specific, concrete actions.\n"
-                "Number each recommendation and explain the rationale.\n\n"
-                "**3. What to Watch:**\n"
-                "Key indicators, dates, or events to monitor going forward.\n"
-                "<<<TABLE caption=\"What to Watch\">>>\n"
-                "Indicator ;; Why It Matters ;; Timeline\n"
-                "<<<END_TABLE>>>\n\n"
-                "**4. Second-Order Effects:**\n"
-                "What are the ripple effects and downstream implications that aren't obvious?"
+                "Provide strategic analysis, scenarios, and concrete recommendations.\n\n"
+                "**1. Bottom Line Assessment:**\n"
+                "In 3-4 sentences, what is the definitive answer/conclusion from all this research?\n\n"
+                "**2. Scenario Analysis:**\n"
+                "| Scenario | Description | Probability | Key Drivers | Indicators |\n"
+                "|---|---|---|---|---|\n"
+                "| 🟢 Best Case | [specific outcome] | [X]% | [what causes this] | [early signs] |\n"
+                "| 🟡 Base Case | [most likely outcome] | [X]% | [why likely] | [current trajectory] |\n"
+                "| 🔴 Worst Case | [specific negative outcome] | [X]% | [what causes this] | [warning signs] |\n\n"
+                "**3. Actionable Recommendations** (5-8, numbered, specific):\n"
+                "For each recommendation:\n"
+                "1. **[Action verb] [Specific action]**\n"
+                "   - *Rationale*: Why this matters (cite evidence)\n"
+                "   - *Priority*: High/Medium/Low\n"
+                "   - *Timeline*: When to act\n"
+                "   - *Expected outcome*: What this achieves\n\n"
+                "**4. What to Watch — Monitor Board:**\n"
+                "| # | Indicator | Why It Matters | Trigger Level | Check Frequency |\n"
+                "|---|---|---|---|---|\n"
+                "| 1 | [specific metric/event] | [significance] | [what threshold matters] | Daily/Weekly/Monthly |\n\n"
+                "**5. Second-Order Effects:**\n"
+                "Map 3-5 ripple effects that aren't immediately obvious:\n"
+                "- [Primary event] → [Direct impact] → [Second-order effect] → [Why this matters]"
             ),
         },
         {
             "title": "Final Intelligence Brief",
             "icon": "📋",
             "system": (
-                "You are a senior intelligence briefing writer. Produce the final, publication-quality "
-                "intelligence brief. It must be comprehensive yet scannable, authoritative yet accessible, "
-                "and immediately actionable. This is the document that matters — make it exceptional. "
-                "Include ALL sources with clickable URLs. Use clear hierarchy, bold key points, and "
-                "<<<TABLE>>> format for tabular data. NEVER use standard markdown pipe tables."
+                "You are a senior intelligence briefing writer at a world-class consultancy. "
+                "Produce the final, publication-quality intelligence brief. It must be comprehensive "
+                "yet scannable, authoritative yet accessible, and immediately actionable. "
+                "This brief will be the PRIMARY REFERENCE DOCUMENT for the reader. "
+                "Include ALL sources with clickable URLs. Use clear hierarchy, bold key points, "
+                "and markdown tables for tabular data. Write with precision — every sentence must earn its place."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "You have completed 7 research steps: Intelligence Gathering, Deep Source Analysis, "
-                "Fact Verification, Perspectives & Context, Evidence & Data Analysis, Synthesis, and Conclusions.\n\n"
-                "Now produce the DEFINITIVE intelligence brief:\n\n"
+                "You have completed 7 research steps. Now produce the DEFINITIVE intelligence brief.\n"
+                "This must be a COMPLETE, standalone document — the reader should not need to look elsewhere.\n\n"
                 "## 📋 Intelligence Brief\n"
                 f"**Subject:** {query}\n\n"
                 "---\n\n"
-                "### ⚡ TL;DR\n"
-                "3-4 sentences. The absolute most important things. Bold the key facts.\n\n"
-                "### 🔍 Executive Summary\n"
-                "Detailed 6-8 sentence overview of all major findings, data, and conclusions.\n\n"
-                "### 📊 Key Findings\n"
-                "Detailed coverage organized by theme. Each section needs:\n"
-                "- Clear subheading\n"
-                "- Key facts with source citations as [Title](URL)\n"
-                "- Data tables (using <<<TABLE>>> format) and statistics where available\n"
-                "- Expert perspectives with direct quotes\n"
-                "- Confidence indicator (🟢/🟡/🔴)\n\n"
-                "### 🎯 Analysis & Implications\n"
-                "Expert interpretation of what findings mean:\n"
-                "- Trends and patterns identified\n"
-                "- Risks and opportunities\n"
-                "- Scenario analysis (best/base/worst case)\n"
-                "- Second-order effects\n\n"
-                "### ✅ Actionable Takeaways\n"
-                "Numbered list of 5-8 specific, concrete actions or conclusions.\n\n"
-                "### 📡 What to Watch\n"
-                "Key indicators, upcoming events, and things to monitor.\n\n"
-                "### 📚 Sources & References\n"
-                "Complete list of ALL sources used across all research steps:\n"
-                "- [Source Title](URL) — Brief description of what it contributed\n"
-                "List ALL URLs discovered during research.\n\n"
-                "---\n"
-                "Make this the kind of intelligence brief that would be presented to a CEO, "
-                "policymaker, or board of directors. Every sentence must earn its place."
+                "### TL;DR\n"
+                "3-4 sentences maximum. The absolute most critical information. **Bold** the key facts and numbers.\n\n"
+                "### Executive Summary\n"
+                "6-8 sentences covering: the question, key findings, data highlights, expert consensus, "
+                "areas of disagreement, and bottom-line assessment.\n\n"
+                "### Key Findings\n"
+                "Organize by theme (3-5 major themes). For each theme:\n"
+                "- **Theme heading**: Clear subheading\n"
+                "- Key facts with source citations: [Title](URL)\n"
+                "- Data tables (markdown) where numbers tell the story\n"
+                "- Expert quotes with attribution\n"
+                "- Confidence tag: 🟢 High / 🟡 Medium / 🔴 Low\n\n"
+                "### Analysis & Implications\n"
+                "- What the findings MEAN (not just what they are)\n"
+                "- Key trends and where they're heading\n"
+                "- Risks and opportunities with likelihood/impact\n"
+                "- Scenario analysis (best/base/worst with probabilities)\n\n"
+                "### Actionable Takeaways\n"
+                "Numbered list of 5-8 specific, concrete actions/conclusions.\n"
+                "Each must be directly supported by evidence from the research.\n\n"
+                "### What to Watch\n"
+                "Table of key indicators, events, and monitoring recommendations.\n\n"
+                "### Sources & References\n"
+                "Complete list of ALL sources used across ALL steps:\n"
+                "- [Source Title](URL) — one-line summary of what it contributed\n\n"
+                "List every single URL discovered. Be exhaustive."
             ),
         },
         {
             "title": "Comprehensive Report",
             "icon": "📝",
             "system": (
-                "You are an expert report writer producing the final comprehensive document. "
+                "You are an expert report writer producing the definitive comprehensive document. "
                 "Combine ALL findings from the previous 8 research steps into one unified, "
-                "well-structured, publication-ready report. Use rich markdown formatting: "
-                "headers, bold, <<<TABLE>>> format for tabular data, bullet lists, blockquotes for key quotes. "
-                "NEVER use standard markdown pipe tables — always use <<<TABLE>>>...<<<END_TABLE>>> format. "
+                "well-structured, publication-ready report. Use rich markdown formatting. "
                 "Every claim must be cited with [Source Title](URL). "
-                "Be thorough — this is the definitive document the reader will reference."
+                "This is the LONGEST output — be thorough and detailed. Cover everything."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
-                "You have completed 8 research steps. Now write the COMPREHENSIVE FINAL REPORT.\n\n"
-                "This report must cover EVERYTHING discovered across all steps in a single, "
-                "flowing document. Structure it as follows:\n\n"
-                "## ?? Comprehensive Research Report\n"
-                f"**Topic:** {query}\n\n"
+                "Write the COMPREHENSIVE FINAL REPORT. This is the complete, detailed reference document.\n"
+                "Cover EVERYTHING from all 8 previous steps. Be thorough — aim for maximum detail.\n\n"
+                f"## Comprehensive Research Report: {query}\n\n"
                 "---\n\n"
                 "### Executive Overview\n"
-                "A thorough 8-12 sentence overview covering all major findings.\n\n"
+                "8-12 sentences covering the full scope of research.\n\n"
                 "### Detailed Findings\n"
-                "Cover every major topic area discovered during research. For each:\n"
-                "- Clear subheading\n"
-                "- Detailed explanation with specific facts, dates, numbers\n"
-                "- Direct quotes from sources with attribution\n"
-                "- Data in <<<TABLE>>> format where appropriate\n"
-                "- Confidence indicators (??/??/??)\n\n"
+                "Organize into 4-6 major sections. For each:\n"
+                "- Descriptive subheading\n"
+                "- Detailed explanation with specific facts, dates, exact numbers\n"
+                "- Direct quotes from sources: \"quote\" — [Source](URL)\n"
+                "- Data tables where applicable\n"
+                "- Expert perspectives from Step 4\n"
+                "- Verification status from Step 3: 🟢/🟡/🔴\n\n"
+                "### Data & Evidence\n"
+                "Include the key data tables from Step 5.\n"
+                "Add comparative analyses and trend data.\n\n"
                 "### Analysis & Implications\n"
-                "- What do the findings mean?\n"
-                "- How do different pieces connect?\n"
-                "- What are the key patterns and trends?\n"
-                "- Risk and opportunity assessment\n\n"
+                "- Synthesis insights from Step 6\n"
+                "- Non-obvious connections identified\n"
+                "- Risk/opportunity assessment\n\n"
                 "### Conclusions & Recommendations\n"
-                "- Numbered list of actionable conclusions\n"
-                "- Specific recommendations based on evidence\n"
-                "- Scenario analysis (best/base/worst case)\n\n"
-                "### Complete Source List\n"
-                "List ALL sources used with clickable links:\n"
-                "- [Source Title](URL) — what it contributed\n\n"
+                "- Bottom-line assessment from Step 7\n"
+                "- Numbered actionable recommendations with evidence basis\n"
+                "- Scenario analysis with probabilities\n"
+                "- What to monitor going forward\n\n"
+                "### Complete Source Index\n"
+                "List ALL sources with clickable links and brief descriptions.\n\n"
                 "Make this report comprehensive, authoritative, and immediately useful."
             ),
         },
@@ -7815,24 +7986,18 @@ def research_agent():
         return jsonify({"error": "No research query provided"}), 400
 
     settings = load_settings()
-    # Prefer models that support url_context
-    selected = None
-    for mid in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"):
-        mi = MODELS.get(mid, {})
-        if not mi:
-            continue
-        ak, _ = resolve_provider_key(settings, mi.get("provider", "google"))
-        if ak:
-            selected = mid
-            break
-    if not selected:
-        selected = normalize_selected_model(settings)
+    selected = normalize_selected_model(settings)
 
-    print(f"  [research] Selected model: {selected}")
-    resolved = resolve_chat_model({"model": selected}, settings)
+    # Force the INTERNAL deep-research steps to Gemini 3.1 Pro.
+    # The user's selected model is still used for normal chat before/after research.
+    forced_step_model = "gemini-3.1-pro-preview"
+    print(f"  [research] User selected model (intro/outro): {selected}")
+    print(f"  [research] Forced step model: {forced_step_model}")
+
+    resolved = resolve_chat_model({"model": forced_step_model}, settings)
     if resolved.get("error"):
-        print(f"  [research] Model resolution error: {resolved['error']}")
-        return jsonify({"error": resolved["error"]}), 403
+        print(f"  [research] Forced model resolution error: {resolved['error']}")
+        return jsonify({"error": "Deep Research requires Gemini 3.1 Pro access on this server."}), 403
 
     provider = resolved.get("provider")
     api_key = resolved.get("api_key")
@@ -8051,32 +8216,30 @@ def research_agent():
                         # Track for repetition detection
                         _repetition_detected = False
                         def _check_repetition(pieces):
-                            """Detect degenerate repeating patterns (e.g. endless --- or ===).
-                            Must NOT trigger on markdown tables (which use | and - heavily)."""
-                            text = "".join(pieces[-20:]) if len(pieces) > 20 else "".join(pieces)
-                            if len(text) < 400:
+                            """Detect streaming glitches like endless separator runs with tiny noise.
+                            Allows up to 5 non-separator chars between long runs (e.g. random '/')."""
+                            text = "".join(pieces[-30:]) if len(pieces) > 30 else "".join(pieces)
+                            if len(text) < 500:
                                 return False
-                            tail = text[-400:] if len(text) >= 400 else text
-                            # If tail contains pipe characters, it's likely a table — skip detection
-                            if '|' in tail:
+                            tail = text[-1500:]
+
+                            # Legit markdown tables should not be treated as repetition glitches.
+                            if re.search(r'(?m)^\|.*\|\s*\n\|[\s:\-]+\|\s*$', tail):
                                 return False
-                            # Check for repeating short patterns (----, ====, etc.)
-                            for pat_len in (1, 2, 3, 4, 5, 6, 8, 10):
-                                if len(tail) < pat_len * 20:
-                                    continue
-                                seg = tail[-pat_len:]
-                                count = 0
-                                for ci in range(len(tail) - pat_len, -1, -pat_len):
-                                    if tail[ci:ci+pat_len] == seg:
-                                        count += 1
-                                    else:
-                                        break
-                                if count >= 20:
-                                    return True
-                            # Check if the last 300 chars are just separator-like characters (no pipes)
-                            last300 = tail[-300:]
-                            non_sep = last300.replace('-', '').replace('=', '').replace(' ', '').replace('\n', '').replace('*', '').replace('_', '').replace('~', '').strip()
-                            if len(non_sep) < 5:
+
+                            def _noisy_separator_run(buf, ch):
+                                # Repeated long runs like -----/-----/----- where noise chunks are <=5 chars.
+                                rx = rf'(?:{re.escape(ch)}{{25,}}(?:[^{re.escape(ch)}\n]{{1,5}}{re.escape(ch)}{{25,}}){{4,}})'
+                                return re.search(rx, buf) is not None
+
+                            if _noisy_separator_run(tail, '-') or _noisy_separator_run(tail, '='):
+                                return True
+
+                            # Fallback: if almost everything is separator characters, it's likely glitched.
+                            last600 = tail[-600:]
+                            sep_count = sum(1 for c in last600 if c in '-=_*/~')
+                            non_sep = re.sub(r'[-=_*/~\s\n]', '', last600)
+                            if sep_count >= 280 and len(non_sep) <= 5:
                                 return True
                             return False
 
@@ -8152,7 +8315,7 @@ def research_agent():
                                         if _check_repetition(step_pieces):
                                             _repetition_detected = True
                                 if _repetition_detected:
-                                    print(f"  [research] Step {i+1}: repetition detected, truncating")
+                                    print(f"  [research] Step {i+1}: repetition detected, restarting")
                                     break
 
                             _turn_text = "".join(_turn_pieces).strip()

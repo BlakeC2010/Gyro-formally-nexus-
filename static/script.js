@@ -10,6 +10,8 @@ let googleInitDone=false,thinkingLevel='off',guestAuthMode='register';
 function renderMathInElementSafe(root){
   if(!root||typeof renderMathInElement!=='function')return;
   try{
+    // Skip KaTeX inside code execution blocks to keep output raw
+    root.querySelectorAll('.code-run-block').forEach(el=>{el.dataset.katexSkip='1';});
     renderMathInElement(root,{
       delimiters:[
         {left:'$$',right:'$$',display:true},
@@ -17,7 +19,8 @@ function renderMathInElementSafe(root){
         {left:'\\(',right:'\\)',display:false},
         {left:'\\[',right:'\\]',display:true}
       ],
-      throwOnError:false
+      throwOnError:false,
+      ignoredTags:['script','noscript','style','textarea','pre','code','annotation','annotation-xml']
     });
   }catch(e){
     console.debug('KaTeX render skipped:',e?.message||e);
@@ -182,11 +185,8 @@ function stopStreaming(){
 
 function editMsg(btn){
   const msgEl=btn.closest('.msg');
-  if(msgEl.querySelector('.msg-edit-area'))return; // already editing
+  if(window._activeEdit)return; // already editing
   const originalText=msgEl.dataset.text||'';
-
-  // Save original innerHTML so we can restore on cancel
-  const originalHTML=msgEl.innerHTML;
 
   // Extract existing file data from the message's image previews so we can preserve them
   const _editFiles=[];
@@ -204,8 +204,6 @@ function editMsg(btn){
     });
   }
 
-  // Find the text content area — could be a .upf-full pre, or direct text node, etc.
-  // We'll overlay an edit UI on the message itself
   const area=document.getElementById('chatArea');
   const allMsgs=[...area.querySelectorAll('.msg')];
 
@@ -216,136 +214,64 @@ function editMsg(btn){
     if(!allMsgs[i].classList.contains('thinking'))backendIndex++;
   }
 
-  // Build file preview chips for existing files
-  const _editFileChips=()=>_editFiles.map((f,i)=>{
-    const t=f.mime?.startsWith('image/')&&f.data?`<img src="data:${f.mime};base64,${f.data}">`:'📄';
-    return `<div class="file-chip">${t} ${esc(f.name)} <button class="fc-x" onclick="window._editRemoveFile(${i})">✕</button></div>`;
-  }).join('');
+  // Stop any running stream first
+  if(curChat&&isChatRunning(curChat)){
+    stopStreaming();
+  }
 
-  // Render the edit UI with file preview, file/tool buttons, and textarea
-  const filesHTML=`<div class="file-preview" id="_editFilePreview">${_editFileChips()}</div>`;
-
-  msgEl.innerHTML=filesHTML+
-    `<div class="msg-edit-area">`+
-    `<textarea class="msg-edit-input" id="_msgEditInput">${esc(originalText)}</textarea>`+
-    `<div class="msg-edit-toolbar">`+
-    `<button class="msg-edit-tool-btn" onclick="document.getElementById('_editFileInput').click()" title="Attach file">📎</button>`+
-    `<input type="file" id="_editFileInput" multiple style="display:none" onchange="window._editHandleFiles(this)">`+
-    `<button class="msg-edit-tool-btn" onclick="window._editToggleToolMenu()" title="Tools">🔧</button>`+
-    `<div class="msg-edit-tool-menu" id="_editToolMenu" style="display:none">`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('canvas');window._editCloseToolMenu()">?? Canvas</div>`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('search');window._editCloseToolMenu()">🔍 Google Search</div>`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('research');window._editCloseToolMenu()">🔬 Research Agent</div>`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('code');window._editCloseToolMenu()">💻 Code Execution</div>`+
-    `<div class="msg-edit-tool-opt" onclick="activateTool('imagegen');window._editCloseToolMenu()">🎨 Image Generation</div>`+
-    `</div>`+
-    `</div>`+
-    `<div class="msg-edit-actions">`+
-    `<button class="msg-edit-save" id="_msgEditSave">Send Edit</button>`+
-    `<button class="msg-edit-cancel" id="_msgEditCancel">Cancel</button>`+
-    `</div></div>`;
-
-  // Edit file management functions
-  window._editRemoveFile=(idx)=>{
-    _editFiles.splice(idx,1);
-    const el=document.getElementById('_editFilePreview');
-    if(el)el.innerHTML=_editFileChips();
-  };
-  window._editHandleFiles=(input)=>{
-    for(const origFile of input.files){
-      const placeholderIdx=_editFiles.length;
-      _editFiles.push({name:origFile.name,mime:origFile.type||'application/octet-stream',data:'',text:'',doc_data:'',_loading:true});
-      const el=document.getElementById('_editFilePreview');
-      if(el)el.innerHTML=_editFileChips();
-      _convertImageToPng(origFile).then(file=>{
-        const form=new FormData();form.append('file',file);
-        fetch('/api/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
-          const ph=_editFiles.find(f=>f._loading&&f.name===origFile.name);
-          if(ph){ph.name=d.name;ph.mime=d.mime;ph.data=d.image_data||'';ph.text=d.text||'';ph.doc_data=d.doc_data||'';delete ph._loading;}
-          const el2=document.getElementById('_editFilePreview');
-          if(el2)el2.innerHTML=_editFileChips();
-        }).catch(()=>{
-          const pi=_editFiles.findIndex(f=>f._loading&&f.name===origFile.name);
-          if(pi>=0)_editFiles.splice(pi,1);
-          const el2=document.getElementById('_editFilePreview');
-          if(el2)el2.innerHTML=_editFileChips();
-        });
-      });
-    }
-    input.value='';
-  };
-  window._editToggleToolMenu=()=>{
-    const m=document.getElementById('_editToolMenu');
-    if(m)m.style.display=m.style.display==='none'?'flex':'none';
-  };
-  window._editCloseToolMenu=()=>{
-    const m=document.getElementById('_editToolMenu');
-    if(m)m.style.display='none';
+  // Store active edit state
+  window._activeEdit={
+    msgEl,
+    backendIndex,
+    files:_editFiles
   };
 
-  const editInput=document.getElementById('_msgEditInput');
-  editInput.focus();
-  // Auto-resize textarea
-  editInput.style.height='auto';
-  editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
-  editInput.addEventListener('input',()=>{
-    editInput.style.height='auto';
-    editInput.style.height=Math.min(editInput.scrollHeight,300)+'px';
-  });
+  // Add files from original message to pendingFiles
+  const readyFiles=_editFiles.filter(f=>!f._loading);
+  if(readyFiles.length){
+    pendingFiles.push(...readyFiles);
+    renderPF();
+  }
 
-  // Cancel — restore original message
-  document.getElementById('_msgEditCancel').addEventListener('click',()=>{
-    msgEl.innerHTML=originalHTML;
-    // Clean up window functions
-    delete window._editRemoveFile;delete window._editHandleFiles;
-    delete window._editToggleToolMenu;delete window._editCloseToolMenu;
-  });
+  // Populate the main prompt bar with the message text
+  const input=document.getElementById('msgInput');
+  input.value=originalText;
+  autoResize(input);
+  input.focus();
 
-  // Save — send the edited message with preserved + new files
-  document.getElementById('_msgEditSave').addEventListener('click',()=>{
-    const newText=editInput.value.trim();
-    if(!newText&&!_editFiles.length)return;
+  // Show the editing banner above the input
+  _showEditBanner();
+}
 
-    // Stop any running stream first so the edit send isn't blocked
-    if(curChat&&isChatRunning(curChat)){
-      stopStreaming();
+function _showEditBanner(){
+  let banner=document.getElementById('editBanner');
+  if(banner)return;
+  banner=document.createElement('div');
+  banner.id='editBanner';
+  banner.className='edit-banner';
+  banner.innerHTML='<span class="edit-banner-text">✎ Editing message</span><button class="edit-banner-cancel" onclick="_cancelEdit()">Cancel</button>';
+  const inputArea=document.querySelector('.input-area');
+  inputArea.insertBefore(banner,inputArea.firstChild);
+}
+
+function _cancelEdit(){
+  if(!window._activeEdit)return;
+  // Clear the input
+  const input=document.getElementById('msgInput');
+  input.value='';
+  autoResize(input);
+  // Remove any files that were pushed from the edit
+  if(window._activeEdit.files?.length){
+    for(const ef of window._activeEdit.files){
+      const idx=pendingFiles.findIndex(f=>f.name===ef.name&&f.mime===ef.mime);
+      if(idx>=0)pendingFiles.splice(idx,1);
     }
-
-    // Re-attach files that came from the original message + any newly added files
-    const readyFiles=_editFiles.filter(f=>!f._loading);
-    if(readyFiles.length){
-      pendingFiles.push(...readyFiles);
-      renderPF();
-    }
-
-    // Remove this message and all subsequent messages from DOM
-    let toRemove=[];
-    let found=false;
-    for(const el of allMsgs){
-      if(el===msgEl)found=true;
-      if(found)toRemove.push(el);
-    }
-    // Also remove any AI response divs that came after allMsgs snapshot
-    const currentMsgs=[...document.querySelectorAll('#chatArea .msg')];
-    const msgIdx=currentMsgs.indexOf(msgEl);
-    if(msgIdx>=0){
-      for(let i=msgIdx;i<currentMsgs.length;i++){
-        if(!toRemove.includes(currentMsgs[i]))toRemove.push(currentMsgs[i]);
-      }
-    }
-    toRemove.forEach(el=>el.remove());
-
-    // Set truncation index and send
-    window._editTruncateAt=backendIndex;
-    const input=document.getElementById('msgInput');
-    input.value=newText;
-    autoResize(input);
-    // Clean up window functions
-    delete window._editRemoveFile;delete window._editHandleFiles;
-    delete window._editToggleToolMenu;delete window._editCloseToolMenu;
-    // Delay to let abort settle before re-sending
-    setTimeout(()=>sendMessage(),250);
-  });
+    renderPF();
+  }
+  // Remove banner
+  const banner=document.getElementById('editBanner');
+  if(banner)banner.remove();
+  delete window._activeEdit;
 }
 
 function retryMsg(btn){
@@ -1126,7 +1052,7 @@ function getLocalTimeGreeting(){
       `Morning focus, steady pace${namePart}.`,
       `Fresh morning energy${namePart}.`,
       `New day, new momentum${namePart}.`,
-      `Rise and build${namePart}. ??`,
+      `Rise and build${namePart}.`,
       `Morning brain is the best brain${namePart}.`,
       `Let's make today count${namePart}.`,
       `Good morning${namePart}. What's the plan?`,
@@ -2014,6 +1940,8 @@ async function _loadSmartWidgets(){
 async function openChat(id){
   if(curChat===id) return;
   _activeFolderView=null;
+  // Cancel any active edit when switching chats
+  if(window._activeEdit){_cancelEdit();}
   curChat=id;
   unreadChats.delete(id);
   // Auto-close canvas when switching chats
@@ -2074,7 +2002,7 @@ async function openChat(id){
     const genDiv=document.createElement('div');
     genDiv.className='msg kairo';
     genDiv.id='bg-gen-indicator';
-    genDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
+    genDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
     area.appendChild(genDiv);
     area.scrollTop=area.scrollHeight;
   }
@@ -2532,7 +2460,7 @@ async function showResearchPlan(query, contentEl, area, chatId){
 }
 
 async function runResearchAgent(query, contentEl, area, chatId){
-  const stepIcons=['🔍','📖','✅','👥','📊','🧠','🎯','📋','📝'];
+  const stepIcons=['1','2','3','4','5','6','7','8','9'];
   const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
   const totalSteps=9;
   let currentStep=0;
@@ -2569,7 +2497,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
   contentEl.innerHTML=`
     <div class="ra-container">
-      <div class="ra-badge" id="_raBadge">🔬 Research Agent — In Progress</div>
+      <div class="ra-badge" id="_raBadge">Research Agent — In Progress</div>
       <div class="ra-progress">
         <div class="ra-header">
           <span class="ra-title">${esc(query)}</span>
@@ -2581,20 +2509,20 @@ async function runResearchAgent(query, contentEl, area, chatId){
           ${stepsHtml}
         </div>
         <div class="ra-stats-row">
-          <span>📚 <strong id="_raSourceCount">0</strong> sources</span>
-          <span>💡 <strong id="_raFindStat">0</strong> findings</span>
-          <span>?? <strong id="_raElapsed">0s</strong></span>
+          <span><strong id="_raSourceCount">0</strong> sources</span>
+          <span><strong id="_raFindStat">0</strong> findings</span>
+          <span><strong id="_raElapsed">0s</strong></span>
         </div>
         <div class="ra-activity" id="_raActivity"><span class="ra-pulse"></span><span id="_raMsg">Initializing research agent...</span></div>
         <div class="ra-card-tabs" id="_raCardTabs" style="display:none">
-          <button class="ra-card-tab ra-card-tab-active" data-tab="findings" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='';p.querySelector('#_raSrcPanel').style.display='none'}})(this)">?? Findings <span class="ra-tab-count" id="_raFindCount">0</span></button>
-          <button class="ra-card-tab" data-tab="sources" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display=''}})(this)">?? Sources <span class="ra-tab-count" id="_raSrcCount2">0</span></button>
+          <button class="ra-card-tab ra-card-tab-active" data-tab="findings" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='';p.querySelector('#_raSrcPanel').style.display='none'}})(this)">Findings <span class="ra-tab-count" id="_raFindCount">0</span></button>
+          <button class="ra-card-tab" data-tab="sources" onclick="(function(b){var w=b.classList.contains('ra-card-tab-active');b.parentElement.querySelectorAll('.ra-card-tab').forEach(function(t){t.classList.remove('ra-card-tab-active')});var p=b.closest('.ra-progress');if(w){p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display='none'}else{b.classList.add('ra-card-tab-active');p.querySelector('#_raFindPanel').style.display='none';p.querySelector('#_raSrcPanel').style.display=''}})(this)">Sources <span class="ra-tab-count" id="_raSrcCount2">0</span></button>
         </div>
         <div class="ra-tab-panel" id="_raFindPanel" style="display:none"><div class="ra-findings-list" id="_raFindList"></div></div>
         <div class="ra-tab-panel" id="_raSrcPanel" style="display:none"><div class="ra-sources-list" id="_raSrcList"></div></div>
       </div>
       <div class="ra-output" id="_raOut"></div>
-      <div class="ra-toast-container" id="_raToasts"></div>
+      <div class="ra-toast-container" id="_raToasts" style="display:none"></div>
     </div>`;
   _raAutoScroll();
 
@@ -2614,27 +2542,11 @@ async function runResearchAgent(query, contentEl, area, chatId){
     if(el) el.textContent=_fmtElapsed(Date.now()-startTime);
   },1000);
 
-  // Toast notification system
-  const showToast=(msg,icon='🔔')=>{
-    const container=document.getElementById('_raToasts');
-    if(!container)return;
-    const toast=document.createElement('div');
-    toast.className='ra-toast ra-toast-in';
-    toast.innerHTML=`<span class="ra-toast-icon">${icon}</span><span class="ra-toast-msg">${esc(msg)}</span>`;
-    container.appendChild(toast);
-    setTimeout(()=>{toast.classList.remove('ra-toast-in');toast.classList.add('ra-toast-out')},3000);
-    setTimeout(()=>toast.remove(),3600);
-  };
+  // Toast notification system (disabled)
+  const showToast=(msg,icon='')=>{};
 
-  // Milestone tracker
-  let lastSourceMilestone=0;
-  const checkMilestones=()=>{
-    const sc=discoveredSources.length;
-    if(sc>=5&&lastSourceMilestone<5){lastSourceMilestone=5;showToast('5 sources discovered','📚');}
-    else if(sc>=10&&lastSourceMilestone<10){lastSourceMilestone=10;showToast('10 sources analyzed','🔥');}
-    else if(sc>=20&&lastSourceMilestone<20){lastSourceMilestone=20;showToast('20+ sources compiled','⚡');}
-    else if(sc>=30&&lastSourceMilestone<30){lastSourceMilestone=30;showToast('30+ deep source network','🌐');}
-  };
+  // Milestone tracker (disabled)
+  const checkMilestones=()=>{};
 
   window.raScrollToStep=function(stepNum){
     const section=document.getElementById('_raS'+stepNum);
@@ -2793,7 +2705,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
               section=document.createElement('div');
               section.className='ra-section ra-slide-in';
               section.id='_raS'+ev.step;
-              section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">?</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">Thinking...</span><span class="ra-thinking-chevron">?</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
+              section.innerHTML=`<div class="ra-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('ra-collapsed');var n=parseInt(sec.id.replace('_raS',''));if(window._raManualToggles)window._raManualToggles.add(n)})(this)"><span class="ra-section-num">${ev.step}</span><span class="ra-section-title">${esc(ev.title)}</span><span class="ra-section-timer" id="_raT${ev.step}"></span><span class="ra-section-status ra-running">researching...</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-thinking-block ra-thinking-open" id="_raThink${ev.step}" style="display:none"><div class="ra-thinking-toggle" onclick="this.parentElement.classList.toggle('ra-thinking-open')"><span class="ra-thinking-icon">💭</span><span class="ra-thinking-label">${esc(ev.title)}...</span><span class="ra-thinking-chevron">▾</span></div><div class="ra-thinking-content" id="_raThinkC${ev.step}"></div></div><div class="ra-step-content" id="_raC${ev.step}"></div></div>`;
               if(outEl) outEl.appendChild(section);
               showToast(`Step ${ev.step}: ${ev.title}`,icon);
             }
@@ -2819,6 +2731,9 @@ async function runResearchAgent(query, contentEl, area, chatId){
               const lb=thEl.querySelector('.ra-thinking-label');
               if(lb) lb.textContent='View thinking';
             }
+            // Auto-collapse completed step
+            const completedSection=document.getElementById('_raS'+ev.step);
+            if(completedSection&&!manualToggles.has(ev.step)) completedSection.classList.add('ra-collapsed');
             _raAutoScroll();
           }else if(ev.status==='failed'){
             if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
@@ -2830,8 +2745,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const timerEl=document.getElementById('_raT'+ev.step);
             if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
             const ce=document.getElementById('_raC'+ev.step);
-            if(ce&&ev.error) ce.innerHTML=`<div class="ra-step-error">?? Step failed: ${esc(ev.error.slice(0,150))}</div>`;
-            updateProgress(ev.step, '?? '+ev.title+' failed — continuing...');
+            if(ce&&ev.error) ce.innerHTML=`<div class="ra-step-error">Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, ev.title+' failed — continuing...');
           }
         }else if(ev.type==='agent_thinking'){
           stepThinking+=(ev.text||'');
@@ -2872,7 +2787,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const elapsedEl=document.getElementById('_raElapsed');
           if(elapsedEl) elapsedEl.textContent=totalTimeFmt;
           const actEl=document.getElementById('_raActivity');
-          if(actEl) actEl.innerHTML=`<span class="ra-complete-icon">✅</span> Research complete in <strong>${totalTimeFmt}</strong> — ${discoveredSources.length} sources, ${discoveredFindings.length} findings`;
+          if(actEl) actEl.innerHTML=`Research complete in <strong>${totalTimeFmt}</strong> — ${discoveredSources.length} sources, ${discoveredFindings.length} findings`;
 
           // Collapse all sections
           if(outEl) outEl.querySelectorAll('.ra-section').forEach(s=>s.classList.add('ra-collapsed'));
@@ -2896,7 +2811,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           if(tldr){
             const summaryEl=document.createElement('div');
             summaryEl.className='ra-summary ra-slide-in';
-            summaryEl.innerHTML=`<div class="ra-summary-hd">? Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div>`;
+            summaryEl.innerHTML=`<div class="ra-summary-hd">Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div>`;
             if(outEl) outEl.insertBefore(summaryEl,outEl.querySelector('.ra-section'));
           }
 
@@ -2925,21 +2840,13 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
           const dashboard=document.createElement('div');
           dashboard.className='ra-dashboard ra-slide-in';
-          let dashHtml=`<div class="ra-complete-banner"><div class="ra-complete-banner-title">?? Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${totalSteps-failedSteps} steps completed · ${discoveredSources.length} sources · ${discoveredFindings.length} findings · ${totalTimeFmt}</div></div>`;
+          let dashHtml=`<div class="ra-complete-banner"><div class="ra-complete-banner-title">Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${totalSteps-failedSteps} steps completed · ${discoveredSources.length} sources · ${discoveredFindings.length} findings · ${totalTimeFmt}</div></div>`;
           dashHtml+=`<div class="ra-dash-stats">
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalSteps-failedSteps}/${totalSteps}</div><div class="ra-dash-stat-lbl">Steps</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredSources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${discoveredFindings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div>
             <div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalTimeFmt}</div><div class="ra-dash-stat-lbl">Time</div></div>
-            <div class="ra-dash-stat"><div class="ra-dash-stat-val" style="color:${confidenceColor}">${confidenceLabel}</div><div class="ra-dash-stat-lbl">Confidence</div></div>
           </div>`;
-          // Confidence gauge section
-          dashHtml+=`<div class="ra-quality-section"><div class="ra-quality-hd">?? Research Confidence</div><div class="ra-quality-body"><div class="ra-quality-gauge"><svg viewBox="0 0 120 120" width="110" height="110"><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="var(--border)" stroke-width="${_qstroke}" stroke-dasharray="${_qarcLen} ${_qcirc-_qarcLen}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round"/><circle cx="${_qcx}" cy="${_qcy}" r="${_qr}" fill="none" stroke="${confidenceColor}" stroke-width="${_qstroke}" stroke-dasharray="${_qdashArr}" stroke-dashoffset="${-_qcirc*0.125}" stroke-linecap="round" class="ra-quality-gauge-fill"/><text x="${_qcx}" y="${_qcy-4}" text-anchor="middle" fill="${confidenceColor}" font-size="24" font-weight="800" font-family="var(--mono)">${confidenceScore}</text><text x="${_qcx}" y="${_qcy+12}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-weight="600">/ 100</text></svg><div style="text-align:center;margin-top:4px;font-size:11px;font-weight:700;color:${confidenceColor}">${confidenceLabel}</div></div><div class="ra-quality-breakdown">`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Sources</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_srcPct*100)}%;background:#8b5cf6"></div></div><span class="ra-quality-item-val">${discoveredSources.length}</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">? Coverage</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_stpPct*100)}%;background:#22c55e"></div></div><span class="ra-quality-item-val">${totalSteps-failedSteps} steps</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Depth</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_wrdPct*100)}%;background:#3b82f6"></div></div><span class="ra-quality-item-val">${totalWords>=1000?((totalWords/1000).toFixed(1)+'k'):totalWords} words</span></div>`;
-          dashHtml+=`<div class="ra-quality-item"><span class="ra-quality-item-label">?? Findings</span><div class="ra-quality-item-track"><div class="ra-quality-item-fill" style="width:${Math.round(_fndPct*100)}%;background:#f59e0b"></div></div><span class="ra-quality-item-val">${discoveredFindings.length}</span></div>`;
-          dashHtml+=`</div></div></div>`;
           // Source diversity
           if(topDomains.length>0){
             dashHtml+=`<div class="ra-diversity-section"><div class="ra-diversity-hd">🌐 Source Diversity</div><div class="ra-diversity-grid">`;
@@ -2951,7 +2858,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
           // Step timing chart
           if(durations.length){
-            dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">?? Step Performance</div><div class="ra-timing-chart">`;
+            dashHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">Step Performance</div><div class="ra-timing-chart">`;
             durations.forEach(d=>{
               const pct=Math.round((d.elapsed/maxDur)*100);
               const sIcon=stepIcons[(d.step||1)-1]||'📄';
@@ -2971,11 +2878,11 @@ async function runResearchAgent(query, contentEl, area, chatId){
           const actionBar=document.createElement('div');
           actionBar.className='ra-actions';
           window._raCopyReport=function(){var el=document.getElementById('_raOut');if(!el)return;var t='';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){})};
-          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="window._raRetry(this)">?? Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">?? Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">?? Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='? Copied!';setTimeout(function(){btn.textContent='?? Copy Report'},1500)})(this)">?? Copy Report</button>`;
+          actionBar.innerHTML=`<button class="ra-action-btn ra-action-primary" onclick="window._raRetry(this)">Re-research</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">Expand All</button><button class="ra-action-btn" onclick="(function(){var out=document.getElementById('_raOut');if(out)out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">Collapse All</button><button class="ra-action-btn" onclick="(function(btn){window._raCopyReport();btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy Report'},1500)})(this)">Copy Report</button>`;
 
           // Update badge
           const badge=document.getElementById('_raBadge');
-          if(badge){badge.classList.add('ra-badge-done');badge.textContent='? Research Complete — '+totalTimeFmt;}
+          if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Complete \u2014 '+totalTimeFmt;}
 
           if(outEl){
             outEl.appendChild(searchEl);
@@ -2985,13 +2892,15 @@ async function runResearchAgent(query, contentEl, area, chatId){
           _raAutoScroll();
 
           // Auto-trigger AI follow-up turn after research completes
+          // Collect the comprehensive report text to send
+          const _raReportText=(function(){var t='';var el=document.getElementById('_raOut');if(!el)return '';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+'\n'+(b?b.textContent:'')+'\n\n';});return t;})();
           const _raFollowTid=setTimeout(()=>{
             // Guard: skip if user already started a new interaction in this chat
             if(isChatRunning(chatId))return;
             sendMessage({
               silent: true,
               noThinking: false,
-              message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps. The full research is displayed above. Now continue helping the user with their original request. Reference the research findings naturally. Do NOT repeat or summarize the research — it is already visible. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions). If the user's request was purely for research, provide a brief acknowledgment and ask what they'd like to do next.`,
+              message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps.\n\nHere is the full comprehensive report from the research:\n\n${_raReportText}\n\nThe user's original request was: "${query}"\n\nNow continue helping the user with their original request. Use the comprehensive report above as your knowledge base. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions using <<<CODE_EXECUTE: python>>> if needed). Do NOT summarize the research back to the user — it is already visible. Instead, proceed directly with executing whatever the user originally asked for.`,
               targetChat: chatId
             });
           }, 1500);
@@ -3029,9 +2938,9 @@ async function runResearchAgent(query, contentEl, area, chatId){
       }
       const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Research Interrupted — '+totalTimeFmtEnd;}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Interrupted \u2014 '+totalTimeFmtEnd;}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
     }
   }catch(e){
@@ -3041,7 +2950,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       // User cancelled — show a clean message (don't auto-retry user cancels)
       window._raAutoRetryCount=0;
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Research Cancelled';}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Cancelled';}
       const actEl=document.getElementById('_raActivity');
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
@@ -3062,15 +2971,15 @@ async function runResearchAgent(query, contentEl, area, chatId){
       }
       const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='?? Connection Lost — '+totalTimeFmtEnd;}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Connection Lost \u2014 '+totalTimeFmtEnd;}
       const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></span>`;
+      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ lost';el.className='ra-section-status ra-failed';});
     }else{
       const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='? Research Failed — '+totalTimeFmtEnd;}
-      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">? Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">?? Retry</button></div>`;
+      contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></div>`;
       setStatus('Research failed.');
     }
   }finally{
@@ -3197,7 +3106,7 @@ function buildSentimentGauge(rating, stockDataArr, lastStepText){
 
 function buildGrowthChart(stockDataArr){
   if(!stockDataArr||!stockDataArr.length)return'';
-  let html='<div class="sa-growth-wrap sa-growth-collapsed"><div class="sa-growth-header" onclick="this.parentElement.classList.toggle(\'sa-growth-collapsed\')"><div class="sa-growth-title">?? Key Metrics Comparison</div><span class="sa-growth-chevron">📈</span></div><div class="sa-growth-body">';
+  let html='<div class="sa-growth-wrap sa-growth-collapsed"><div class="sa-growth-header" onclick="this.parentElement.classList.toggle(\'sa-growth-collapsed\')"><div class="sa-growth-title">Key Metrics Comparison</div><span class="sa-growth-chevron">📈</span></div><div class="sa-growth-body">';
   for(let si=0;si<stockDataArr.length;si++){
     const sd=stockDataArr[si];
     const ticker=sd.ticker||'?';
@@ -3384,7 +3293,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const section=document.createElement('div');
             section.className='sa-section sa-slide-in';
             section.id='_saS'+ev.step;
-            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">?</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">?</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
+            section.innerHTML=`<div class="sa-section-head" onclick="(function(el){var sec=el.parentElement;sec.classList.toggle('sa-collapsed');var n=parseInt(sec.id.replace('_saS',''));if(window._saManualToggles)window._saManualToggles.add(n)})(this)"><span class="sa-section-num">${ev.step}</span><span class="sa-section-title">${esc(ev.title)}</span><span class="sa-section-timer" id="_saT${ev.step}"></span><span class="sa-section-status sa-running">analyzing...</span><span class="sa-section-chevron">▾</span></div><div class="sa-section-body"><div class="sa-thinking-block sa-thinking-open" id="_saThink${ev.step}" style="display:none"><div class="sa-thinking-toggle" onclick="this.parentElement.classList.toggle('sa-thinking-open')"><span class="sa-thinking-icon">💭</span><span class="sa-thinking-label">Thinking...</span><span class="sa-thinking-chevron">▾</span></div><div class="sa-thinking-content" id="_saThinkC${ev.step}"></div></div><div class="sa-step-content" id="_saC${ev.step}"></div></div>`;
             if(outEl) outEl.appendChild(section);
             currentContentEl=section.querySelector('.sa-step-content');
             if(window._chatAutoScroll)window._chatAutoScroll();
@@ -3418,8 +3327,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             const timerEl=document.getElementById('_saT'+ev.step);
             if(timerEl&&elapsed) timerEl.textContent=elapsed+'s';
             const ce=document.getElementById('_saC'+ev.step);
-            if(ce&&ev.error) ce.innerHTML=`<div class="sa-step-error">?? Step failed: ${esc(ev.error.slice(0,150))}</div>`;
-            updateProgress(ev.step, '?? '+ev.title+' failed — continuing...');
+            if(ce&&ev.error) ce.innerHTML=`<div class="sa-step-error">Step failed: ${esc(ev.error.slice(0,150))}</div>`;
+            updateProgress(ev.step, ''+ev.title+' failed — continuing...');
           }
         }else if(ev.type==='agent_thinking'){
           stepThinking+=(ev.text||'');
@@ -3502,7 +3411,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl&&Object.keys(stepElapsed).length){
             const timingEl=document.createElement('div');
             timingEl.className='sa-timing-section sa-slide-in';
-            let timHtml=`<div class="sa-timing-hd">?? Step Performance <span style="font-weight:400;opacity:.6">— Total: ${totalTime}s</span></div><div class="sa-timing-chart">`;
+            let timHtml=`<div class="sa-timing-hd">Step Performance <span style="font-weight:400;opacity:.6">— Total: ${totalTime}s</span></div><div class="sa-timing-chart">`;
             for(let s=1;s<=totalSteps;s++){
               const dur=stepElapsed[s]||0;
               const pct=Math.round((dur/maxDur)*100);
@@ -3517,7 +3426,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl){
             const disc=document.createElement('div');
             disc.className='stock-disclaimer sa-disclaimer';
-            disc.innerHTML='?? <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.';
+            disc.innerHTML='<strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.';
             outEl.appendChild(disc);
           }
 
@@ -3525,7 +3434,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(outEl){
             const actions=document.createElement('div');
             actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
-            actions.innerHTML=`<button class="sa-reanalyze" onclick="(function(btn){btn.disabled=true;btn.textContent='? Re-analyzing...';var c=btn.closest('.sa-container')||btn.parentElement.parentElement;var contentEl=c.parentElement;contentEl.innerHTML='';runStockAgent(${JSON.stringify(stockDataArray).replace(/</g,'\\u003c')},${JSON.stringify(userQuery).replace(/</g,'\\u003c')},contentEl,contentEl.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/</g,'\\u003c')})})(this)">?? Re-analyze</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.remove('sa-collapsed')})})(this)">?? Expand All</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.add('sa-collapsed')})})(this)">?? Collapse All</button>`;
+            actions.innerHTML=`<button class="sa-reanalyze" onclick="(function(btn){btn.disabled=true;btn.textContent='Re-analyzing...';var c=btn.closest('.sa-container')||btn.parentElement.parentElement;var contentEl=c.parentElement;contentEl.innerHTML='';runStockAgent(${JSON.stringify(stockDataArray).replace(/</g,'\\u003c')},${JSON.stringify(userQuery).replace(/</g,'\\u003c')},contentEl,contentEl.closest('.msg').parentElement||document.getElementById('chatArea'),${JSON.stringify(chatId).replace(/</g,'\\u003c')})})(this)">Re-analyze</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.remove('sa-collapsed')})})(this)">Expand All</button><button class="sa-reanalyze" onclick="(function(){var out=document.getElementById('_saOut');if(out)out.querySelectorAll('.sa-section').forEach(function(s){s.classList.add('sa-collapsed')})})(this)">Collapse All</button>`;
             outEl.appendChild(actions);
           }
 
@@ -3653,7 +3562,7 @@ function renderStockCard(ticker, prefetchedData){
     // Fallback: client-side fetch (shouldn't happen in normal flow)
     setTimeout(()=>_fetchStockData(ticker,cardId),50);
   }
-  return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer">?? <strong>Not financial advice.</strong> This is for informational and educational purposes only. AI-generated analysis may be inaccurate or outdated. Always do your own research and consult a licensed financial advisor before making investment decisions. You could lose money.</div></div>`;
+  return `<div class="stock-card-wrap" id="${cardId}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading ${esc(ticker)} data...</span></div></div><div class="stock-disclaimer"><strong>Not financial advice.</strong> This is for informational and educational purposes only. AI-generated analysis may be inaccurate or outdated. Always do your own research and consult a licensed financial advisor before making investment decisions. You could lose money.</div></div>`;
 }
 function _stockHealthColor(score){
   if(score>=70)return'#22c55e';
@@ -3677,7 +3586,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     } else {
       const r=await fetch('/api/stock/'+encodeURIComponent(ticker));
       d=await r.json();
-      if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">?? ${esc(d.error)}</div>`;return;}
+      if(d.error){el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">${esc(d.error)}</div>`;return;}
     }
     const up=d.change>=0;
     const arrow=up?'▲':'▼';
@@ -3819,8 +3728,8 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
         +`</div>`
       +`</div>`
       // -- Collapsible details toggle --
-      +`<button class="stock-details-toggle" onclick="var det=document.getElementById('${detailId}');var open=det.classList.toggle('open');this.querySelector('.stock-toggle-arrow').textContent=open?'📎':'?';this.querySelector('.stock-toggle-text').textContent=open?'Hide Details':'View Details'">`
-        +`<span class="stock-toggle-arrow">?</span> <span class="stock-toggle-text">View Details</span>`
+      +`<button class="stock-details-toggle" onclick="var det=document.getElementById('${detailId}');var open=det.classList.toggle('open');this.querySelector('.stock-toggle-arrow').textContent=open?'▾':'▸';this.querySelector('.stock-toggle-text').textContent=open?'Hide Details':'View Details'">`
+        +`<span class="stock-toggle-arrow">▸</span> <span class="stock-toggle-text">View Details</span>`
       +`</button>`
       +`<div class="stock-details-body" id="${detailId}">`
         +detailsContent
@@ -3829,10 +3738,10 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
       +`<div class="stock-card-footer">`
         +earningsHtml
         +`${d.sector?`<span class="stock-sector">${esc(d.sector)}${d.industry?' · '+esc(d.industry):''}</span>`:''}`
-        +`<a class="stock-yahoo-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener">Yahoo Finance ?</a>`
+        +`<a class="stock-yahoo-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(d.ticker)}" target="_blank" rel="noopener">Yahoo Finance ↗</a>`
       +`</div>`;
   }catch(e){
-    if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">?? Failed to load stock data for ${esc(ticker)}</div>`;
+    if(el)el.querySelector('.stock-card').innerHTML=`<div class="stock-card-error">Failed to load stock data for ${esc(ticker)}</div>`;
   }
 }
 
@@ -4151,49 +4060,7 @@ function fmtLive(raw){
     return '<pre class="stream-code"><code>'+c+'</code></pre>';
   });
 
-  // Custom <<<TABLE>>> format — compact, efficient, no pipes/separators
-  // Complete tables: <<<TABLE caption="...">>>...<<<END_TABLE>>>
-  html=html.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*?)<<<END_TABLE>{3,}/g,(_,caption,body)=>{
-    const lines=body.trim().split('\n').filter(l=>l.trim());
-    if(lines.length<1)return _;
-    const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:1px 4px;border-radius:3px;font-size:11px">$1</code>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
-    const headers=lines[0].split(';;').map(c=>c.trim());
-    const dataLines=lines.slice(1);
-    let tbl='';
-    if(caption)tbl+='<div style="font-weight:600;font-size:12px;margin:8px 0 2px;color:var(--text-secondary)">'+esc(caption)+'</div>';
-    tbl+='<table style="border-collapse:collapse;width:100%;margin:4px 0 8px;font-size:12px"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
-    for(const line of dataLines){
-      if(!line.trim())continue;
-      const cells=line.split(';;').map(c=>c.trim());
-      while(cells.length<headers.length)cells.push('');
-      tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
-    }
-    tbl+='</tbody></table>';
-    _liveBlocks.push(tbl);
-    return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
-  });
-  // Incomplete/streaming <<<TABLE>>> — show generating placeholder
-  if(/<<<TABLE(?:\s+caption[=:]"[^"]*")?>{3,}/.test(html)&&!/<<<END_TABLE>{3,}/.test(html)){
-    html=html.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*)$/,(_,caption,body)=>{
-      const lines=body.trim().split('\n').filter(l=>l.trim());
-      if(lines.length<1)return '<div class="stream-placeholder"><span class="sp-icon">📊</span> Generating '+(caption||'table')+'...</div>';
-      const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent)">$1</a>');
-      const headers=lines[0].split(';;').map(c=>c.trim());
-      const dataLines=lines.slice(1);
-      let tbl='';
-      if(caption)tbl+='<div style="font-weight:600;font-size:12px;margin:8px 0 2px;color:var(--text-secondary)">'+esc(caption)+'</div>';
-      tbl+='<table style="border-collapse:collapse;width:100%;margin:4px 0 8px;font-size:12px;opacity:0.7"><thead><tr>'+headers.map(h=>`<th style="background:var(--bg-deep);padding:6px 8px;text-align:left;font-weight:600;border:1px solid var(--border)">${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
-      for(const line of dataLines){
-        if(!line.trim())continue;
-        const cells=line.split(';;').map(c=>c.trim());
-        while(cells.length<headers.length)cells.push('');
-        tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td style="padding:6px 8px;border:1px solid var(--border)">${fmtCell(c)}</td>`).join('')+'</tr>';
-      }
-      tbl+='</tbody></table><div style="font-size:11px;color:var(--text-tertiary);font-style:italic">? Loading more rows...</div>';
-      _liveBlocks.push(tbl);
-      return `\n%%%LIVEBLOCK${_liveBlocks.length-1}%%%\n`;
-    });
-  }
+  // Custom <<<TABLE>>> rendering removed; rely on standard markdown table parsing.
 
   // Markdown tables — unified handler for both complete and streaming tables (legacy fallback)
   // Matches any table structure: header row + separator + zero or more data rows (even incomplete)
@@ -4507,9 +4374,9 @@ async function sendMessage(opts){
   msgDiv.className='msg kairo';
   if(_silent){
     // Silent/auto-reprompt: minimal indicator, no "Thinking..." animation
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"></div>';
+    msgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"></div>';
   }else{
-    msgDiv.innerHTML='<div class="lbl">gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div></div></div>';
+    msgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div></div></div>';
   }
   if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
   const contentEl=msgDiv.querySelector('.msg-content');
@@ -4540,8 +4407,21 @@ async function sendMessage(opts){
       messageToSend=canvasPrefix+messageToSend;
     }
 
-    const _truncateAt=window._editTruncateAt;
-    delete window._editTruncateAt;
+    let _truncateAt;
+    if(window._activeEdit){
+      _truncateAt=window._activeEdit.backendIndex;
+      // Remove the edited message and all subsequent messages from DOM
+      const currentMsgs=[...document.querySelectorAll('#chatArea .msg')];
+      const msgIdx=currentMsgs.indexOf(window._activeEdit.msgEl);
+      if(msgIdx>=0){
+        for(let i=msgIdx;i<currentMsgs.length;i++) currentMsgs[i].remove();
+      }
+      // Clean up edit banner and state
+      const banner=document.getElementById('editBanner');
+      if(banner)banner.remove();
+      delete window._activeEdit;
+    }
+    if(window._editTruncateAt!=null){_truncateAt=window._editTruncateAt;delete window._editTruncateAt;}
     const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
     // Inject folder custom instructions if chat is in a folder
@@ -5036,7 +4916,7 @@ async function sendMessage(opts){
               researchMsgDiv.className='msg kairo';
               const researchContentEl=document.createElement('div');
               researchContentEl.className='msg-content';
-              researchMsgDiv.innerHTML='<div class="lbl">gyro</div>';
+              researchMsgDiv.innerHTML='';
               researchMsgDiv.appendChild(researchContentEl);
               chatArea.appendChild(researchMsgDiv);
               _autoScroll();
@@ -5306,7 +5186,7 @@ async function sendMessage(opts){
             }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
               if(loader){
-                loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">?? Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
+                loader.innerHTML=`<div class="stock-card"><div class="stock-card-error">Failed to load ${esc(data.ticker)} stock data: ${esc(data.error||'Unknown error')}</div></div>`;
                 loader.classList.remove('stock-loading-placeholder');
               }
             }
@@ -5388,7 +5268,7 @@ async function sendMessage(opts){
                 agentMsgDiv.className='msg kairo';
                 const agentContentEl=document.createElement('div');
                 agentContentEl.className='msg-content';
-                agentMsgDiv.innerHTML='<div class="lbl">gyro</div>';
+                agentMsgDiv.innerHTML='';
                 agentMsgDiv.appendChild(agentContentEl);
                 chatArea.appendChild(agentMsgDiv);
                 _autoScroll();
@@ -5429,7 +5309,7 @@ async function sendMessage(opts){
       }
     }
   }catch(e){
-    if(e.name==='AbortError'){
+    if(e.name==='AbortError'||controller.signal.aborted){
       clearInterval(_stallTimer);
       stopThinkingPhrases();
       if(canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
@@ -5512,7 +5392,7 @@ function renderThinkBlock(thinkText,opts){
   const passBadge=passLabel?`<span class="think-pass-tag">${esc(passLabel)}</span>`:'';
   const passClass=passNum?` think-pass-${passNum}`:'';
   return `<div class="think-block${passClass}" onclick="this.classList.toggle('expanded')">
-    <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">?</span></div>
+    <div class="think-header"><span>${icon}</span> ${passBadge}<span>${prefix}${esc(summary)}</span> <span class="think-chevron">▾</span></div>
     <div class="think-content">${_fmtThink(thinkText)}</div>
   </div>`;
 }
@@ -5520,7 +5400,7 @@ function renderThinkBlock(thinkText,opts){
 function addMsg(role,text,files,extra={}){
   const area=document.getElementById('chatArea');const div=document.createElement('div');
   div.className=`msg ${role}`;let html='';
-  if(role==='kairo')html+='<div class="lbl">gyro</div>';
+  if(role==='kairo')html+='<div class="lbl">Gyro</div>';
   if(role==='user'&&extra.replyImages?.length){
     const imgs=extra.replyImages.map(r=>`<div class="user-file-preview image reply-img"><img src="${esc(r.url)}" alt="${esc(r.title||'image')}" loading="lazy"></div>`).join('');
     html+=`<div class="msg-user-files">${imgs}</div>`;
@@ -5589,7 +5469,7 @@ function addMsg(role,text,files,extra={}){
     const lines=displayText.split('\n');
     const preview=lines.slice(0,3).join('\n');
     html+=`<div class="user-paste-file"><div class="upf-header" onclick="this.parentElement.classList.toggle('upf-expanded')">`
-      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">?</span></div>`
+      +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">▾</span></div>`
       +`<div class="upf-preview">${esc(preview)}${lines.length>3?'\n…':''}</div>`
       +`<div class="upf-full"><pre>${esc(displayText)}</pre></div></div>`;
   } else if(devRawMode&&role==='kairo'){
@@ -5750,8 +5630,8 @@ function addMsg(role,text,files,extra={}){
           body=body.replace(/\n---\n\*Not financial advice[\s\S]*$/,'').trim();
           saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">? done</span><span class="sa-section-chevron">✓</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
         });
-        saHtml+='</div><div class="stock-disclaimer sa-disclaimer">?? <strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
-        html=`<div class="lbl">gyro</div>`+saHtml;
+        saHtml+='</div><div class="stock-disclaimer sa-disclaimer"><strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
+        html=`<div class="lbl">Gyro</div>`+saHtml;
       } else if(_isStockMsg) {
         html+=fmt(displayText);
       }
@@ -5783,19 +5663,55 @@ function addMsg(role,text,files,extra={}){
         const durations=extra.research_agent_durations||[];
         const totalWordsH=extra.research_agent_words||0;
         const isPartial=!!extra.research_agent_partial;
+        const pct=isPartial?Math.round((steps.length/9)*100):100;
+        const stepNamesList=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
+        // Compute total elapsed
+        let totalElapsed='';
+        if(durations.length){const totalSec=durations.reduce((a,d)=>a+d.elapsed,0);if(totalSec<60)totalElapsed=Math.round(totalSec)+'s';else{const m=Math.floor(totalSec/60),s=Math.round(totalSec%60);totalElapsed=m+'m '+s+'s';}}
+
         let raHtml=`<div class="ra-container">`;
         // Badge
-        raHtml+=`<div class="ra-badge ra-badge-done">${isPartial?'?? Research Incomplete':'? Research Complete'}</div>`;
-        // Progress container (done state)
-        const pct=isPartial?Math.round((steps.length/9)*100):100;
+        raHtml+=`<div class="ra-badge ra-badge-done">${isPartial?'Research Incomplete':'Research Complete'+(totalElapsed?' — '+totalElapsed:'')}</div>`;
+        // Progress container
         raHtml+=`<div class="ra-progress"><div class="ra-header"><span class="ra-title">${esc(rQuery)}</span><span class="ra-pct" style="color:${isPartial?'#eab308':'#22c55e'}">${pct}%</span></div><div class="ra-bar-track"><div class="ra-bar-fill" style="width:${pct}%"></div></div><div class="ra-steps">`;
         raHtml+=`<div class="ra-steps-line"><div class="ra-steps-line-fill" style="width:${pct}%"></div></div>`;
-        const stepNamesList=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
         for(let i=0;i<9;i++){
           const isDone=i<steps.length;
           raHtml+=`<div class="ra-step${isDone?' done':''}"><div class="ra-step-dot">${isDone?'✓':'·'}</div><div class="ra-step-label">${esc(stepNamesList[i]||'Step '+(i+1))}</div></div>`;
         }
-        raHtml+=`</div><div class="ra-stats-row"><span>?? <strong>${sources.length}</strong> sources</span><span>?? <strong>${findings.length}</strong> findings</span></div><div class="ra-activity"><span class="ra-complete-icon">${isPartial?'📚':'📝'}</span> ${isPartial?'Research interrupted':'Research complete'} — ${sources.length} sources, ${findings.length} findings</div></div>`;
+        raHtml+=`</div><div class="ra-stats-row"><span><strong>${sources.length}</strong> sources</span><span><strong>${findings.length}</strong> findings</span>${totalElapsed?'<span><strong>'+totalElapsed+'</strong></span>':''}</div><div class="ra-activity">${isPartial?'Research interrupted':'Research complete'}${totalElapsed?' in <strong>'+totalElapsed+'</strong>':''} — ${sources.length} sources, ${findings.length} findings</div></div>`;
+        // Output container — matches live version structure
+        raHtml+=`<div class="ra-output">`;
+        // Dashboard (inside ra-output, before summary — matches live)
+        raHtml+=`<div class="ra-dashboard"><div class="ra-complete-banner"><div class="ra-complete-banner-title">Intelligence Brief Complete</div><div class="ra-complete-banner-sub">${steps.length} steps completed · ${sources.length} sources · ${findings.length} findings${totalElapsed?' · '+totalElapsed:''}</div></div>`;
+        raHtml+=`<div class="ra-dash-stats"><div class="ra-dash-stat"><div class="ra-dash-stat-val">${steps.length}/9</div><div class="ra-dash-stat-lbl">Steps</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${sources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${findings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</div><div class="ra-dash-stat-lbl">Words</div></div></div>`;
+        // Source diversity
+        if(sources.length){
+          const domainCounts={};
+          sources.forEach(s=>{try{const d=new URL(s.url).hostname.replace('www.','');domainCounts[d]=(domainCounts[d]||0)+1}catch(e){}});
+          const topDomains=Object.entries(domainCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
+          if(topDomains.length){
+            const maxDC=topDomains[0][1];
+            raHtml+=`<div class="ra-diversity-section"><div class="ra-diversity-hd">Source Diversity</div><div class="ra-diversity-grid">`;
+            topDomains.forEach(([domain,count])=>{
+              const dpct=Math.round((count/maxDC)*100);
+              raHtml+=`<div class="ra-diversity-row"><img class="ra-diversity-favicon" src="https://www.google.com/s2/favicons?domain=${esc(domain)}&sz=32" alt="" onerror="this.style.display='none'"><span class="ra-diversity-domain">${esc(domain)}</span><div class="ra-diversity-bar-track"><div class="ra-diversity-bar-fill" style="width:${dpct}%"></div></div><span class="ra-diversity-count">${count}</span></div>`;
+            });
+            raHtml+=`</div></div>`;
+          }
+        }
+        // Timing chart
+        if(durations.length){
+          const maxDur=Math.max(...durations.map(d=>d.elapsed),1);
+          raHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">Step Performance</div><div class="ra-timing-chart">`;
+          durations.forEach(d=>{
+            const dpct=Math.round((d.elapsed/maxDur)*100);
+            const sIcon=raIcons[(d.step||1)-1]||'';
+            raHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${sIcon} ${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${dpct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
+          });
+          raHtml+=`</div></div>`;
+        }
+        raHtml+=`</div>`;
         // Summary card (TL;DR)
         const lastBody=steps[steps.length-1]?.body||'';
         const plainLast=(lastBody||'').replace(/[#*_`|>\-\[\]()]/g,' ').replace(/\s+/g,' ').trim();
@@ -5803,40 +5719,28 @@ function addMsg(role,text,files,extra={}){
         const tldrMatch=plainLast.match(/TL;DR[:\s]*([\s\S]*?)(?=Executive Summary|Key Findings|$)/i);
         if(tldrMatch) tldr=tldrMatch[1].trim().split(/\n\n/)[0].trim();
         if(!tldr) tldr=plainLast.split(/(?<=[.!?])\s+/).filter(s=>s.length>15).slice(0,3).join(' ');
-        if(tldr) raHtml+=`<div class="ra-summary"><div class="ra-summary-hd">? Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div></div>`;
-        // Dashboard
-        const _hSrc=Math.min(sources.length/30,1),_hStp=steps.length/9,_hWrd=Math.min(totalWordsH/8000,1),_hFnd=Math.min(findings.length/20,1);
-        const _hConf=Math.round((_hSrc*0.3+_hStp*0.25+_hWrd*0.2+_hFnd*0.25)*100);
-        const _hConfLbl=_hConf>=90?'High':_hConf>=75?'Good':_hConf>=55?'Moderate':_hConf>=35?'Low':'Very Low';
-        raHtml+=`<div class="ra-dashboard"><div class="ra-dash-header"><span class="ra-dash-icon">📋</span><span class="ra-dash-title">Research Confidence</span></div><div class="ra-dash-stats"><div class="ra-dash-stat"><div class="ra-dash-stat-val">${steps.length} steps</div><div class="ra-dash-stat-lbl">Coverage</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${sources.length}</div><div class="ra-dash-stat-lbl">Sources</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${totalWordsH>=1000?((totalWordsH/1000).toFixed(1)+'k'):totalWordsH}</div><div class="ra-dash-stat-lbl">Words</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${findings.length}</div><div class="ra-dash-stat-lbl">Findings</div></div><div class="ra-dash-stat"><div class="ra-dash-stat-val">${_hConfLbl}</div><div class="ra-dash-stat-lbl">Confidence</div></div></div>`;
-        // Timing chart
-        if(durations.length){
-          const maxDur=Math.max(...durations.map(d=>d.elapsed),1);
-          raHtml+=`<div class="ra-timing-section"><div class="ra-timing-hd">?? Step Performance</div><div class="ra-timing-chart">`;
-          durations.forEach(d=>{
-            const pct=Math.round((d.elapsed/maxDur)*100);
-            raHtml+=`<div class="ra-timing-row"><span class="ra-timing-label">${esc(d.title)}</span><div class="ra-timing-bar-track"><div class="ra-timing-bar-fill" style="width:${pct}%"></div></div><span class="ra-timing-val">${d.elapsed}s</span></div>`;
-          });
-          raHtml+=`</div></div>`;
-        }
+        if(tldr) raHtml+=`<div class="ra-summary"><div class="ra-summary-hd">Quick Summary</div><div class="ra-summary-body">${esc(tldr.length>500?tldr.slice(0,500)+'…':tldr)}</div><div class="ra-summary-hint">Click any step below to read the full analysis</div></div>`;
+        // Step sections (collapsed)
+        steps.forEach((step,i)=>{
+          let body=step.body||'';
+          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">✓ done</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
+        });
+        // Search box
+        raHtml+=`<div class="ra-search-wrap"><input class="ra-search-input" type="text" placeholder="Search within results..." oninput="(function(inp){var q=inp.value.toLowerCase().trim();var out=inp.closest('.ra-output');if(!out)out=inp.parentElement.parentElement;out.querySelectorAll('.ra-section').forEach(function(s){var body=s.querySelector('.ra-step-content');if(!body)return;if(!q){s.style.display='';return}var txt=body.textContent.toLowerCase();if(txt.includes(q)){s.style.display='';s.classList.remove('ra-collapsed')}else{s.style.display='none'}})})(this)"></div>`;
+        // Action bar
+        raHtml+=`<div class="ra-actions"><button class="ra-action-btn" onclick="(function(btn){var out=btn.closest('.ra-output');if(!out)out=btn.parentElement.parentElement;out.querySelectorAll('.ra-section').forEach(function(s){s.classList.remove('ra-collapsed')})})(this)">Expand All</button><button class="ra-action-btn" onclick="(function(btn){var out=btn.closest('.ra-output');if(!out)out=btn.parentElement.parentElement;out.querySelectorAll('.ra-section').forEach(function(s){s.classList.add('ra-collapsed')})})(this)">Collapse All</button><button class="ra-action-btn" onclick="(function(btn){var out=btn.closest('.ra-output');if(!out)out=btn.parentElement.parentElement;var t='';out.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+String.fromCharCode(10)+(b?b.textContent:'')+String.fromCharCode(10,10)});navigator.clipboard.writeText(t).then(function(){btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy Report'},1500)})})(this)">Copy Report</button></div>`;
         raHtml+=`</div>`;
-        // Key findings panel (collapsible)
+        // Key findings panel (collapsible, outside ra-output)
         if(findings.length){
-          raHtml+=`<div class="ra-findings-panel ra-menu-bar ra-findings-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')"><span class="ra-menu-icon">💡</span><span class="ra-menu-title">Key Findings</span><span class="ra-menu-count">${findings.length}</span><span class="ra-menu-chevron">?</span></div><div class="ra-menu-body"><div class="ra-findings-list">`;
+          raHtml+=`<div class="ra-findings-panel ra-menu-bar ra-findings-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-findings-collapsed')"><span class="ra-menu-icon">💡</span><span class="ra-menu-title">Key Findings</span><span class="ra-menu-count">${findings.length}</span><span class="ra-menu-chevron">▾</span></div><div class="ra-menu-body"><div class="ra-findings-list">`;
           findings.forEach(f=>{
             raHtml+=`<div class="ra-finding-item"><span class="ra-finding-step">💡</span><span class="ra-finding-text">${esc(typeof f==='string'?f:(f.text||''))}</span></div>`;
           });
           raHtml+=`</div></div></div>`;
         }
-        raHtml+=`<div class="ra-output">`;
-        steps.forEach((step,i)=>{
-          let body=step.body||'';
-          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">? done</span><span class="ra-section-chevron">✓</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
-        });
-        raHtml+=`</div>`;
         // Source cards (collapsible)
         if(sources.length){
-          raHtml+=`<div class="ra-sources-panel ra-menu-bar ra-src-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')"><span class="ra-menu-icon">??</span><span class="ra-menu-title">Sources</span><span class="ra-menu-count">${sources.length}</span><span class="ra-menu-chevron">?</span></div><div class="ra-menu-body"><div class="ra-sources-list">`;
+          raHtml+=`<div class="ra-sources-panel ra-menu-bar ra-src-collapsed"><div class="ra-menu-head" onclick="this.parentElement.classList.toggle('ra-src-collapsed')"><span class="ra-menu-icon">🔗</span><span class="ra-menu-title">Sources</span><span class="ra-menu-count">${sources.length}</span><span class="ra-menu-chevron">▾</span></div><div class="ra-menu-body"><div class="ra-sources-list">`;
           sources.forEach(src=>{
             try{
               const domain=new URL(src.url).hostname.replace('www.','');
@@ -5846,7 +5750,7 @@ function addMsg(role,text,files,extra={}){
           raHtml+=`</div></div></div>`;
         }
         raHtml+=`</div>`;
-        html=`<div class="lbl">gyro</div>`+raHtml;
+        html=`<div class="lbl">Gyro</div>`+raHtml;
       } else {
         // research_agent flag set but no steps parsed — fallback to formatted text
         html+=fmt(displayText);
@@ -6174,7 +6078,7 @@ function fmt(text){
     const mindId='mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
     const title=inferMindMapTitle(restored,blocks.length+1);
     mindMapStore.set(mindId,{title,source:restored});
-    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button class="mm-copy" onclick="copyMermaidPng(this)" title="Copy to clipboard">📋</button><a class="mm-download" href="#" onclick="return false" title="Download PNG">?</a></div><pre class="mermaid">${restored}</pre></div>`);
+    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button class="mm-copy" onclick="copyMermaidPng(this)" title="Copy to clipboard">📋</button><a class="mm-download" href="#" onclick="return false" title="Download PNG">⬇</a></div><pre class="mermaid">${restored}</pre></div>`);
     // Auto-open in canvas so user can interact with it
     if(!_suppressCanvasAutoOpen) setTimeout(()=>openMindMapCanvas(mindId),150);
     return `%%%BLOCK${blocks.length-1}%%%`;
@@ -6220,7 +6124,7 @@ function fmt(text){
   // Markdown images: ![alt](url)
   t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g,(_,alt,url)=>{
     const safeAlt=alt.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
-    blocks.push(`<div class="msg-img-wrap"><img src="${url}" alt="${safeAlt}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-sm)" loading="lazy" onerror="this.parentElement.style.display='none'" onclick="openImageLightbox(this.src,this.alt)"><button class="img-expand-btn" onclick="openImageLightbox('${url}','${safeAlt.replace(/'/g,"\\'")}')">?</button></div>`);
+    blocks.push(`<div class="msg-img-wrap"><img src="${url}" alt="${safeAlt}" style="max-width:100%;border-radius:var(--r-md);box-shadow:var(--shadow-sm)" loading="lazy" onerror="this.parentElement.style.display='none'" onclick="openImageLightbox(this.src,this.alt)"><button class="img-expand-btn" onclick="openImageLightbox('${url}','${safeAlt.replace(/'/g,"\\'")}')">⤢</button></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   // Markdown links: [text](url) — supports both absolute and relative URLs
@@ -6261,26 +6165,7 @@ function fmt(text){
     blocks.push(`<div class="stock-card-wrap stock-loading-placeholder" id="${loaderId}" data-stock-index="${idx}"><div class="stock-card"><div class="stock-card-loading"><div class="stock-shimmer"></div><span>Loading stock data...</span></div></div></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
-  // Custom <<<TABLE>>> format — compact, efficient, no pipes/separators
-  t=t.replace(/<<<TABLE(?:\s+caption[=:]"([^"]*)")?>{3,}([\s\S]*?)<<<END_TABLE>{3,}/g,(_,caption,body)=>{
-    const lines=body.trim().split('\n').filter(l=>l.trim());
-    if(lines.length<1)return _;
-    const fmtCell=c=>c.trim().replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`(.+?)`/g,'<code style="background:var(--bg-surface);padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--border)">$1</code>').replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">$1</a>');
-    const headers=lines[0].split(';;').map(c=>c.trim());
-    const dataLines=lines.slice(1);
-    let tbl='';
-    if(caption)tbl+='<div style="font-weight:600;font-size:13px;margin:10px 0 4px;color:var(--text-secondary)">'+caption.replace(/</g,'&lt;')+'</div>';
-    tbl+='<table><thead><tr>'+headers.map(h=>`<th>${fmtCell(h)}</th>`).join('')+'</tr></thead><tbody>';
-    for(const line of dataLines){
-      if(!line.trim())continue;
-      const cells=line.split(';;').map(c=>c.trim());
-      while(cells.length<headers.length)cells.push('');
-      tbl+='<tr>'+cells.slice(0,headers.length).map(c=>`<td>${fmtCell(c)}</td>`).join('')+'</tr>';
-    }
-    tbl+='</tbody></table>';
-    blocks.push(tbl);
-    return `\n%%%BLOCK${blocks.length-1}%%%\n`;
-  });
+  // Custom <<<TABLE>>> rendering removed; rely on standard markdown table parsing.
   // Markdown tables — extract to blocks to protect from <br> conversion (legacy fallback)
   t=t.replace(/(?:^|\n)(\|.+\|[ \t]*\n\|[\s|:\-]+\|[ \t]*\n(?:\|.+\|[ \t]*(?:\n|$))+)/gm,(match)=>{
     const lines=match.trim().split('\n').filter(l=>l.trim());
@@ -6796,7 +6681,7 @@ async function refreshWorkspaceFiles(){
     for(const fld of sortedFolders){
       if(!folders[fld])continue;
       if(fld){
-        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">✕</span><span class="fb-folder-icon" style="color:var(--accent)">?</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">?</button></div><div class="fb-folder-body">`;
+        html+=`<div class="fb-folder"><div class="fb-folder-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="fb-folder-arrow">✕</span><span class="fb-folder-icon" style="color:var(--accent)">📁</span><span class="fb-folder-name">${esc(fld)}</span><span class="fb-folder-count">${folders[fld].length}</span><button class="fb-del" onclick="event.stopPropagation();deleteUserFile('${encodeURIComponent(fld)}',true)" title="Delete folder">✕</button></div><div class="fb-folder-body">`;
       }
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
@@ -7577,7 +7462,7 @@ function renderProductivityHub(){
   const visionList=document.getElementById('visionList');
   if(todoList){
     todoList.innerHTML=state.todos.length
-      ?state.todos.map(t=>`<div class="todo-item ${t.done?'done':''}"><button class="todo-check" onclick="toggleTodoItem('${t.id}')">${t.done?'✓':'✕'}</button><div class="todo-text">${esc(t.text)}</div><button class="todo-del" onclick="deleteTodoItem('${t.id}')">?</button></div>`).join('')
+      ?state.todos.map(t=>`<div class="todo-item ${t.done?'done':''}"><button class="todo-check" onclick="toggleTodoItem('${t.id}')">${t.done?'✓':'✕'}</button><div class="todo-text">${esc(t.text)}</div><button class="todo-del" onclick="deleteTodoItem('${t.id}')">✕</button></div>`).join('')
       :'<div class="todo-empty">No tasks yet. Add one to get moving.</div>';
   }
   if(visionList){
