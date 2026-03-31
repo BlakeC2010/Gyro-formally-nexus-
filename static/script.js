@@ -32,6 +32,14 @@ let selectMode=false;
 const selectedItems=new Set();
 const _collapsedFolders=new Set();
 const runningStreams=new Map();
+const _activeStreamState=new Map(); // chatId => {fullText, thinkText} for persist-on-unload
+window.addEventListener('beforeunload',()=>{
+  for(const [chatId,state] of _activeStreamState){
+    const text=state.fullText;
+    if(!text)continue;
+    try{navigator.sendBeacon(`/api/chats/${chatId}/partial`,new Blob([JSON.stringify({text})],{type:'application/json'}));}catch(e){}
+  }
+});
 const _pendingReprompts=new Map(); // chatId => [timeoutId, ...] — cleared on stop/edit
 const unreadChats=new Set();
 const artifactStore=[];
@@ -175,6 +183,9 @@ function stopStreaming(){
   if(run?.controller){
     run.controller.abort();
   }
+  // Prevent research agent auto-retry after user cancellation
+  window._raCancelledChat=curChat;
+  window._raAutoRetryCount=99;
   // Cancel ALL pending auto-reprompts for this chat
   const pending=_pendingReprompts.get(curChat);
   if(pending){pending.forEach(id=>clearTimeout(id));_pendingReprompts.delete(curChat);}
@@ -291,14 +302,34 @@ function copyMsg(btn){
   const msgEl=btn.closest('.msg');
   if(!msgEl)return;
   const content=msgEl.querySelector('.msg-content')||msgEl;
-  // Get text content, excluding action bar
   const clone=content.cloneNode(true);
   clone.querySelectorAll('.msg-actions').forEach(el=>el.remove());
   const text=clone.innerText||clone.textContent||'';
-  navigator.clipboard.writeText(text.trim()).then(()=>{
-    btn.textContent='✓ Copied';
-    setTimeout(()=>{btn.textContent='? Copy'},1500);
-  }).catch(()=>{});
+  // Try rich copy (HTML with images) if images exist
+  const imgs=content.querySelectorAll('img[src]');
+  if(imgs.length&&navigator.clipboard.write){
+    const htmlClone=content.cloneNode(true);
+    htmlClone.querySelectorAll('.msg-actions').forEach(el=>el.remove());
+    const html=htmlClone.innerHTML;
+    const items=[new ClipboardItem({
+      'text/html':new Blob([html],{type:'text/html'}),
+      'text/plain':new Blob([text.trim()],{type:'text/plain'})
+    })];
+    navigator.clipboard.write(items).then(()=>{
+      btn.textContent='✓ Copied';
+      setTimeout(()=>{btn.textContent='? Copy'},1500);
+    }).catch(()=>{
+      navigator.clipboard.writeText(text.trim()).then(()=>{
+        btn.textContent='✓ Copied';
+        setTimeout(()=>{btn.textContent='? Copy'},1500);
+      }).catch(()=>{});
+    });
+  }else{
+    navigator.clipboard.writeText(text.trim()).then(()=>{
+      btn.textContent='✓ Copied';
+      setTimeout(()=>{btn.textContent='? Copy'},1500);
+    }).catch(()=>{});
+  }
 }
 
 // --- Auto Resume ----------------------------------
@@ -1624,6 +1655,22 @@ async function downloadGenImage(url,prompt){
     URL.revokeObjectURL(a.href);
   }catch(e){showToast('Download failed','error');}
 }
+/* Download a file from base64-embedded chat data */
+const _chatFileCache={};
+let _chatFileCacheId=0;
+function cacheChatFile(data,mime,name){const id=++_chatFileCacheId;_chatFileCache[id]={data,mime,name};return id;}
+function downloadChatFile(cacheId){
+  const f=_chatFileCache[cacheId];if(!f)return;
+  try{
+    const bytes=atob(f.data);const arr=new Uint8Array(bytes.length);
+    for(let i=0;i<bytes.length;i++)arr[i]=bytes.charCodeAt(i);
+    const blob=new Blob([arr],{type:f.mime||'application/octet-stream'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=f.name||'file';
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},100);
+  }catch(e){showToast('Download failed','error');}
+}
 /* Download generated image from closest container */
 function downloadGenFromEl(btn){
   const wrap=btn.closest('.img-gen-result');
@@ -2494,11 +2541,17 @@ function toggleResearch(){
 
 async function showResearchPlan(query, contentEl, area, chatId){
   // Go straight to research — questions are handled in normal chat conversation
+  window._raCancelledChat=null; // Clear cancellation for fresh research
   contentEl.innerHTML='';
   await runResearchAgent(query, contentEl, area, chatId);
 }
 
 async function runResearchAgent(query, contentEl, area, chatId){
+  // Check if this chat was cancelled by the user — abort immediately
+  if(window._raCancelledChat===chatId) return;
+  // Reset auto-retry counter on fresh invocation (not from auto-retry itself)
+  if(!window._raIsAutoRetry) window._raAutoRetryCount=0;
+  window._raIsAutoRetry=false;
   const stepIcons=['1','2','3','4','5','6','7','8','9'];
   const stepNames=['Intelligence Gathering','Deep Source Analysis','Fact Verification','Perspectives & Context','Evidence & Data Analysis','Synthesis & Insights','Conclusions & Assessment','Final Intelligence Brief','Comprehensive Report'];
   const totalSteps=9;
@@ -2506,6 +2559,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
   // Global retry function for all retry buttons
   window._raRetry=function(btn){
     if(btn){btn.disabled=true;btn.textContent='⏳ Retrying...';}
+    window._raAutoRetryCount=0;
     contentEl.innerHTML='';
     runResearchAgent(query, contentEl, area, chatId);
   };
@@ -2962,6 +3016,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
     // Stream ended — check if we got a proper completion
     if(!_raDoneReceived){
+      // Don't auto-retry if user cancelled
+      if(window._raCancelledChat===chatId) return;
       // Auto-retry if stream ended unexpectedly (server timeout, etc.)
       if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
       window._raAutoRetryCount++;
@@ -2972,6 +3028,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         clearInterval(elTimer);
         if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
         area.removeEventListener('scroll',_raOnScroll);
+        window._raIsAutoRetry=true;
         setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},1500);
         return;
       }
@@ -2994,6 +3051,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
     }else if(isNetwork){
+      // Don't auto-retry if user cancelled
+      if(window._raCancelledChat===chatId) return;
       // Auto-retry network errors
       if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
       window._raAutoRetryCount++;
@@ -3005,6 +3064,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
         area.removeEventListener('scroll',_raOnScroll);
         setChatRunning(chatId,false);
+        window._raIsAutoRetry=true;
         setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},2000);
         return;
       }
@@ -4514,6 +4574,7 @@ async function sendMessage(opts){
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
     let buffer='',fullText='',thinkText='',isThinking=false;
+    _activeStreamState.set(targetChatId,{get fullText(){return fullText;},get thinkText(){return thinkText;}});
     const _streamDevRaw=devRawMode;  // Snapshot dev mode at stream start to prevent mid-stream format switches
     let _genFailures=[];
     // -- Multi-turn thinking state --
@@ -4751,6 +4812,7 @@ async function sendMessage(opts){
             }
           }else if(data.type==='done'){
             _doneReceived=true;
+            _activeStreamState.delete(targetChatId);
             clearInterval(_stallTimer);
             // Immediately mark chat as not running so UI updates (stop button ? send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
@@ -4832,12 +4894,18 @@ async function sendMessage(opts){
                 if(cr.files?.length){
                   filesHtml='<div class="crb-files">';
                   for(const gf of cr.files){
-                    const dlUrl='/api/files/download?path='+encodeURIComponent(gf.path);
-                    const viewUrl='/api/files/view?path='+encodeURIComponent(gf.path);
+                    const hasData=!!gf.data;
+                    const viewUrl=hasData?`data:${gf.mime||'image/png'};base64,${gf.data}`:'/api/files/view?path='+encodeURIComponent(gf.path);
                     if(gf.is_image){
-                      filesHtml+=`<div class="crb-file crb-file-image"><img src="${viewUrl}" alt="${esc(gf.name)}" style="max-width:100%;max-height:400px;border-radius:var(--r-md);margin:6px 0;cursor:pointer" onclick="openImageLightbox(this.src,'${esc(gf.name).replace(/'/g,"\\'")}')" onerror="this.style.display='none'"><div class="crb-file-link"><a href="${dlUrl}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a><span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div></div>`;
+                      filesHtml+=`<div class="crb-file crb-file-image"><img src="${viewUrl}" alt="${esc(gf.name)}" style="max-width:100%;max-height:400px;border-radius:var(--r-md);margin:6px 0;cursor:pointer" onclick="openImageLightbox(this.src,'${esc(gf.name).replace(/'/g,"\\'")}')" onerror="this.style.display='none'"><div class="crb-file-link">`;
+                      if(hasData){const cid=cacheChatFile(gf.data,gf.mime,gf.name);filesHtml+=`<a href="#" onclick="event.preventDefault();downloadChatFile(${cid})" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+                      else{filesHtml+=`<a href="/api/files/download?path=${encodeURIComponent(gf.path)}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+                      filesHtml+=`<span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div></div>`;
                     }else{
-                      filesHtml+=`<div class="crb-file"><a href="${dlUrl}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a><span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div>`;
+                      filesHtml+=`<div class="crb-file">`;
+                      if(hasData){const cid=cacheChatFile(gf.data,gf.mime||'application/octet-stream',gf.name);filesHtml+=`<a href="#" onclick="event.preventDefault();downloadChatFile(${cid})" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+                      else{filesHtml+=`<a href="/api/files/download?path=${encodeURIComponent(gf.path)}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+                      filesHtml+=`<span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div>`;
                     }
                   }
                   filesHtml+='</div>';
@@ -5422,6 +5490,7 @@ async function sendMessage(opts){
     }
     const cur=runningStreams.get(targetChatId);
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
+    _activeStreamState.delete(targetChatId);
     area.removeEventListener('scroll',_onUserScroll);
   }
 }
@@ -5476,6 +5545,26 @@ function addMsg(role,text,files,extra={}){
       }
       return `<div class="user-file-preview"><span>${name}</span></div>`;
     }).join('');
+    html+=`<div class="msg-user-files">${previews}</div>`;
+  }
+  // On reload: render persisted image attachments (stored as extra.images)
+  if(role==='user'&&!extra.files?.length&&extra.images?.length){
+    const previews=extra.images.map(img=>{
+      const name=esc(img.name||'image');
+      if(img.data) return `<div class="user-file-preview image"><img src="data:${img.mime||'image/png'};base64,${img.data}" alt="${name}" loading="lazy"></div>`;
+      return `<div class="user-file-preview"><span>${name}</span></div>`;
+    }).join('');
+    html+=`<div class="msg-user-files">${previews}</div>`;
+  }
+  // On reload: render document attachment chips
+  if(role==='user'&&!extra.files?.length&&extra.documents?.length){
+    const previews=extra.documents.map(d=>`<div class="user-file-preview"><span>${esc(d.name||'document')}</span></div>`).join('');
+    html+=`<div class="msg-user-files">${previews}</div>`;
+  }
+  // On reload: render text file name chips
+  if(role==='user'&&!extra.files?.length&&!extra.images?.length&&extra.file_name){
+    const names=extra.file_name.split(', ');
+    const previews=names.map(n=>`<div class="user-file-preview"><span>${esc(n)}</span></div>`).join('');
     html+=`<div class="msg-user-files">${previews}</div>`;
   }
   let displayText=text||'';
@@ -5559,12 +5648,18 @@ function addMsg(role,text,files,extra={}){
       if(cr.files?.length){
         filesHtml='<div class="crb-files">';
         for(const gf of cr.files){
-          const dlUrl='/api/files/download?path='+encodeURIComponent(gf.path);
-          const viewUrl='/api/files/view?path='+encodeURIComponent(gf.path);
+          const hasData=!!gf.data;
+          const viewUrl=hasData?`data:${gf.mime||'image/png'};base64,${gf.data}`:'/api/files/view?path='+encodeURIComponent(gf.path);
           if(gf.is_image){
-            filesHtml+=`<div class="crb-file crb-file-image"><img src="${viewUrl}" alt="${esc(gf.name)}" style="max-width:100%;max-height:400px;border-radius:var(--r-md);margin:6px 0;cursor:pointer" onclick="openImageLightbox(this.src,'${esc(gf.name).replace(/'/g,"\\'")}')" onerror="this.style.display='none'"><div class="crb-file-link"><a href="${dlUrl}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a><span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div></div>`;
+            filesHtml+=`<div class="crb-file crb-file-image"><img src="${viewUrl}" alt="${esc(gf.name)}" style="max-width:100%;max-height:400px;border-radius:var(--r-md);margin:6px 0;cursor:pointer" onclick="openImageLightbox(this.src,'${esc(gf.name).replace(/'/g,"\\'")}')" onerror="this.style.display='none'"><div class="crb-file-link">`;
+            if(hasData){const cid=cacheChatFile(gf.data,gf.mime,gf.name);filesHtml+=`<a href="#" onclick="event.preventDefault();downloadChatFile(${cid})" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+            else{filesHtml+=`<a href="/api/files/download?path=${encodeURIComponent(gf.path)}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+            filesHtml+=`<span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div></div>`;
           }else{
-            filesHtml+=`<div class="crb-file"><a href="${dlUrl}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a><span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div>`;
+            filesHtml+=`<div class="crb-file">`;
+            if(hasData){const cid=cacheChatFile(gf.data,gf.mime||'application/octet-stream',gf.name);filesHtml+=`<a href="#" onclick="event.preventDefault();downloadChatFile(${cid})" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+            else{filesHtml+=`<a href="/api/files/download?path=${encodeURIComponent(gf.path)}" target="_blank" class="fo-link">📎 ${esc(gf.name)}</a>`;}
+            filesHtml+=`<span class="crb-file-size">${gf.size>1024?(gf.size/1024).toFixed(1)+'KB':gf.size+'B'}</span></div>`;
           }
         }
         filesHtml+='</div>';

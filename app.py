@@ -145,7 +145,7 @@ SERVER_FILES = {"app.py", "requirements.txt", "Procfile", "render.yaml",
                 ".env", ".gitignore", ".gyro_session_secret", ".nexus_session_secret"}
 SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
-               "static", "templates", "logos", "_code_output"}
+               "static", "templates", "logos", "_code_output", "_uploads"}
 MAX_CONTEXT_CHARS = 900_000
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_CREATOR_ORIGIN_STORY = "Blake Cary built Gyro after his brother shared AI ideas that inspired him to create this workspace."
@@ -1577,7 +1577,7 @@ def execute_file_operations(text):
         action = "Created" if not fp.exists() else "Updated"
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content + "\n", encoding="utf-8")
-        executed.append({"action": action, "path": clean})
+        executed.append({"action": action, "path": clean, "content": content})
     return executed
 
 def extract_memory_ops(text):
@@ -1748,6 +1748,15 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
                             })
                     except Exception:
                         pass
+            # Embed file data as base64 so files persist in chat even after server restart
+            for gf in generated_files:
+                try:
+                    fp = WORKSPACE / gf["path"]
+                    if fp.exists() and gf["size"] <= 2_000_000:  # Cap at 2MB
+                        gf["data"] = base64.b64encode(fp.read_bytes()).decode()
+                        gf["mime"] = mimetypes.guess_type(gf["name"])[0] or "application/octet-stream"
+                except Exception:
+                    pass
             results.append({"language": lang, "code": code, "output": output.strip() or "(no output)", "success": result.returncode == 0, "files": generated_files})
         except subprocess.TimeoutExpired:
             try: os.unlink(tmp_path)
@@ -2212,19 +2221,30 @@ def _google_contents_from_messages(messages, types):
                 pass
         for img in msg.get("images", []):
             try:
-                parts.append(types.Part.from_bytes(data=base64.b64decode(img["data"]), mime_type=img["mime"]))
-            except:
+                raw = img["data"]
+                # Strip data-URI prefix if present (e.g. "data:image/png;base64,...")
+                if raw and raw.startswith("data:") and "," in raw:
+                    raw = raw.split(",", 1)[1]
+                parts.append(types.Part.from_bytes(data=base64.b64decode(raw), mime_type=img["mime"]))
+            except Exception:
                 pass
         for doc in msg.get("documents", []):
             try:
+                raw = doc["data"]
+                if raw and raw.startswith("data:") and "," in raw:
+                    raw = raw.split(",", 1)[1]
                 parts.append(types.Part.from_text(text=f"[Attached document: {doc.get('name', 'document')}]"))
-                parts.append(types.Part.from_bytes(data=base64.b64decode(doc["data"]), mime_type=doc["mime"]))
+                parts.append(types.Part.from_bytes(data=base64.b64decode(raw), mime_type=doc["mime"]))
             except Exception:
                 pass
         if msg.get("file_text"):
             parts.append(types.Part.from_text(text=f"[Attached: {msg.get('file_name','')}]\n{msg['file_text']}"))
         if parts:
-            contents.append(types.Content(role=role, parts=parts))
+            # Merge with previous Content if same role (Google API rejects consecutive same-role entries)
+            if contents and contents[-1].role == role:
+                contents[-1].parts.extend(parts)
+            else:
+                contents.append(types.Content(role=role, parts=parts))
     return contents
 
 def resolve_chat_model(chat, settings):
@@ -3977,7 +3997,11 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
         else:
             chat["title"] = _fresh_chat["title"]
 
-    chat["messages"].append(ctx["user_msg"])
+    # Only append user_msg if it wasn't pre-saved by the stream endpoint
+    if not chat.get("_streaming"):
+        chat["messages"].append(ctx["user_msg"])
+    else:
+        chat.pop("_streaming", None)
     msg_obj = {
         "role": "model",
         "text": clean_with_placeholders,
@@ -5405,6 +5429,91 @@ def patch_chat(chat_id):
     save_chat(c)
     return jsonify({"ok": True})
 
+@app.route("/api/chats/<chat_id>/file")
+@require_auth_or_guest
+def chat_embedded_file(chat_id):
+    """Serve a file embedded in chat message data (persists across server restarts)."""
+    chat, reason = load_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+    msg_idx = request.args.get("msg", type=int)
+    file_idx = request.args.get("file", type=int)
+    ftype = request.args.get("type", "code")
+    msgs = chat.get("messages", [])
+    if msg_idx is None or msg_idx < 0 or msg_idx >= len(msgs):
+        return jsonify({"error": "Invalid message index"}), 400
+    msg = msgs[msg_idx]
+    if ftype == "code":
+        idx = 0
+        for cr in (msg.get("code_results") or []):
+            for gf in (cr.get("files") or []):
+                if idx == file_idx:
+                    data = gf.get("data")
+                    if not data:
+                        # Fallback: try serving from disk
+                        disk_path = WORKSPACE / gf.get("path", "")
+                        if disk_path.exists() and disk_path.is_file():
+                            return send_from_directory(str(disk_path.parent), disk_path.name, as_attachment=True)
+                        return jsonify({"error": "File data not available"}), 404
+                    mime = gf.get("mime", "application/octet-stream")
+                    name = gf.get("name", "file")
+                    resp = Response(base64.b64decode(data), mimetype=mime)
+                    resp.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+                    return resp
+                idx += 1
+    elif ftype == "image":
+        images = msg.get("images") or []
+        if file_idx is not None and 0 <= file_idx < len(images):
+            img = images[file_idx]
+            data = img.get("data")
+            if not data:
+                return jsonify({"error": "Image data not available"}), 404
+            mime = img.get("mime", "image/png")
+            resp = Response(base64.b64decode(data), mimetype=mime)
+            return resp
+    elif ftype == "document":
+        documents = msg.get("documents") or []
+        if file_idx is not None and 0 <= file_idx < len(documents):
+            doc = documents[file_idx]
+            data = doc.get("data")
+            if not data:
+                return jsonify({"error": "Document data not available"}), 404
+            mime = doc.get("mime", "application/octet-stream")
+            name = doc.get("name", "document")
+            resp = Response(base64.b64decode(data), mimetype=mime)
+            resp.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+            return resp
+    return jsonify({"error": "File not found"}), 404
+
+@app.route("/api/chats/<chat_id>/partial", methods=["POST"])
+@require_auth_or_guest
+def save_partial_response(chat_id):
+    """Save a partial AI response when the user leaves mid-stream (called via sendBeacon)."""
+    chat, reason = load_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+    # Only save if the chat is in streaming state (user msg already saved, no model reply yet)
+    if not chat.get("_streaming"):
+        return jsonify({"ok": True, "skipped": True}), 200
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+    partial_text = (data.get("text") or "").strip()
+    if not partial_text:
+        return jsonify({"ok": True, "skipped": True}), 200
+    # Append partial model message marked as interrupted
+    chat.pop("_streaming", None)
+    chat["messages"].append({
+        "role": "model",
+        "text": partial_text + "\n\n*[Response interrupted]*",
+        "raw_text": partial_text,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "interrupted": True,
+    })
+    save_chat(chat)
+    return jsonify({"ok": True}), 200
+
 @app.route("/api/chats/<chat_id>", methods=["DELETE"])
 @require_auth_or_guest
 def del_chat(chat_id):
@@ -6458,6 +6567,15 @@ def chat_message_stream(chat_id):
 
     resolved = ctx["resolved"]
 
+    # Pre-save the user message so it persists even if the user refreshes mid-stream
+    if ctx["user_msg"] not in chat.get("messages", []):
+        chat.setdefault("messages", []).append(ctx["user_msg"])
+        # Set a title if this is the first message
+        if len(chat["messages"]) == 1:
+            chat["title"] = fallback_chat_title(ctx.get("user_text", ""), "")
+        chat["_streaming"] = True  # Mark that we're mid-stream
+        save_chat(chat)
+
     def event(payload):
         return json.dumps(payload) + "\n"
 
@@ -6574,8 +6692,8 @@ def chat_message_stream(chat_id):
                 # Render's proxy from killing the connection.
                 import queue, threading
                 _SENTINEL = object()
-                _HEARTBEAT_INTERVAL = 8           # seconds (reduced from 15 — school/corp proxies kill idle connections at ~30s)
-                _MAX_STALL_HEARTBEATS = 20        # give up after 20 heartbeats (~160s) with no data
+                _HEARTBEAT_INTERVAL = 3           # seconds — aggressive keepalive to defeat proxy timeouts
+                _MAX_STALL_HEARTBEATS = 60        # give up after 60 heartbeats (~180s) with no data
                 _stall_count = 0
                 _chunk_q = queue.Queue()
 
@@ -6883,6 +7001,9 @@ def chat_message_stream(chat_id):
         except Exception as e:
             try: _media_executor.shutdown(wait=False)
             except: pass
+            # Clean up the _streaming flag so the chat isn't stuck
+            chat.pop("_streaming", None)
+            save_chat(chat)
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
                 yield event({"type": "error", "error": f"Rate limit hit \u2014 wait a moment and try again. ({err[:200]})"})
@@ -8117,7 +8238,7 @@ def research_agent():
         seen_urls = set()
         total_word_count = 0
         STEP_TIMEOUT = 300  # 5 minute timeout per step
-        _HEARTBEAT_SEC = 8  # Send keepalive every 8s to prevent proxy/browser timeouts
+        _HEARTBEAT_SEC = 3  # Send keepalive every 3s to prevent proxy/browser timeouts
 
         print(f"  [research] Starting research with {len(steps)} steps, model={model}, query={query[:80]}")
         # Immediate first byte — prevents Render's 30s proxy timeout from killing the connection
@@ -8181,7 +8302,8 @@ def research_agent():
 
             for _att_idx, _att in enumerate(_attempts):
                 if _att_idx > 0:
-                    _time.sleep(2)
+                    _time.sleep(1)
+                    yield evt({"type": "heartbeat"})
                     step_pieces = []  # Reset for retry
                     print(f"  [research] Step {i+1} attempt {_att_idx+1} ({_att['label']})...")
 
@@ -8516,7 +8638,49 @@ def research_agent():
             except Exception:
                 pass
 
-    resp = Response(stream_with_context(_safe_generate()), mimetype="application/x-ndjson")
+    def _heartbeat_wrap(inner_gen, interval=3):
+        """Run inner_gen in a thread, yield its events, inject heartbeats if nothing arrives for `interval` seconds."""
+        import queue as _hq, threading as _ht
+        _out = _hq.Queue()
+        _stop = _ht.Event()
+        _hb_line = json.dumps({"type": "heartbeat"}) + "\n"
+
+        def _pump():
+            try:
+                for item in inner_gen:
+                    _out.put(item)
+            except GeneratorExit:
+                pass
+            except Exception as _pe:
+                try:
+                    _out.put(json.dumps({"type": "agent_error", "error": str(_pe)[:300]}) + "\n")
+                except Exception:
+                    pass
+            finally:
+                _stop.set()
+
+        _t = _ht.Thread(target=_pump, daemon=True)
+        _t.start()
+
+        while True:
+            try:
+                item = _out.get(timeout=interval)
+                yield item
+            except _hq.Empty:
+                if _stop.is_set():
+                    # Drain remaining items
+                    while not _out.empty():
+                        try:
+                            yield _out.get_nowait()
+                        except _hq.Empty:
+                            break
+                    break
+                yield _hb_line
+
+    # Wrap with stream_with_context FIRST (so Flask context is captured),
+    # then wrap with heartbeat injector that runs it in a background thread.
+    ctx_gen = stream_with_context(_safe_generate())
+    resp = Response(_heartbeat_wrap(ctx_gen, interval=3), mimetype="application/x-ndjson")
     resp.headers["X-Accel-Buffering"] = "no"
     resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Content-Type-Options"] = "nosniff"
