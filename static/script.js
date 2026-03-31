@@ -2933,7 +2933,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
         clearInterval(elTimer);
         if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
         area.removeEventListener('scroll',_raOnScroll);
-        setChatRunning(chatId,false);
         setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},1500);
         return;
       }
@@ -4025,15 +4024,19 @@ function fmtLive(raw){
   html=html.replace(/&lt;&lt;&lt;SOURCES&gt;&gt;&gt;[\s\S]*$/,'');
   html=html.replace(/&lt;&lt;&lt;FOLLOWUPS&gt;&gt;&gt;[\s\S]*?&lt;&lt;&lt;END_FOLLOWUPS&gt;&gt;&gt;/g,'');
   html=html.replace(/&lt;&lt;&lt;FOLLOWUPS&gt;&gt;&gt;[\s\S]*$/,'');
-  // Completed CODE_EXECUTE blocks — show code + executing indicator
+  // Completed CODE_EXECUTE blocks — show code + executing indicator (stash in _liveBlocks to protect from markdown)
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*?)&lt;&lt;&lt;END_CODE&gt;&gt;&gt;/g,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
-    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> '+esc(langLabel)+' — Running...</div><pre class="stream-code-exec-body"><code>'+code+'</code></pre><div class="stream-code-exec-status"><div class="dots"><span></span><span></span><span></span></div> Executing...</div></div>';
+    const block='<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> '+esc(langLabel)+' — Running...</div><pre class="stream-code-exec-body"><code>'+code+'</code></pre><div class="stream-code-exec-status"><div class="dots"><span></span><span></span><span></span></div> Executing...</div></div>';
+    _liveBlocks.push(block);
+    return `%%%LIVEBLOCK${_liveBlocks.length-1}%%%`;
   });
-  // Unclosed CODE_EXECUTE block (still streaming) — show the code being written
+  // Unclosed CODE_EXECUTE block (still streaming) — show the code being written (stash to protect from markdown)
   html=html.replace(/&lt;&lt;&lt;CODE_EXECUTE:\s*(\w+)&gt;&gt;&gt;([\s\S]*)$/,(_,lang,code)=>{
     const langLabel={'python':'Python','javascript':'JavaScript','js':'JavaScript','html':'HTML','css':'CSS','bash':'Shell','sh':'Shell'}[lang.toLowerCase()]||lang;
-    return '<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> Writing '+esc(langLabel)+' code...</div><pre class="stream-code-exec-body"><code>'+code+'</code><span class="stream-cursor"></span></pre></div>';
+    const block='<div class="stream-code-exec"><div class="stream-code-exec-header"><span class="sp-icon">⚙</span> Writing '+esc(langLabel)+' code...</div><pre class="stream-code-exec-body"><code>'+code+'</code><span class="stream-cursor"></span></pre></div>';
+    _liveBlocks.push(block);
+    return `%%%LIVEBLOCK${_liveBlocks.length-1}%%%`;
   });
   // Unclosed mermaid block
   if(/```mermaid\n/i.test(html)&&!(/```mermaid\n[\s\S]*?```/.test(html))){

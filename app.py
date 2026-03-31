@@ -8197,7 +8197,7 @@ def research_agent():
                             except (AttributeError, TypeError):
                                 pass  # url_context not available in this SDK version
 
-                        _client = genai.Client(api_key=api_key)
+                        _client = genai.Client(api_key=api_key, http_options={"timeout": 300_000})
                         _turn_contents = _google_contents_from_messages(messages, types)
                         _cfg_args = dict(
                             system_instruction=step["system"],
