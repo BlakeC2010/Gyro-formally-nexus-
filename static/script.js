@@ -2492,6 +2492,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
   const discoveredFindings=[];
   let startTime=Date.now();
   let totalWords=0;
+  const _raDevRaw=devRawMode;  // Snapshot dev mode at stream start
 
   const stepsHtml=stepNames.map((name,i)=>`<div class="ra-step" data-ra="${i}"><div class="ra-step-dot" onclick="raScrollToStep(${i+1})">${stepIcons[i]}</div><div class="ra-step-label">${name}</div></div>`).join('');
 
@@ -2725,7 +2726,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             const timerEl=document.getElementById('_raT'+ev.step);
             if(timerEl){timerEl.classList.remove('ra-timer-live');if(elapsed) timerEl.textContent=elapsed+'s';}
             const ce=document.getElementById('_raC'+ev.step);
-            if(ce) ce.innerHTML=fmt(stepContent);
+            if(ce) ce.innerHTML=_raDevRaw?'<pre class="dev-raw-log">'+esc(stepContent)+'</pre>':fmt(stepContent);
             const thEl=document.getElementById('_raThink'+ev.step);
             if(thEl&&stepThinking){
               const lb=thEl.querySelector('.ra-thinking-label');
@@ -2763,7 +2764,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         }else if(ev.type==='agent_delta'){
           stepContent+=ev.text;
           if(currentContentEl){
-            currentContentEl.innerHTML=fmtLive(stepContent);
+            currentContentEl.innerHTML=_raDevRaw?'<pre class="dev-raw-log">'+esc(stepContent)+'<span class="stream-cursor"></span></pre>':fmtLive(stepContent);
             _raAutoScroll();
           }
         }else if(ev.type==='agent_sources'){
@@ -5723,7 +5724,7 @@ function addMsg(role,text,files,extra={}){
         // Step sections (collapsed)
         steps.forEach((step,i)=>{
           let body=step.body||'';
-          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">✓ done</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-step-content">${fmt(body)}</div></div></div>`;
+          raHtml+=`<div class="ra-section ra-collapsed"><div class="ra-section-head" onclick="this.parentElement.classList.toggle('ra-collapsed')"><span class="ra-section-num">${i+1}</span><span class="ra-section-title">${esc(step.title)}</span><span class="ra-section-status ra-done">✓ done</span><span class="ra-section-chevron">▾</span></div><div class="ra-section-body"><div class="ra-step-content">${devRawMode?'<pre class="dev-raw-log">'+esc(body)+'</pre>':fmt(body)}</div></div></div>`;
         });
         // Search box
         raHtml+=`<div class="ra-search-wrap"><input class="ra-search-input" type="text" placeholder="Search within results..." oninput="(function(inp){var q=inp.value.toLowerCase().trim();var out=inp.closest('.ra-output');if(!out)out=inp.parentElement.parentElement;out.querySelectorAll('.ra-section').forEach(function(s){var body=s.querySelector('.ra-step-content');if(!body)return;if(!q){s.style.display='';return}var txt=body.textContent.toLowerCase();if(txt.includes(q)){s.style.display='';s.classList.remove('ra-collapsed')}else{s.style.display='none'}})})(this)"></div>`;

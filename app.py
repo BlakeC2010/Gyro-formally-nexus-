@@ -8117,9 +8117,11 @@ def research_agent():
         seen_urls = set()
         total_word_count = 0
         STEP_TIMEOUT = 300  # 5 minute timeout per step
-        _HEARTBEAT_SEC = 12  # Send keepalive every 12s to prevent proxy/browser timeouts
+        _HEARTBEAT_SEC = 8  # Send keepalive every 8s to prevent proxy/browser timeouts
 
         print(f"  [research] Starting research with {len(steps)} steps, model={model}, query={query[:80]}")
+        # Immediate first byte — prevents Render's 30s proxy timeout from killing the connection
+        yield evt({"type": "heartbeat"})
         yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
                     "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
 
