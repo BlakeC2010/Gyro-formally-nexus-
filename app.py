@@ -7432,7 +7432,7 @@ def get_greeting():
             f"Fresh morning energy{name_part}.",
             f"New day, new momentum{name_part}.",
             f"Rise and build{name_part}. ??",
-            f"Morning brain is the best brain{name_part}.",
+            f"Sharp and ready{name_part}. Let's build.",
             f"Let's make today count{name_part}.",
             f"Good morning{name_part}. What's the plan?",
             f"The day is yours{name_part}.",

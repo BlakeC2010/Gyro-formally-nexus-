@@ -2962,3 +2962,85 @@ button:focus:not(:focus-visible){outline:none}
 .ra-plan-btn-primary:hover{opacity:.9;box-shadow:0 4px 16px rgba(139,92,246,.4);transform:translateY(-1px)}
 .ra-plan-btn-skip{background:transparent;color:var(--text-secondary);border:1px solid var(--border)}
 .ra-plan-btn-skip:hover{border-color:var(--accent);color:var(--text-primary);background:rgba(139,92,246,.04)}
+
+/* ══════════════════════════════════════════════════
+   SCHOOL MODE — Disables all animations, backdrop-filters,
+   shadows, and heavy GPU effects for low-end iPads
+   ══════════════════════════════════════════════════ */
+body.school-mode,
+body.school-mode *,
+body.school-mode *::before,
+body.school-mode *::after{
+  animation:none!important;
+  animation-delay:0s!important;
+  animation-duration:0s!important;
+  transition:none!important;
+  transition-delay:0s!important;
+  transition-duration:0s!important;
+  backdrop-filter:none!important;
+  -webkit-backdrop-filter:none!important;
+  scroll-behavior:auto!important;
+  will-change:auto!important;
+}
+body.school-mode{
+  --shadow-xs:none;--shadow-sm:none;--shadow-md:none;
+  --shadow-lg:none;--shadow-xl:none;--shadow-glow:none;--shadow-glow-lg:none;
+  --ease:linear;--ease-out:linear;--ease-spring:linear;
+  --ease-spring-snappy:linear;--ease-bounce:linear;--ease-smooth:linear;
+}
+/* Kill login page heavy effects */
+body.school-mode .login-bg,
+body.school-mode .login-particles,
+body.school-mode .login-glow,
+body.school-mode .login-grid{display:none!important}
+body.school-mode .login-logo-ring{animation:none!important;border:2px solid var(--accent-border)}
+body.school-mode .login-logo-ring::before{display:none!important}
+body.school-mode .login-card{
+  backdrop-filter:none!important;-webkit-backdrop-filter:none!important;
+  background:var(--bg-raised)!important;box-shadow:0 2px 8px rgba(0,0,0,.3)!important;
+}
+body.school-mode .login-feat{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+/* Kill chat area pseudo-element radial gradients */
+body.school-mode .chat-area::before{display:none!important}
+/* Kill sidebar shimmer on generating chats */
+body.school-mode .sb-chat.generating::after{display:none!important}
+/* Kill thinking bar sweep */
+body.school-mode .think-active::before,
+body.school-mode .live-think-panel::before{display:none!important}
+/* Kill stream state shimmer */
+body.school-mode .msg .stream-state::before,
+body.school-mode .stream-placeholder::before{display:none!important}
+/* Kill dot animations */
+body.school-mode .dots span,
+body.school-mode .ltp-dots span{animation:none!important;opacity:1!important}
+/* Kill stream cursor blink */
+body.school-mode .stream-cursor{animation:none!important;opacity:1!important}
+/* Simplify mermaid containers */
+body.school-mode .mermaid-container{
+  background:var(--bg-deep)!important;box-shadow:none!important;
+}
+body.school-mode .mermaid-container::before{display:none!important}
+/* Kill sidebar overlay blur */
+body.school-mode .sidebar-overlay{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+/* Kill scroll-to-bottom transition */
+body.school-mode .scroll-to-bottom{transition:none!important}
+body.school-mode .scroll-to-bottom.visible{opacity:1;transform:translateX(-50%)}
+/* Simplify msg appearance — remove animation-dependent styles */
+body.school-mode .msg{opacity:1!important;transform:none!important;filter:none!important}
+body.school-mode .msg-content{opacity:1!important;transform:none!important;filter:none!important}
+/* Kill voice orb effects */
+body.school-mode .orb{animation:none!important}
+/* Kill image loading shimmer */
+body.school-mode .img-loading-shimmer,
+body.school-mode .img-shimmer-bar{animation:none!important}
+/* Reduce box-shadows globally */
+body.school-mode .sb-logo{filter:none!important}
+body.school-mode .sb-logo:hover{filter:none!important}
+/* Kill hover transforms */
+body.school-mode .sb-btn:hover,
+body.school-mode .sb-chat:hover,
+body.school-mode .cms-current:hover,
+body.school-mode .tb-btn:hover,
+body.school-mode .uplan:hover{transform:none!important}
+/* Kill guest limit overlay blur */
+body.school-mode .guest-limit-ov{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}

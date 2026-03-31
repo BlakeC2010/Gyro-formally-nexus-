@@ -516,6 +516,41 @@ function initDevRawToggle(){
   }
 }
 
+/* --- School Mode (dev tier only) --- */
+let schoolMode=localStorage.getItem('gyro_school_mode')==='1';
+function applySchoolMode(){
+  document.body.classList.toggle('school-mode',schoolMode);
+}
+function toggleSchoolMode(on){
+  schoolMode=!!on;
+  localStorage.setItem('gyro_school_mode',on?'1':'0');
+  applySchoolMode();
+  const dot=document.getElementById('schoolModeDot');
+  if(dot){
+    dot.style.transform=on?'translateX(18px)':'none';
+    dot.style.background=on?'var(--accent)':'var(--text-muted)';
+  }
+  const ind=document.getElementById('schoolModeIndicator');
+  if(ind)ind.style.display=on?'':'none';
+}
+function initSchoolModeToggle(){
+  const section=document.getElementById('schoolModeSection');
+  if(!section)return;
+  // Only show for dev tier users
+  const isDev=curUser&&curUser.plan==='dev';
+  section.style.display=isDev?'block':'none';
+  if(!isDev)return;
+  const cb=document.getElementById('schoolModeToggle');
+  if(cb)cb.checked=schoolMode;
+  const dot=document.getElementById('schoolModeDot');
+  if(dot){
+    dot.style.transform=schoolMode?'translateX(18px)':'none';
+    dot.style.background=schoolMode?'var(--accent)':'var(--text-muted)';
+  }
+}
+// Apply school mode immediately on load if saved
+if(schoolMode)document.body.classList.add('school-mode');
+
 async function reRenderCurrentChat(){
   if(!curChat)return;
   try{
@@ -643,6 +678,10 @@ async function showApp(){
   allChats=loadCachedChats();
   hideSetupReminder();
   updateUserUI();
+  applySchoolMode();
+  // Show school mode indicator if active
+  const schInd=document.getElementById('schoolModeIndicator');
+  if(schInd)schInd.style.display=schoolMode?'':'none';
   // Initialize dev mode indicator in topbar
   const topDev=document.getElementById('devModeIndicator');
   if(topDev){
@@ -1053,7 +1092,7 @@ function getLocalTimeGreeting(){
       `Fresh morning energy${namePart}.`,
       `New day, new momentum${namePart}.`,
       `Rise and build${namePart}.`,
-      `Morning brain is the best brain${namePart}.`,
+      `Sharp and ready${namePart}. Let's build.`,
       `Let's make today count${namePart}.`,
       `Good morning${namePart}. What's the plan?`,
       `The day is yours${namePart}.`,
@@ -4286,6 +4325,10 @@ async function sendMessage(opts){
 
   const w=!_isBackground&&document.querySelector('#chatArea .welcome');
   if(w){
+    if(schoolMode){
+      // School mode: remove welcome instantly, no animation
+      w.remove();
+    }else{
     // Choreographed exit: widgets shrink first, then hero fades
     const widgets=w.querySelectorAll('.wl-widget');
     const hero=w.querySelector('.wl-hero');
@@ -4302,6 +4345,7 @@ async function sendMessage(opts){
     w.style.transition='all .35s var(--ease) .15s';
     w.style.opacity='0';
     setTimeout(()=>{if(w.parentNode)w.remove();},400);
+    }
   }
   const files=[...pendingFiles].filter(f=>!f._loading);
   const replies=[...pendingReplies];
@@ -4386,7 +4430,9 @@ async function sendMessage(opts){
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
   let _renderScheduled=false;
-
+    // School mode: throttle stream rendering to every 150ms instead of every frame
+    let _lastRenderTime=0;
+    const _RENDER_INTERVAL=schoolMode?150:0;
   try{
     // Collect active tool names and clear them for next message
     const toolsForMsg=[...activeTools];
@@ -4426,7 +4472,7 @@ async function sendMessage(opts){
       delete window._activeEdit;
     }
     if(window._editTruncateAt!=null){_truncateAt=window._editTruncateAt;delete window._editTruncateAt;}
-    const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders()};
+    const _bodyObj={message:messageToSend,raw_text:_silent?'':text,files,thinking_level:_noThinking?'off':thinkingLevel,web_search:true,active_tools:toolsForMsg,is_system:!!_silent,user_location:getUserLocation(),reminders:_getPendingReminders(),school_mode:schoolMode};
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
     // Inject folder custom instructions if chat is in a folder
     const _chatFolder=(allChats.find(c=>c.id===targetChatId)||{}).folder||_activeFolderView||'';
@@ -4614,9 +4660,14 @@ async function sendMessage(opts){
             if(_thinkTurns[_thinkTurn])_thinkTurns[_thinkTurn].text=_turnThinkText;
             if(canRender()){
               ensureThinkPanel(_thinkTurn);
-              thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
-              const _ltpBody=thinkTextEl.parentElement;
-              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+              // In school mode, throttle thinking panel updates
+              const _tnow=Date.now();
+              if(!_RENDER_INTERVAL||(_tnow-_lastRenderTime)>=_RENDER_INTERVAL){
+                _lastRenderTime=_tnow;
+                thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
+                const _ltpBody=thinkTextEl.parentElement;
+                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+              }
               if(_turnThinkText.length>15){
                 const subj=_extractThinkSubject(_turnThinkText);
                 if(subj!==_lastThinkLabel){
@@ -4658,7 +4709,12 @@ async function sendMessage(opts){
             if(_mediaLoadingCount>0){
               // Text is still accumulated in fullText but not rendered
             }else if(canRender()&&!_renderScheduled){
+              const now=Date.now();
+              if(_RENDER_INTERVAL&&(now-_lastRenderTime)<_RENDER_INTERVAL){
+                // In school mode, skip this frame — next delta will catch up
+              }else{
               _renderScheduled=true;
+              _lastRenderTime=now;
               requestAnimationFrame(()=>{
                 _renderScheduled=false;
                 if(_doneReceived||!canRender())return;
@@ -4669,10 +4725,11 @@ async function sendMessage(opts){
                   targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
                 }else{
                   targetEl.innerHTML=fmtLive(fullText);
-                  renderMathInElementSafe(targetEl);
+                  if(!schoolMode)renderMathInElementSafe(targetEl);
                 }
                 _autoScroll();
               });
+              }
             }
           // -- Mid-stream media loading event --
           }else if(data.type==='media_loading'){
@@ -4943,6 +5000,7 @@ async function sendMessage(opts){
               contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">? Retry</button></div>`;
               renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
+              if(!schoolMode){
               // Animate content in smoothly
               contentEl.style.opacity='0';
               contentEl.style.filter='blur(4px)';
@@ -4958,6 +5016,7 @@ async function sendMessage(opts){
                   contentEl.style.transform='';
                 },450);
               });
+              }
               if(data.title&&data.title!=='New Chat')document.getElementById('topTitle').textContent=data.title;
               // Render mermaid diagrams scoped to this message
               setTimeout(()=>{
@@ -6347,6 +6406,7 @@ async function openSettings(){
   if(curUser)document.getElementById('profileName').value=curUser.name||'';
   updateLocationToggleUI();
   initDevRawToggle();
+  initSchoolModeToggle();
   loadConnectors();
 }
 
