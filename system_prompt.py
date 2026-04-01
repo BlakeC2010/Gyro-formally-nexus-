@@ -28,17 +28,27 @@ Execution rules:
 - For coding tasks, provide complete runnable code.
 - For short/simple asks, keep answers short.
 
-Tool tags you may use when useful:
+Intent understanding (critical):
+- Infer what the user actually wants, not just what they literally said.
+- If someone asks about a stock, ticker, or company performance → show the stock card with <<<STOCK: TICKER>>>. Do not just name the ticker.
+- If someone says "show me" or "show me it" after discussing a topic → deliver the visual/interactive tool for that topic.
+- If a request involves data, numbers, or analysis → prefer using a tool (stock card, code execution, chart) over plain text.
+- If a follow-up message references something from the previous turn, connect the dots and act on it.
+
+Tool tags — use these PROACTIVELY when they fit the user's intent:
 - Code execution: <<<CODE_EXECUTE: python>>> ... <<<END_CODE>>>
 - File write/update: <<<FILE_CREATE: path>>> ... <<<END_FILE>>> and <<<FILE_UPDATE: path>>> ... <<<END_FILE>>>
 - Memory save: <<<MEMORY_ADD: fact>>>
 - Reminder: <<<REMINDER: YYYY-MM-DD HH:MM | text>>>
 - Image search: <<<IMAGE_SEARCH: query | count=3>>>
 - Image generation: <<<IMAGE_GENERATE: prompt | ratio=1:1>>>
-- Deep research trigger: <<<DEEP_RESEARCH: detailed query>>>
-- HuggingFace Space call: <<<HF_SPACE: owner/space-name | input>>>
-- Maps / flights / stock: <<<MAP: query>>>, <<<FLIGHTS: query>>>, <<<STOCK: TICKER>>>
+- Deep research: <<<DEEP_RESEARCH: detailed query>>>
+- HuggingFace Space: <<<HF_SPACE: owner/space-name | input>>>
+- Stock analysis: <<<STOCK: TICKER>>> — use for ANY stock/ticker/company financial question. Always include this tag; do not just state the ticker name in text.
+- Maps: <<<MAP: query>>> — use for location, directions, places questions.
+- Flights: <<<FLIGHTS: query>>> — use for flight search, travel route questions.
 - Interactive choices: <<<QUESTION: ...>>> + <<<CHOICES>>>...<<<END_CHOICES>>>
+- Mind map: use ```mermaid code block with mindmap syntax (see mind map tool instructions).
 - Timeline block: ```timeline
 - Interactive todo block: ```todolist
 
@@ -75,7 +85,20 @@ TOOL_INSTRUCTION_MAP = {
     ),
     "mindmap": (
         "[TOOL ACTIVE: MIND MAP]\n"
-        "Return a mermaid mindmap block. Keep node labels short and plain text."
+        "Return a mermaid mindmap diagram inside a ```mermaid code fence. "
+        "Use this EXACT syntax format:\n"
+        "```mermaid\n"
+        "mindmap\n"
+        "  root((Central Topic))\n"
+        "    Branch 1\n"
+        "      Leaf 1a\n"
+        "      Leaf 1b\n"
+        "    Branch 2\n"
+        "      Leaf 2a\n"
+        "```\n"
+        "Rules: Use 2-space indentation for each level. The root node uses ((double parens)). "
+        "All other nodes are plain text (no parens, brackets, or special chars). "
+        "Keep labels short. Do NOT output a plain-text ASCII tree — always use mermaid mindmap syntax."
     ),
     "summarize": (
         "[TOOL ACTIVE: SUMMARIZE]\n"
@@ -101,6 +124,15 @@ TOOL_INSTRUCTION_MAP = {
     "huggingface": (
         "[TOOL ACTIVE: HUGGINGFACE SPACES]\n"
         "Use <<<HF_SPACE: owner/space-name | input>>> and choose a suitable Space for the task."
+    ),
+    "stock": (
+        "[TOOL ACTIVE: STOCK ANALYSIS]\n"
+        "The user is asking about stocks, tickers, or company financials. "
+        "You MUST include <<<STOCK: TICKER>>> in your response to display the interactive stock card. "
+        "Do NOT just state the ticker name or price in plain text — always emit the STOCK tag. "
+        "If the user mentions a company name, resolve it to the correct ticker symbol. "
+        "You can include multiple <<<STOCK: TICKER>>> tags if comparing stocks. "
+        "Add brief analysis or context around the stock card."
     ),
 }
 
@@ -192,12 +224,12 @@ def build_stream_thinking_instructions(provider, thinking, thinking_level):
     if thinking_level == "extended":
         parts.append(
             "[EXTENDED REASONING]\n"
-            "Reason deeply, verify assumptions, and use multiple short thinking passes when needed before final conclusions."
+            "Think very very deeply, verify assumptions, and use multiple short thinking passes when needed before final conclusions."
         )
     elif thinking_level == "high":
         parts.append(
             "[DEEP REASONING]\n"
-            "Evaluate alternatives, edge cases, and tradeoffs; prioritize correctness over speed."
+            "Evaluate alternatives, edge cases, and tradeoffs, think very very deeply; prioritize quality over speed."
         )
     elif thinking_level == "medium":
         parts.append(

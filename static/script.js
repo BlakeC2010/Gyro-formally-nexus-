@@ -4589,6 +4589,7 @@ async function sendMessage(opts){
     // Reduced from 120s for school/corporate WiFi where proxies kill idle connections
     let _lastAnyEvent=Date.now();
     let _lastMeaningfulEvent=Date.now();
+    let _stallWarned=false;
     let _stallTimer=setInterval(()=>{
       if(_doneReceived){clearInterval(_stallTimer);return;}
       const noEventMs=Date.now()-_lastAnyEvent;
@@ -4618,6 +4619,29 @@ async function sendMessage(opts){
         if(!fullText.trim()&&!thinkText.trim()){
           targetEl.innerHTML='<div style="color:var(--text-muted);font-size:13px;padding:12px 0;font-style:italic">The response timed out. Please try sending your message again.</div>';
         }
+      }
+      // If heartbeats are flowing but no meaningful content for 60s, auto-retry once
+      // This catches the case where the API is connected but the model is stalled
+      if(!_stallWarned&&noMeaningfulMs>60000&&noEventMs<10000){
+        _stallWarned=true;
+        console.warn(`[gyro] No meaningful content for ${Math.round(noMeaningfulMs/1000)}s — model may be stalled`);
+        if(!fullText.trim()&&!thinkText.trim()&&_retryCount<_MAX_STREAM_RETRIES){
+          console.warn(`[gyro] Auto-retrying stalled model (attempt ${_retryCount+1}/${_MAX_STREAM_RETRIES})`);
+          clearInterval(_stallTimer);
+          try{controller.abort();}catch(_){}
+          msgDiv.remove();
+          setChatRunning(targetChatId,false);
+          area.removeEventListener('scroll',_onUserScroll);
+          const _retryTid=setTimeout(()=>{
+            const cur=runningStreams.get(targetChatId);
+            if(cur&&cur.streamId!==streamId)return;
+            sendMessage({...opts,message:text,_retryCount:_retryCount+1,targetChat:targetChatId});
+          },2000);
+          const _pList3=_pendingReprompts.get(targetChatId)||[];_pList3.push(_retryTid);_pendingReprompts.set(targetChatId,_pList3);
+          return;
+        }
+        // If we can't auto-retry, at least warn the user
+        setStatus('Model seems to be taking a while... you can stop and try again.');
       }
     },5000);
 

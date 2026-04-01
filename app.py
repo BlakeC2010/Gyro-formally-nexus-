@@ -3001,6 +3001,36 @@ def prepare_chat_turn(chat, payload):
     web_search = payload.get("web_search", False)
     active_tools = payload.get("active_tools", [])
 
+    # --- Auto-enable stock analysis for stock/ticker/financial queries ---
+    if 'stock' not in active_tools and user_text:
+        _is_system_reprompt = user_text.startswith('[SYSTEM]')
+        if not _is_system_reprompt:
+            _stock_indicators = re.search(
+                r'(?i)\b(stock\s+(?:ticker|price|analysis|data|chart|info|card|quote)|'
+                r'ticker\s+(?:for|of|symbol)|'
+                r'(?:show|get|pull up|look up|check)\s+(?:me\s+)?(?:the\s+)?(?:stock|ticker)|'
+                r'(?:how\s+is|how\'s)\s+\w+\s+(?:stock|doing\s+in\s+the\s+market)|'
+                r'(?:stock|share)\s+(?:market|performance|overview)|'
+                r'(?:buy|sell|hold|invest)\s+(?:in\s+)?\w+\s+(?:stock|shares)|'
+                r'(?:market\s+cap|p/?e\s+ratio|earnings|dividend|52.week)|'
+                r'\b[A-Z]{1,5}\s+(?:stock|shares|ticker|price))',
+                user_text
+            )
+            if _stock_indicators:
+                active_tools = list(active_tools) + ['stock']
+
+    # --- Auto-enable mindmap for mind map / visual map requests ---
+    if 'mindmap' not in active_tools and user_text:
+        _is_system_reprompt = user_text.startswith('[SYSTEM]')
+        if not _is_system_reprompt:
+            _mindmap_indicators = re.search(
+                r'(?i)\b(mind\s*map|mindmap|visual\s*map|concept\s*map|branch\s*diagram|'
+                r'(?:create|make|draw|show|generate)\s+(?:a\s+)?(?:mind\s*map|concept\s*map|visual\s*map|map\s+of))',
+                user_text
+            )
+            if _mindmap_indicators:
+                active_tools = list(active_tools) + ['mindmap']
+
     # --- Auto-enable code execution for math queries ---
     if 'code' not in active_tools and user_text:
         _math_indicators = re.search(
@@ -3818,7 +3848,8 @@ def _ai_home_widgets(user_name, profile, chats, todos, visions):
 
 def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
-    client = genai.Client(api_key=api_key, http_options={"timeout": 120_000})
+    _timeout = 300_000 if (thinking or (thinking_level and thinking_level != "off")) else 120_000
+    client = genai.Client(api_key=api_key, http_options={"timeout": _timeout})
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
@@ -3855,7 +3886,9 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
 
 def call_google_stream(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
-    client = genai.Client(api_key=api_key, http_options={"timeout": 120_000})
+    # Use a longer timeout when thinking is enabled — large thinking budgets can take 3-5 minutes
+    _timeout = 300_000 if (thinking or (thinking_level and thinking_level != "off")) else 120_000
+    client = genai.Client(api_key=api_key, http_options={"timeout": _timeout})
     contents = _google_contents_from_messages(messages, types)
     cfg = dict(system_instruction=sysprompt)
     _level = thinking_level if thinking_level and thinking_level != "off" else ("low" if thinking else None)
@@ -3867,7 +3900,7 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
         _budget = _budgets.get(_level, 10000)
         cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=_budget, include_thoughts=True)
         cfg["max_output_tokens"] = 65536
-        print(f"  [thinking] Google stream: thinking enabled, level={_level}, budget={_budget}")
+        print(f"  [thinking] Google stream: thinking enabled, level={_level}, budget={_budget}, timeout={_timeout}ms")
     else:
         cfg["max_output_tokens"] = 65536
     if web_search:
@@ -3906,13 +3939,17 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
                     if text:
                         _content_count += 1
                         yield text
-            if thinking:
+            if thinking or use_thinking:
                 print(f"  [thinking] Google stream: total thought chunks={_thought_count}, content chunks={_content_count}")
-            # If thinking produced output but content didn't, and we have thinking+tools, retry without thinking
-            if _thought_count > 0 and _content_count == 0 and _attempt == 0 and use_thinking and web_search:
-                print(f"  [thinking] Google stream: thinking produced output but no content — retrying without thinking")
+            # If thinking produced output but content didn't, retry without thinking
+            # (regardless of web_search — this can happen with any thinking+model combo)
+            if _thought_count > 0 and _content_count == 0 and _attempt < 2 and use_thinking:
+                print(f"  [thinking] Google stream: thinking produced output but no content — retrying without thinking (attempt {_attempt+1})")
                 cfg.pop("thinking_config", None)
                 use_thinking = False
+                # Also try without tools if we have them, as the combo may be causing issues
+                if _attempt >= 1 and "tools" in cfg:
+                    cfg.pop("tools", None)
                 continue
             return  # success
         except Exception as e:
@@ -5835,8 +5872,14 @@ def chat_message_stream(chat_id):
                                 events.append({"type": "image_generated", "image": gr})
                             else:
                                 events.append({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": gen_result})
-                    except Exception:
-                        pass
+                    except Exception as _drain_exc:
+                        # Report failure for completed-but-crashed fetches
+                        if kind == "stock":
+                            events.append({"type": "stock_failed", "ticker": entry.get('ticker', '?'), "index": entry.get('index', 0), "error": str(_drain_exc)[:100]})
+                        elif kind == "image_search":
+                            events.append({"type": "image_failed", "query": entry.get('query', '?'), "index": entry.get('index', 0)})
+                        elif kind == "image_gen":
+                            events.append({"type": "image_gen_failed", "prompt": entry.get('prompt', '?'), "index": entry.get('index', 0), "error": str(_drain_exc)[:100]})
                 else:
                     still_pending.append((kind, entry, future))
             _media_fetches[:] = still_pending
@@ -5851,8 +5894,9 @@ def chat_message_stream(chat_id):
                 import queue, threading
                 _SENTINEL = object()
                 _HEARTBEAT_INTERVAL = 3           # seconds — aggressive keepalive to defeat proxy timeouts
-                _MAX_STALL_HEARTBEATS = 60        # give up after 60 heartbeats (~180s) with no data
+                _MAX_STALL_HEARTBEATS = 30        # give up after 30 heartbeats (~90s) with no data from model
                 _stall_count = 0
+                _got_any_content = False           # track if we ever got a real chunk
                 _chunk_q = queue.Queue()
 
                 def _stream_worker():
@@ -5886,13 +5930,16 @@ def chat_message_stream(chat_id):
                     except queue.Empty:
                         _stall_count += 1
                         if _stall_count >= _MAX_STALL_HEARTBEATS:
-                            print(f"  [stream] Stall detected — {_stall_count} heartbeats with no data. Ending stream.")
+                            print(f"  [stream] Stall detected — {_stall_count} heartbeats (~{_stall_count*_HEARTBEAT_INTERVAL}s) with no data. Ending stream.")
+                            if not _got_any_content:
+                                yield event({"type": "error", "error": "The model took too long to respond. Try sending your message again."})
                             break
                         # No data — send padded heartbeat to keep connection alive
                         # Padding defeats proxy buffering (some proxies wait for N bytes)
                         yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
                         continue
                     _stall_count = 0  # reset on any real data
+                    _got_any_content = True
                     if chunk is _SENTINEL:
                         break
                     if isinstance(chunk, Exception):
@@ -6028,8 +6075,14 @@ def chat_message_stream(chat_id):
                             yield event({"type": "image_generated", "image": gr})
                         else:
                             yield event({"type": "image_gen_failed", "prompt": entry['prompt'], "index": entry['index'], "error": gen_result})
-                except Exception:
-                    pass
+                except Exception as _fetch_exc:
+                    # Emit failure events for timed-out or crashed fetches
+                    if kind == "stock":
+                        yield event({"type": "stock_failed", "ticker": entry.get('ticker', '?'), "index": entry.get('index', 0), "error": f"Fetch timed out or failed: {str(_fetch_exc)[:100]}"})
+                    elif kind == "image_search":
+                        yield event({"type": "image_failed", "query": entry.get('query', '?'), "index": entry.get('index', 0)})
+                    elif kind == "image_gen":
+                        yield event({"type": "image_gen_failed", "prompt": entry.get('prompt', '?'), "index": entry.get('index', 0), "error": f"Generation failed: {str(_fetch_exc)[:100]}"})
             _media_fetches.clear()
             _media_executor.shutdown(wait=False)
 
