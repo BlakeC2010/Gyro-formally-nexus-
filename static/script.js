@@ -183,9 +183,6 @@ function stopStreaming(){
   if(run?.controller){
     run.controller.abort();
   }
-  // Prevent research agent auto-retry after user cancellation
-  window._raCancelledChat=curChat;
-  window._raAutoRetryCount=99;
   // Cancel ALL pending auto-reprompts for this chat
   const pending=_pendingReprompts.get(curChat);
   if(pending){pending.forEach(id=>clearTimeout(id));_pendingReprompts.delete(curChat);}
@@ -2541,14 +2538,11 @@ function toggleResearch(){
 
 async function showResearchPlan(query, contentEl, area, chatId){
   // Go straight to research — questions are handled in normal chat conversation
-  window._raCancelledChat=null; // Clear cancellation for fresh research
   contentEl.innerHTML='';
   await runResearchAgent(query, contentEl, area, chatId);
 }
 
 async function runResearchAgent(query, contentEl, area, chatId){
-  // Check if this chat was cancelled by the user — abort immediately
-  if(window._raCancelledChat===chatId) return;
   // Reset auto-retry counter on fresh invocation (not from auto-retry itself)
   if(!window._raIsAutoRetry) window._raAutoRetryCount=0;
   window._raIsAutoRetry=false;
@@ -3016,8 +3010,16 @@ async function runResearchAgent(query, contentEl, area, chatId){
 
     // Stream ended — check if we got a proper completion
     if(!_raDoneReceived){
-      // Don't auto-retry if user cancelled
-      if(window._raCancelledChat===chatId) return;
+      // If user cancelled, don't auto-retry
+      if(_raAbort.signal.aborted){
+        window._raAutoRetryCount=0;
+        const badge=document.getElementById('_raBadge');
+        if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Cancelled';}
+        const actEl=document.getElementById('_raActivity');
+        if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
+        return;
+      }
       // Auto-retry if stream ended unexpectedly (server timeout, etc.)
       if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
       window._raAutoRetryCount++;
@@ -3040,7 +3042,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
     }
   }catch(e){
-    const isAbort=e.name==='AbortError';
+    const isAbort=e.name==='AbortError'||_raAbort.signal.aborted;
     const isNetwork=e.name==='TypeError'||e.message?.includes('network')||e.message?.includes('Failed to fetch');
     if(isAbort){
       // User cancelled — show a clean message (don't auto-retry user cancels)
@@ -3051,8 +3053,6 @@ async function runResearchAgent(query, contentEl, area, chatId){
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
     }else if(isNetwork){
-      // Don't auto-retry if user cancelled
-      if(window._raCancelledChat===chatId) return;
       // Auto-retry network errors
       if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
       window._raAutoRetryCount++;
