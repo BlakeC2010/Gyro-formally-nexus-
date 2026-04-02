@@ -1610,11 +1610,24 @@ input[type="file"]{display:none}
 .fbc-folder{margin-bottom:6px}
 .fbc-folder-head{font-size:11px;font-weight:700;color:var(--text-muted);padding:8px 8px 4px;display:flex;align-items:center;gap:6px}
 .fbc-count{font-size:10px;background:var(--bg-deep);padding:1px 6px;border-radius:99px;margin-left:auto}
-.fbc-chat{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:var(--r-xs);cursor:pointer;transition:background .12s}
+.fbc-chat-wrap{margin-bottom:2px}
+.fbc-chat{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:var(--r-xs);cursor:pointer;transition:background .12s}
 .fbc-chat:hover{background:var(--bg-hover)}
 .fbc-chat.fbc-active{background:var(--accent-alpha, rgba(99,102,241,.12))}
+.fbc-expand-arrow{font-size:12px;color:var(--text-muted);transition:transform .15s;flex-shrink:0;width:14px;text-align:center}
+.fbc-chat-wrap.fbc-expanded>.fbc-chat .fbc-expand-arrow{transform:rotate(90deg);color:var(--accent)}
 .fbc-title{font-size:12px;color:var(--text-primary);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fbc-date{font-size:10px;color:var(--text-muted);flex-shrink:0}
+.fbc-files{display:none;padding:4px 0 6px 22px;border-left:2px solid var(--border);margin-left:16px}
+.fbc-chat-wrap.fbc-expanded>.fbc-files{display:block}
+.fbc-file{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:var(--r-xs);cursor:pointer;transition:background .12s;font-size:11px}
+.fbc-file:hover{background:var(--bg-hover)}
+.fbc-file-icon{font-size:11px;flex-shrink:0;color:var(--text-muted)}
+.fbc-file-name{color:var(--text-primary);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fbc-file-action{font-size:9px;color:var(--text-muted);flex-shrink:0;text-transform:uppercase;letter-spacing:.5px}
+.fbc-files-loading,.fbc-files-empty{font-size:10px;color:var(--text-muted);padding:6px 8px}
+.fbc-goto{font-size:10px;color:var(--accent);padding:6px 8px;cursor:pointer;transition:opacity .12s;opacity:.7}
+.fbc-goto:hover{opacity:1;text-decoration:underline}
 
 /* ── Chat Settings Drawer ── */
 .chat-drawer-overlay{position:fixed;inset:0;background:transparent;z-index:900;opacity:0;pointer-events:none;transition:opacity .25s var(--ease)}

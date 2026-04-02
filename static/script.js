@@ -37,7 +37,7 @@ window.addEventListener('beforeunload',()=>{
   for(const [chatId,state] of _activeStreamState){
     const text=state.fullText;
     if(!text)continue;
-    try{navigator.sendBeacon(`/api/chats/${chatId}/partial`,new Blob([JSON.stringify({text})],{type:'application/json'}));}catch(e){}
+    try{navigator.sendBeacon(`/api/chats/${chatId}/partial`,new Blob([JSON.stringify({text,final:true})],{type:'application/json'}));}catch(e){}
   }
 });
 const _pendingReprompts=new Map(); // chatId => [timeoutId, ...] — cleared on stop/edit
@@ -397,6 +397,8 @@ setInterval(async()=>{
 // On tab re-focus, verify the session is still valid
 document.addEventListener('visibilitychange', async()=>{
   if(document.visibilityState!=='visible' || !curUser) return;
+  // Don't interrupt active streams with session checks
+  if(runningStreams.size>0) return;
   try{
     const r=await fetch('/api/auth/me');
     const d=await r.json();
@@ -4577,6 +4579,14 @@ async function sendMessage(opts){
     _activeStreamState.set(targetChatId,{get fullText(){return fullText;},get thinkText(){return thinkText;}});
     const _streamDevRaw=devRawMode;  // Snapshot dev mode at stream start to prevent mid-stream format switches
     let _genFailures=[];
+    // -- Periodic auto-save: save partial content every 15s during streaming --
+    const _partialSaveInterval=setInterval(()=>{
+      const text=fullText.trim();
+      if(!text)return;
+      try{
+        navigator.sendBeacon(`/api/chats/${targetChatId}/partial`,new Blob([JSON.stringify({text})],{type:'application/json'}));
+      }catch(e){}
+    },15000);
     // -- Multi-turn thinking state --
     let _thinkTurn=0;              // Current thinking turn number (incremented each time thinking restarts)
     let _thinkTurns={};            // {turnNum: {panel, textEl, text}}
@@ -4585,8 +4595,8 @@ async function sendMessage(opts){
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
-    // Stall detection: if no event (including heartbeats) for 45s, warn the user
-    // Reduced from 120s for school/corporate WiFi where proxies kill idle connections
+    // Stall detection: if no event (including heartbeats) for 120s, warn the user
+    // Increased from 45s to be more tolerant of slow models and poor connections
     let _lastAnyEvent=Date.now();
     let _lastMeaningfulEvent=Date.now();
     let _stallWarned=false;
@@ -4594,10 +4604,10 @@ async function sendMessage(opts){
       if(_doneReceived){clearInterval(_stallTimer);return;}
       const noEventMs=Date.now()-_lastAnyEvent;
       const noMeaningfulMs=Date.now()-_lastMeaningfulEvent;
-      // If no events at all (not even heartbeats) for 45s, connection is dead
-      if(noEventMs>45000){
+      // If no events at all (not even heartbeats) for 120s, connection is dead
+      if(noEventMs>120000){
         clearInterval(_stallTimer);
-        console.warn('[gyro] Stream stalled — no events for 45s (proxy may have killed connection)');
+        console.warn('[gyro] Stream stalled — no events for 120s (proxy may have killed connection)');
         // Auto-retry if no content received yet
         if(!fullText.trim()&&!thinkText.trim()&&_retryCount<_MAX_STREAM_RETRIES){
           console.warn(`[gyro] Auto-retrying stalled stream (attempt ${_retryCount+1}/${_MAX_STREAM_RETRIES})`);
@@ -4620,9 +4630,9 @@ async function sendMessage(opts){
           targetEl.innerHTML='<div style="color:var(--text-muted);font-size:13px;padding:12px 0;font-style:italic">The response timed out. Please try sending your message again.</div>';
         }
       }
-      // If heartbeats are flowing but no meaningful content for 60s, auto-retry once
+      // If heartbeats are flowing but no meaningful content for 180s, auto-retry once
       // This catches the case where the API is connected but the model is stalled
-      if(!_stallWarned&&noMeaningfulMs>60000&&noEventMs<10000){
+      if(!_stallWarned&&noMeaningfulMs>180000&&noEventMs<10000){
         _stallWarned=true;
         console.warn(`[gyro] No meaningful content for ${Math.round(noMeaningfulMs/1000)}s — model may be stalled`);
         if(!fullText.trim()&&!thinkText.trim()&&_retryCount<_MAX_STREAM_RETRIES){
@@ -4838,6 +4848,7 @@ async function sendMessage(opts){
             _doneReceived=true;
             _activeStreamState.delete(targetChatId);
             clearInterval(_stallTimer);
+            clearInterval(_partialSaveInterval);
             // Immediately mark chat as not running so UI updates (stop button ? send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse ALL live thinking panels
@@ -5486,6 +5497,7 @@ async function sendMessage(opts){
     }
   }finally{
     clearInterval(_stallTimer);
+    clearInterval(_partialSaveInterval);
     // -- Handle stream ending without a done event (connection drop, timeout, etc.) --
     if(!_doneReceived&&canRender()){
       stopThinkingPhrases();
@@ -6805,13 +6817,12 @@ function switchFileTab(tab,btn){
   document.querySelectorAll('.fb-tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.fb-panel').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  const panelId=tab==='chat'?'fbChat':tab==='chats'?'fbChats':'fbWorkspace';
+  const panelId=tab==='chats'?'fbChats':'fbWorkspace';
   document.getElementById(panelId).classList.add('active');
-  if(tab==='chat')refreshChatFiles();else if(tab==='chats')refreshChatsTab();else refreshWorkspaceFiles();
+  if(tab==='chats')refreshChatsTab();else refreshWorkspaceFiles();
 }
 async function refreshFileBrowser(){
   refreshWorkspaceFiles();
-  refreshChatFiles();
 }
 async function refreshChatsTab(){
   const el=document.getElementById('fbChats');
@@ -6834,15 +6845,71 @@ async function refreshChatsTab(){
       }
       for(const c of folders[fld]){
         const active=c.id===curChat?' fbc-active':'';
+        const expanded=c.id===curChat?' fbc-expanded':'';
         const date=c.updated?new Date(c.updated).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'';
-        html+=`<div class="fbc-chat${active}" onclick="loadChat('${c.id}');closeFileBrowser()"><span class="fbc-title">${esc(c.title||'New Chat')}</span><span class="fbc-date">${date}</span></div>`;
+        html+=`<div class="fbc-chat-wrap${expanded}" data-chatid="${c.id}">`;
+        html+=`<div class="fbc-chat${active}" onclick="toggleChatFiles('${c.id}',this)"><span class="fbc-expand-arrow">›</span><span class="fbc-title">${esc(c.title||'New Chat')}</span><span class="fbc-date">${date}</span></div>`;
+        html+=`<div class="fbc-files" id="fbc-files-${c.id}"></div>`;
+        html+=`</div>`;
       }
       if(fld)html+='</div>';
     }
     el.innerHTML=html;
+    // Auto-load files for the current chat 
+    if(curChat){
+      const wrap=el.querySelector(`.fbc-chat-wrap[data-chatid="${curChat}"]`);
+      if(wrap)loadChatFilesInline(curChat);
+    }
   }catch(e){
     el.innerHTML='<div class="fb-empty">Failed to load chats.</div>';
   }
+}
+async function toggleChatFiles(chatId,chatEl){
+  const wrap=chatEl.closest('.fbc-chat-wrap');
+  if(!wrap)return;
+  const isExpanded=wrap.classList.contains('fbc-expanded');
+  // Collapse all others
+  document.querySelectorAll('.fbc-chat-wrap.fbc-expanded').forEach(w=>{
+    if(w!==wrap)w.classList.remove('fbc-expanded');
+  });
+  if(isExpanded){
+    wrap.classList.remove('fbc-expanded');
+  }else{
+    wrap.classList.add('fbc-expanded');
+    loadChatFilesInline(chatId);
+  }
+}
+async function loadChatFilesInline(chatId){
+  const container=document.getElementById(`fbc-files-${chatId}`);
+  if(!container)return;
+  if(container.dataset.loaded==='1')return; // already loaded
+  container.innerHTML='<div class="fbc-files-loading">Loading files…</div>';
+  try{
+    const r=await apiFetch(`/api/chats/${chatId}`);
+    if(!r.ok){container.innerHTML='<div class="fbc-files-empty">Could not load.</div>';return;}
+    const data=await r.json();
+    const genFiles=data.generated_files||[];
+    const uploads=(data.messages||[]).filter(m=>m.file_name).map(m=>({name:m.file_name,when:m.timestamp}));
+    let html='';
+    if(genFiles.length){
+      for(const f of genFiles){
+        const name=f.path.split('/').pop()||f.path;
+        const ext=(name.split('.').pop()||'').toLowerCase();
+        const icon=ext==='md'?'◆':ext==='json'?'◇':ext==='txt'?'▪':ext==='py'?'▸':'▪';
+        html+=`<div class="fbc-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}');closeFileBrowser()"><span class="fbc-file-icon">${icon}</span><span class="fbc-file-name">${esc(name)}</span><span class="fbc-file-action">${esc(f.action)}</span></div>`;
+      }
+    }
+    if(uploads.length){
+      for(const u of uploads){
+        html+=`<div class="fbc-file"><span class="fbc-file-icon">📎</span><span class="fbc-file-name">${esc(u.name)}</span><span class="fbc-file-action">Upload</span></div>`;
+      }
+    }
+    if(!html)html='<div class="fbc-files-empty">No files in this chat.</div>';
+    // Add a "Go to chat" button
+    html+=`<div class="fbc-goto" onclick="loadChat('${chatId}');closeFileBrowser()">Open this chat →</div>`;
+    container.innerHTML=html;
+    container.dataset.loaded='1';
+  }catch{container.innerHTML='<div class="fbc-files-empty">Could not load.</div>';}
 }
 function _isTransientEmpty(c){
   if(!c||typeof c!=='object')return true;
@@ -6880,36 +6947,6 @@ function formatFileSize(bytes){
   if(bytes<1024)return bytes+'B';
   if(bytes<1048576)return(bytes/1024).toFixed(1)+'KB';
   return(bytes/1048576).toFixed(1)+'MB';
-}
-async function refreshChatFiles(){
-  const el=document.getElementById('fbChat');
-  if(!el)return;
-  if(!curChat){el.innerHTML='<div class="fb-empty">Open a chat to see its files.</div>';return;}
-  const chat=allChats.find(c=>c.id===curChat);
-  // We need full chat data with generated_files
-  try{
-    const r=await apiFetch(`/api/chats/${curChat}`);
-    if(!r.ok){el.innerHTML='<div class="fb-empty">Could not load chat.</div>';return;}
-    const data=await r.json();
-    const genFiles=data.generated_files||[];
-    const uploads=(data.messages||[]).filter(m=>m.file_name).map(m=>({name:m.file_name,when:m.timestamp}));
-    let html='';
-    if(genFiles.length){
-      html+='<div class="fb-section-title">Generated Files</div>';
-      for(const f of genFiles){
-        const name=f.path.split('/').pop()||f.path;
-        html+=`<div class="fb-file" onclick="openWorkspaceFile('${encodeURIComponent(f.path)}')"><span class="fb-file-icon">✕</span><span class="fb-file-name">${esc(name)}</span><span class="fb-file-size">${esc(f.action)}</span></div>`;
-      }
-    }
-    if(uploads.length){
-      html+='<div class="fb-section-title">Uploaded Files</div>';
-      for(const u of uploads){
-        html+=`<div class="fb-file"><span class="fb-file-icon">▪</span><span class="fb-file-name">${esc(u.name)}</span><span class="fb-file-size">${new Date(u.when).toLocaleDateString()}</span></div>`;
-      }
-    }
-    if(!html)html='<div class="fb-empty">No files in this chat yet.</div>';
-    el.innerHTML=html;
-  }catch{el.innerHTML='<div class="fb-empty">Could not load chat files.</div>';}
 }
 async function createUserFolder(){
   const name=await _dlg({title:'New folder',msg:'',icon:'📁',iconType:'info',inputLabel:'Folder name',inputDefault:'',inputPlaceholder:'e.g. notes/research, projects/web…',confirmText:'Create',cancelText:'Cancel'});

@@ -144,12 +144,13 @@ IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                 ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
                 "static", "templates"}
 IGNORED_FILES = {"gyro.py", "app.py", "requirements.txt", ".env", ".gitignore",
-                 "gunicorn.ctl", "Procfile", "render.yaml",
+                 "gunicorn.ctl", "Procfile", "render.yaml", "system_prompt.py", "prompts.md",
                  "NEXUS_INSTRUCTIONS.md", "README.md", "STATUS.md", "TEST_PROMPTS.md"}
 # Server-side files hidden from the user file browser
 SERVER_FILES = {"app.py", "requirements.txt", "Procfile", "render.yaml",
                 "gyro_INSTRUCTIONS.md", "KAIRO_INSTRUCTIONS.md", "NEXUS_INSTRUCTIONS.md",
                 "README.md", "STATUS.md", "TEST_PROMPTS.md", "gunicorn.ctl",
+                "system_prompt.py", "prompts.md",
                 ".env", ".gitignore", ".gyro_session_secret", ".nexus_session_secret"}
 SERVER_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules",
                ".gyro_history", ".gyro_data", ".nexus_data", ".nexus_history",
@@ -871,7 +872,9 @@ def build_system_prompt(memory=None):
         if facts:
             mem_section = (
                 "[PERSISTENT MEMORY]\n"
-                "Use only when directly relevant to this turn.\n"
+                "These are facts the user previously asked you to remember.\n"
+                "Rules: Only reference a fact when it is DIRECTLY relevant to the current request. "
+                "Never volunteer memory facts in unrelated conversations. Never invent facts not listed here.\n"
                 + "\n".join(f"{i}. {f}" for i, f in enumerate(facts, 1))
             )
 
@@ -888,7 +891,12 @@ def build_system_prompt(memory=None):
         if p.get("current_focus"):
             lines.append(f"Current focus: {p.get('current_focus')}")
         if lines:
-            profile_section = "[USER PROFILE CONTEXT]\n" + "\n".join(lines)
+            profile_section = (
+                "[USER PROFILE CONTEXT]\n"
+                "Use for personalization only (greeting by name, tailoring examples). "
+                "Do NOT use profile info to guess what the user is asking about.\n"
+                + "\n".join(lines)
+            )
     except Exception:
         profile_section = ""
 
@@ -1131,13 +1139,21 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
     exclude_paths: set of relative paths to ignore (e.g. files created by FILE_CREATE/FILE_UPDATE).
     uploaded_image_paths: list of relative paths to uploaded images available in _uploads/."""
     import subprocess, tempfile, os
-    pattern = r'<<<CODE_EXECUTE:\s*(\w+)>>>\r?\n(.*?)<<<END_CODE>>>'
+    # Tolerant pattern: closing >>> on opening tag is optional, END_CODE closing >>> is optional
+    pattern = r'<<<CODE_EXECUTE:\s*(\w+)(?:>>>|>>|>)?\s*\r?\n(.*?)<<<END_CODE(?:>>>|>>|>)?'
+    # Fallback: if model forgot <<<END_CODE>>> entirely, grab everything after the opening tag
+    # up to the next <<< tag or end of string
+    fallback_pattern = r'<<<CODE_EXECUTE:\s*(\w+)(?:>>>|>>|>)?\s*\r?\n(.*?)(?=<<<[A-Z_]|$)'
     results = []
     _exclude = set(exclude_paths or [])
     # Protected dirs/files that code shouldn't claim credit for
     _ignore_dirs = {'.git', '__pycache__', '.venv', 'static', 'node_modules', '.gyro_data', 'notes', '_uploads'}
-    _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore'}
-    for m in re.finditer(pattern, text, re.DOTALL):
+    _ignore_files = {'app.py', 'requirements.txt', 'Procfile', 'render.yaml', '.env', '.gitignore', 'system_prompt.py', 'prompts.md'}
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+    if not matches:
+        # Try fallback pattern for missing END_CODE tags
+        matches = list(re.finditer(fallback_pattern, text, re.DOTALL))
+    for m in matches:
         lang = m.group(1).strip().lower()
         code = m.group(2).strip()
         if lang not in ("python", "py"):
@@ -1647,7 +1663,9 @@ def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'<<</?END_THINKING/?>>>', '', text)
     text = re.sub(r'<<<FILE_CREATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<FILE_UPDATE:\s*.+?>>>.*?<<<END_FILE>>>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<<<CODE_EXECUTE:\s*\w+>>>.*?<<<END_CODE>>>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<<<CODE_EXECUTE:\s*\w+(?:>>>|>>|>)?\s*\r?\n.*?<<<END_CODE(?:>>>|>>|>)?', '', text, flags=re.DOTALL)
+    # Also strip malformed CODE_EXECUTE blocks missing END_CODE
+    text = re.sub(r'<<<CODE_EXECUTE:\s*\w+(?:>>>|>>|>)?\s*\r?\n.*?(?=<<<[A-Z_]|$)', '', text, flags=re.DOTALL)
     text = re.sub(r'<<<MEMORY_ADD:\s*.+?>>>', '', text)
     text = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text)
     text = re.sub(r'(?:<<<|%%%|<<)IMAGE_SEARCH:\s*.+?(?:>>>|%%%)', '', text)
@@ -3157,7 +3175,7 @@ def prepare_chat_turn(chat, payload):
             chat["summary_cache"] = _summarize_messages(messages[:-10], resolved)
             chat["summary_at"] = len(messages) - 10
         api_msgs = [
-            {"role": "user", "text": f"[CONVERSATION SUMMARY]\n{chat['summary_cache']}"},
+            {"role": "user", "text": f"[CONVERSATION SUMMARY — older messages in this chat, use for continuity only]\n{chat['summary_cache']}"},
             {"role": "assistant", "text": "Got it, I have the context from our earlier conversation."},
         ] + list(messages[-10:])
     else:
@@ -3166,10 +3184,10 @@ def prepare_chat_turn(chat, payload):
     cur = dict(user_msg)
     # --- Pre-fetch stock data for tickers mentioned in user message ---
     stock_context = _prefetch_stock_context(user_text)
-    cur["text"] = f"[WORKSPACE CONTEXT]\n{ws}\n\n"
+    cur["text"] = f"[WORKSPACE CONTEXT — reference only when user asks about their project/files]\n{ws}\n\n"
     if stock_context:
-        cur["text"] += f"[LIVE STOCK DATA]\n{stock_context}\n\n"
-    cur["text"] += f"[USER MESSAGE]\n{user_text}"
+        cur["text"] += f"[LIVE STOCK DATA — present when user asks about stocks]\n{stock_context}\n\n"
+    cur["text"] += f"[USER MESSAGE — this is the actual request, respond to THIS]\n{user_text}"
     if file_texts:
         cur["text"] += "\n\n" + "\n\n".join(file_texts)
     api_msgs.append(cur)
@@ -3234,6 +3252,9 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
         chat["messages"].append(ctx["user_msg"])
     else:
         chat.pop("_streaming", None)
+    # Clean up periodic auto-save fields
+    chat.pop("_partial_text", None)
+    chat.pop("_partial_thinking", None)
     msg_obj = {
         "role": "model",
         "text": clean_with_placeholders,
@@ -4649,6 +4670,24 @@ def generate_title_endpoint(chat_id):
 def get_chat(chat_id):
     c, reason = load_chat(chat_id)
     if not c: return jsonify({"error": f"Chat not found ({reason})"}), 404
+    # Recover interrupted streams: if _streaming is set but no active generator,
+    # the stream was lost (server restart, crash, etc.). Recover partial content.
+    if c.get("_streaming"):
+        partial = c.pop("_partial_text", None)
+        partial_think = c.pop("_partial_thinking", None)
+        c.pop("_streaming", None)
+        if partial and partial.strip():
+            text = partial.strip()
+            if partial_think and partial_think.strip():
+                text = f"<<<THINKING>>>\n{partial_think.strip()}\n<<<END_THINKING>>>\n{text}"
+            c["messages"].append({
+                "role": "model",
+                "text": partial + "\n\n*[Response interrupted — connection was lost]*",
+                "raw_text": text,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "interrupted": True,
+            })
+        save_chat(c)
     return jsonify(c)
 
 @app.route("/api/chats/<chat_id>", methods=["PATCH"])
@@ -4727,7 +4766,12 @@ def chat_embedded_file(chat_id):
 @app.route("/api/chats/<chat_id>/partial", methods=["POST"])
 @require_auth_or_guest
 def save_partial_response(chat_id):
-    """Save a partial AI response when the user leaves mid-stream (called via sendBeacon)."""
+    """Save a partial AI response during streaming.
+    
+    Called periodically via sendBeacon during streaming (every ~15s) and on beforeunload.
+    When final=true, marks the response as interrupted (user left the page).
+    Otherwise just updates _partial_text for recovery without ending the stream.
+    """
     chat, reason = load_chat(chat_id)
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
@@ -4741,15 +4785,22 @@ def save_partial_response(chat_id):
     partial_text = (data.get("text") or "").strip()
     if not partial_text:
         return jsonify({"ok": True, "skipped": True}), 200
-    # Append partial model message marked as interrupted
-    chat.pop("_streaming", None)
-    chat["messages"].append({
-        "role": "model",
-        "text": partial_text + "\n\n*[Response interrupted]*",
-        "raw_text": partial_text,
-        "timestamp": datetime.datetime.now().isoformat(),
-        "interrupted": True,
-    })
+    is_final = data.get("final", False)
+    if is_final:
+        # User is leaving — append as interrupted message
+        chat.pop("_streaming", None)
+        chat.pop("_partial_text", None)
+        chat.pop("_partial_thinking", None)
+        chat["messages"].append({
+            "role": "model",
+            "text": partial_text + "\n\n*[Response interrupted]*",
+            "raw_text": partial_text,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "interrupted": True,
+        })
+    else:
+        # Periodic save — just update partial text for recovery
+        chat["_partial_text"] = partial_text
     save_chat(chat)
     return jsonify({"ok": True}), 200
 
@@ -5894,7 +5945,9 @@ def chat_message_stream(chat_id):
                 import queue, threading
                 _SENTINEL = object()
                 _HEARTBEAT_INTERVAL = 3           # seconds — aggressive keepalive to defeat proxy timeouts
-                _MAX_STALL_HEARTBEATS = 30        # give up after 30 heartbeats (~90s) with no data from model
+                _MAX_STALL_HEARTBEATS = 200       # give up after 200 heartbeats (~10min) with no data from model
+                _AUTOSAVE_INTERVAL = 15           # seconds — periodic auto-save of partial content
+                _last_autosave = time.time()
                 _stall_count = 0
                 _got_any_content = False           # track if we ever got a real chunk
                 _chunk_q = queue.Queue()
@@ -5931,12 +5984,38 @@ def chat_message_stream(chat_id):
                         _stall_count += 1
                         if _stall_count >= _MAX_STALL_HEARTBEATS:
                             print(f"  [stream] Stall detected — {_stall_count} heartbeats (~{_stall_count*_HEARTBEAT_INTERVAL}s) with no data. Ending stream.")
+                            # Save any partial content before giving up
+                            _stall_partial = "".join(pieces).strip() if pieces else ""
+                            if _stall_partial:
+                                chat.pop("_streaming", None)
+                                chat.pop("_partial_text", None)
+                                chat.pop("_partial_thinking", None)
+                                chat["messages"].append({
+                                    "role": "model",
+                                    "text": _stall_partial + "\n\n*[Response interrupted — model stalled]*",
+                                    "raw_text": _stall_partial,
+                                    "timestamp": datetime.datetime.now().isoformat(),
+                                    "interrupted": True,
+                                })
+                                try: save_chat(chat)
+                                except: pass
                             if not _got_any_content:
                                 yield event({"type": "error", "error": "The model took too long to respond. Try sending your message again."})
                             break
                         # No data — send padded heartbeat to keep connection alive
                         # Padding defeats proxy buffering (some proxies wait for N bytes)
                         yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
+                        # Periodic auto-save during heartbeats
+                        if time.time() - _last_autosave >= _AUTOSAVE_INTERVAL and (pieces or thinking_pieces):
+                            _last_autosave = time.time()
+                            try:
+                                _partial = "".join(pieces)
+                                if _partial.strip():
+                                    chat["_partial_text"] = _partial
+                                    chat["_partial_thinking"] = "".join(thinking_pieces) if thinking_pieces else ""
+                                    save_chat(chat)
+                            except Exception:
+                                pass
                         continue
                     _stall_count = 0  # reset on any real data
                     _got_any_content = True
@@ -5951,6 +6030,17 @@ def chat_message_stream(chat_id):
                         continue
                     pieces.append(chunk)
                     emit_buffer += chunk
+                    # Periodic auto-save after receiving content
+                    if time.time() - _last_autosave >= _AUTOSAVE_INTERVAL and pieces:
+                        _last_autosave = time.time()
+                        try:
+                            _partial = "".join(pieces)
+                            if _partial.strip():
+                                chat["_partial_text"] = _partial
+                                chat["_partial_thinking"] = "".join(thinking_pieces) if thinking_pieces else ""
+                                save_chat(chat)
+                        except Exception:
+                            pass
                     # -- Extract <<<THINKING>>> blocks for OpenAI-style inline thinking --
                     _THINK_OPEN = "<<<THINKING>>>"
                     _THINK_CLOSE = "<<<END_THINKING>>>"
@@ -6214,6 +6304,18 @@ def chat_message_stream(chat_id):
             except: pass
             # Clean up the _streaming flag so the chat isn't stuck
             chat.pop("_streaming", None)
+            chat.pop("_partial_text", None)
+            chat.pop("_partial_thinking", None)
+            # Save whatever partial content we got so the user doesn't lose it
+            _err_partial = "".join(pieces).strip() if pieces else ""
+            if _err_partial:
+                chat["messages"].append({
+                    "role": "model",
+                    "text": _err_partial + "\n\n*[Response interrupted due to error]*",
+                    "raw_text": _err_partial,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "interrupted": True,
+                })
             save_chat(chat)
             err = str(e)
             if any(w in err.lower() for w in ("429", "quota", "rate")):
