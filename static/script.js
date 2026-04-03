@@ -4494,6 +4494,7 @@ async function sendMessage(opts){
     // School mode: throttle stream rendering to every 150ms instead of every frame
     let _lastRenderTime=0;
     const _RENDER_INTERVAL=schoolMode?150:0;
+  let _onVisChange=null;
   try{
     // Collect active tool names and clear them for next message
     const toolsForMsg=[...activeTools];
@@ -4597,10 +4598,34 @@ async function sendMessage(opts){
     let _thinkTurn=0;              // Current thinking turn number (incremented each time thinking restarts)
     let _thinkTurns={};            // {turnNum: {panel, textEl, text}}
     let _turnThinkText='';         // Current turn's thinking text
+    let _thinkDisplayed='';        // How much thinking text has been typewriter-revealed
     // -- Mid-stream media loading state --
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
+    // Keep rendering alive when tab is hidden — requestAnimationFrame pauses in background tabs
+    _onVisChange=()=>{
+      if(document.visibilityState==='visible'&&!_doneReceived&&canRender()){
+        _renderScheduled=false;
+        const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+        if(fullText){
+          if(_streamDevRaw){
+            targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
+          }else{
+            targetEl.innerHTML=fmtLive(fullText);
+            if(!schoolMode)renderMathInElementSafe(targetEl);
+          }
+        }
+        // Flush thinking typewriter buffer
+        if(window._thinkTypewriter&&_turnThinkText){
+          _thinkDisplayed=_turnThinkText;
+          const thinkTextEl=contentEl.querySelector('.ltp-body');
+          if(thinkTextEl)thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
+        }
+        _autoScroll();
+      }
+    };
+    document.addEventListener('visibilitychange',_onVisChange);
     // Stall detection: if no event (including heartbeats) for 120s, warn the user
     // Increased from 45s to be more tolerant of slow models and poor connections
     let _lastAnyEvent=Date.now();
@@ -4753,6 +4778,7 @@ async function sendMessage(opts){
               // Starting a new thinking turn
               _thinkTurn++;
               _turnThinkText='';
+              _thinkDisplayed='';
               console.log(`[gyro] thinking turn ${_thinkTurn} starting`);
             }
             isThinking=true;
@@ -4761,13 +4787,24 @@ async function sendMessage(opts){
             if(_thinkTurns[_thinkTurn])_thinkTurns[_thinkTurn].text=_turnThinkText;
             if(canRender()){
               ensureThinkPanel(_thinkTurn);
-              // In school mode, throttle thinking panel updates
-              const _tnow=Date.now();
-              if(!_RENDER_INTERVAL||(_tnow-_lastRenderTime)>=_RENDER_INTERVAL){
-                _lastRenderTime=_tnow;
-                thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
-                const _ltpBody=thinkTextEl.parentElement;
-                if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+              // Smooth typewriter: gradually reveal thinking text to avoid chunky appearance
+              if(!window._thinkTypewriter){
+                window._thinkTypewriter=setInterval(()=>{
+                  if(!isThinking&&_thinkDisplayed.length>=_turnThinkText.length){
+                    clearInterval(window._thinkTypewriter);window._thinkTypewriter=null;return;
+                  }
+                  if(_thinkDisplayed.length<_turnThinkText.length){
+                    // Reveal 8 chars per tick (20ms interval = ~400 chars/sec for smooth streaming look)
+                    const charsPerTick=8;
+                    const end=Math.min(_thinkDisplayed.length+charsPerTick,_turnThinkText.length);
+                    _thinkDisplayed=_turnThinkText.slice(0,end);
+                    if(thinkTextEl){
+                      thinkTextEl.innerHTML=_fmtThink(_thinkDisplayed);
+                      const _ltpBody=thinkTextEl.parentElement;
+                      if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+                    }
+                  }
+                },20);
               }
               if(_turnThinkText.length>15){
                 const subj=_extractThinkSubject(_turnThinkText);
@@ -4784,6 +4821,9 @@ async function sendMessage(opts){
             // Transition from thinking to response
             if(isThinking&&thinkPanel){
               isThinking=false;
+              // Stop typewriter and flush remaining thinking text
+              if(window._thinkTypewriter){clearInterval(window._thinkTypewriter);window._thinkTypewriter=null;}
+              if(thinkTextEl&&_turnThinkText){thinkTextEl.innerHTML=_fmtThink(_turnThinkText);}
               thinkPanel.classList.add('ltp-done');
               thinkPanel.classList.add('ltp-collapsed');
               const dotsEl=thinkPanel.querySelector('.ltp-dots');
@@ -4853,6 +4893,8 @@ async function sendMessage(opts){
             _activeStreamState.delete(targetChatId);
             clearInterval(_stallTimer);
             clearInterval(_partialSaveInterval);
+            // Clean up thinking typewriter
+            if(window._thinkTypewriter){clearInterval(window._thinkTypewriter);window._thinkTypewriter=null;}
             // Immediately mark chat as not running so UI updates (stop button ? send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse ALL live thinking panels
@@ -5104,7 +5146,10 @@ async function sendMessage(opts){
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
-              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
+              // Only show action buttons on plain AI text responses
+              const _hasSpecialContent=!!(data.research_trigger||data.code_auto_reprompt||data.pending_images?.length||data.pending_generations?.length||data.pending_stocks?.length);
+              const _actionsHTML=_hasSpecialContent?'':`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
+              contentEl.innerHTML=finalHTML+_actionsHTML;
               renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               if(!schoolMode){
@@ -5532,6 +5577,7 @@ async function sendMessage(opts){
     if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);
     _activeStreamState.delete(targetChatId);
     area.removeEventListener('scroll',_onUserScroll);
+    document.removeEventListener('visibilitychange',_onVisChange);
   }
 }
 
@@ -5777,7 +5823,7 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="editMsg(this)">Edit</button></div>`;
+  if(role==='user'){}  // No action buttons on user messages
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -5954,7 +6000,9 @@ function addMsg(role,text,files,extra={}){
         html+=fmt(displayText);
       }
     }
-    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
+    // Only show action buttons on plain AI text responses (not research, stock, code-only, interrupted)
+    const _isSpecialMsg=!!(extra.stock_agent||extra.research_agent||extra.code_results?.length||extra.interrupted);
+    if(!_isSpecialMsg) html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
   }
   div.dataset.text=text||'';
   div.innerHTML=html;renderMathInElementSafe(div);area.appendChild(div);area.scrollTop=area.scrollHeight;
