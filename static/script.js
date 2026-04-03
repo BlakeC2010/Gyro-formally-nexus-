@@ -2758,6 +2758,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
     let stepThinking='';
     let _raThinkDisplayed='';
     let _raThinkTypewriter=null;
+    let _raContentDisplayed='';
+    let _raContentTypewriter=null;
     let failedSteps=0;
     let followupQuestions=[];
     let _raDoneReceived=false;
@@ -2813,6 +2815,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
             stepThinking='';
             _raThinkDisplayed='';
             if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
+            _raContentDisplayed='';
+            if(_raContentTypewriter){clearInterval(_raContentTypewriter);_raContentTypewriter=null;}
             if(outEl){
               outEl.querySelectorAll('.ra-section').forEach(sec=>{
                 const sNum=parseInt(sec.id.replace('_raS',''));
@@ -2848,6 +2852,9 @@ async function runResearchAgent(query, contentEl, area, chatId){
               const _flushThC=document.getElementById('_raThinkC'+ev.step);
               if(_flushThC)_flushThC.innerHTML=_fmtThink(stepThinking);
             }
+            // Flush content typewriter for this step
+            if(_raContentTypewriter){clearInterval(_raContentTypewriter);_raContentTypewriter=null;}
+            _raContentDisplayed=stepContent;
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='ra-section-status ra-done';}
@@ -2872,6 +2879,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }else if(ev.status==='failed'){
             if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
             if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
+            if(_raContentTypewriter){clearInterval(_raContentTypewriter);_raContentTypewriter=null;}
             failedSteps++;
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✗ failed';statusEl.className='ra-section-status ra-failed';}
@@ -2903,9 +2911,14 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }
         }else if(ev.type==='agent_delta'){
           stepContent+=ev.text;
-          if(currentContentEl){
-            currentContentEl.innerHTML=_raDevRaw?'<pre class="dev-raw-log">'+esc(stepContent)+'<span class="stream-cursor"></span></pre>':fmtLive(stepContent);
-            _raAutoScroll();
+          if(currentContentEl&&!_raContentTypewriter){
+            _raContentTypewriter=setInterval(()=>{
+              if(_raContentDisplayed.length>=stepContent.length)return;
+              const end=Math.min(_raContentDisplayed.length+12,stepContent.length);
+              _raContentDisplayed=stepContent.slice(0,end);
+              currentContentEl.innerHTML=_raDevRaw?'<pre class="dev-raw-log">'+esc(_raContentDisplayed)+'<span class="stream-cursor"></span></pre>':fmtLive(_raContentDisplayed);
+              _raAutoScroll();
+            },20);
           }
         }else if(ev.type==='agent_sources'){
           for(const src of (ev.sources||[])){
@@ -2919,6 +2932,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
           _raDoneReceived=true;
           clearInterval(elTimer);
           if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
+          if(_raContentTypewriter){clearInterval(_raContentTypewriter);_raContentTypewriter=null;}
           if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
           updateProgress(totalSteps,'Research complete!');
           followupQuestions=ev.followup_questions||[];
@@ -3376,6 +3390,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     let stepThinking='';
     let _saThinkDisplayed='';
     let _saThinkTypewriter=null;
+    let _saContentDisplayed='';
+    let _saContentTypewriter=null;
     let failedSteps=0;
     let lastStepText='';
     let verdictStepText='';
@@ -3404,6 +3420,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             stepThinking='';
             _saThinkDisplayed='';
             if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
+            _saContentDisplayed='';
+            if(_saContentTypewriter){clearInterval(_saContentTypewriter);_saContentTypewriter=null;}
             if(outEl){
               outEl.querySelectorAll('.sa-section').forEach(sec=>{
                 const sNum=parseInt(sec.id.replace('_saS',''));
@@ -3426,6 +3444,9 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
               const _flushThC=document.getElementById('_saThinkC'+ev.step);
               if(_flushThC)_flushThC.innerHTML=_fmtThink(stepThinking);
             }
+            // Flush content typewriter for this step
+            if(_saContentTypewriter){clearInterval(_saContentTypewriter);_saContentTypewriter=null;}
+            _saContentDisplayed=stepContent;
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
@@ -3447,6 +3468,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             if(window._chatAutoScroll)window._chatAutoScroll();
           }else if(ev.status==='failed'){
             if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
+            if(_saContentTypewriter){clearInterval(_saContentTypewriter);_saContentTypewriter=null;}
             failedSteps++;
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
             if(statusEl){statusEl.textContent='✗ failed';statusEl.className='sa-section-status sa-failed';}
@@ -3478,13 +3500,19 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           }
         }else if(ev.type==='agent_delta'){
           stepContent+=ev.text;
-          if(currentContentEl){
-            currentContentEl.innerHTML=fmtLive(stepContent);
-            if(window._chatAutoScroll)window._chatAutoScroll();
+          if(currentContentEl&&!_saContentTypewriter){
+            _saContentTypewriter=setInterval(()=>{
+              if(_saContentDisplayed.length>=stepContent.length)return;
+              const end=Math.min(_saContentDisplayed.length+12,stepContent.length);
+              _saContentDisplayed=stepContent.slice(0,end);
+              currentContentEl.innerHTML=fmtLive(_saContentDisplayed);
+              if(window._chatAutoScroll)window._chatAutoScroll();
+            },20);
           }
         }else if(ev.type==='agent_done'){
           clearInterval(elTimer);
           if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
+          if(_saContentTypewriter){clearInterval(_saContentTypewriter);_saContentTypewriter=null;}
           updateProgress(totalSteps,'Stock analysis complete!');
           const totalTime=((Date.now()-startTime)/1000).toFixed(1);
 
@@ -4528,10 +4556,6 @@ async function sendMessage(opts){
   if(!_isBackground){area.appendChild(msgDiv);_autoScroll();}
   const contentEl=msgDiv.querySelector('.msg-content');
   const canRender=()=>curChat===targetChatId&&msgDiv.isConnected;
-  let _renderScheduled=false;
-    // School mode: throttle stream rendering to every 150ms instead of every frame
-    let _lastRenderTime=0;
-    const _RENDER_INTERVAL=schoolMode?150:0;
   let _onVisChange=null;
   try{
     // Collect active tool names and clear them for next message
@@ -4637,6 +4661,9 @@ async function sendMessage(opts){
     let _thinkTurns={};            // {turnNum: {panel, textEl, text}}
     let _turnThinkText='';         // Current turn's thinking text
     let _thinkDisplayed='';        // How much thinking text has been typewriter-revealed
+    // -- Response typewriter state --
+    let _responseDisplayed='';     // How much response text has been typewriter-revealed
+    let _responseTypewriter=null;  // Interval for response typewriter
     // -- Mid-stream media loading state --
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
@@ -4644,9 +4671,10 @@ async function sendMessage(opts){
     // Keep rendering alive when tab is hidden — requestAnimationFrame pauses in background tabs
     _onVisChange=()=>{
       if(document.visibilityState==='visible'&&!_doneReceived&&canRender()){
-        _renderScheduled=false;
         const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
         if(fullText){
+          // Flush response typewriter
+          _responseDisplayed=fullText;
           if(_streamDevRaw){
             targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
           }else{
@@ -4884,29 +4912,25 @@ async function sendMessage(opts){
             }
             stopThinkingPhrases();
             fullText+=data.text;
-            // Render text immediately even while media is loading
-            if(canRender()&&!_renderScheduled){
-              const now=Date.now();
-              if(_RENDER_INTERVAL&&(now-_lastRenderTime)<_RENDER_INTERVAL){
-                // In school mode, skip this frame — next delta will catch up
-              }else{
-              _renderScheduled=true;
-              _lastRenderTime=now;
-              requestAnimationFrame(()=>{
-                _renderScheduled=false;
-                if(_doneReceived||!canRender())return;
+            // Start response typewriter if not running
+            if(!_responseTypewriter&&canRender()){
+              _responseTypewriter=setInterval(()=>{
+                if(_doneReceived||!canRender()){clearInterval(_responseTypewriter);_responseTypewriter=null;return;}
+                if(_responseDisplayed.length>=fullText.length)return;
+                const charsPerTick=12;
+                const end=Math.min(_responseDisplayed.length+charsPerTick,fullText.length);
+                _responseDisplayed=fullText.slice(0,end);
                 const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
                 const ta=contentEl.querySelector('.think-active');
                 if(ta){ta.remove();stopThinkingPhrases();}
                 if(_streamDevRaw){
-                  targetEl.innerHTML='<pre class="dev-raw-log">'+esc(fullText)+'<span class="stream-cursor"></span></pre>';
+                  targetEl.innerHTML='<pre class="dev-raw-log">'+esc(_responseDisplayed)+'<span class="stream-cursor"></span></pre>';
                 }else{
-                  targetEl.innerHTML=fmtLive(fullText);
+                  targetEl.innerHTML=fmtLive(_responseDisplayed);
                   if(!schoolMode)renderMathInElementSafe(targetEl);
                 }
                 _autoScroll();
-              });
-              }
+              },20);
             }
           // -- Mid-stream media loading event --
           }else if(data.type==='media_loading'){
@@ -4914,17 +4938,13 @@ async function sendMessage(opts){
             // Insert an inline marker into fullText so fmtLive renders a loading card
             const info=data.query||data.ticker||data.prompt||'';
             fullText+=`\n[[[MEDIA:${data.kind}:${data.index}:${info}]]]\n`;
-            // Render immediately to show the loading card
-            if(canRender()&&!_renderScheduled){
-              _renderScheduled=true;
-              requestAnimationFrame(()=>{
-                _renderScheduled=false;
-                if(_doneReceived||!canRender())return;
-                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                targetEl.innerHTML=fmtLive(fullText);
-                renderMathInElementSafe(targetEl);
-                _autoScroll();
-              });
+            // Flush typewriter and render immediately to show the loading card
+            _responseDisplayed=fullText;
+            if(canRender()){
+              const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+              targetEl.innerHTML=fmtLive(fullText);
+              renderMathInElementSafe(targetEl);
+              _autoScroll();
             }
           }else if(data.type==='done'){
             _doneReceived=true;
@@ -4933,6 +4953,9 @@ async function sendMessage(opts){
             clearInterval(_partialSaveInterval);
             // Clean up thinking typewriter
             if(window._thinkTypewriter){clearInterval(window._thinkTypewriter);window._thinkTypewriter=null;}
+            // Clean up response typewriter
+            if(_responseTypewriter){clearInterval(_responseTypewriter);_responseTypewriter=null;}
+            _responseDisplayed=fullText;
             // Immediately mark chat as not running so UI updates (stop button ? send button)
             {const cur=runningStreams.get(targetChatId);if(!cur||cur.streamId===streamId)setChatRunning(targetChatId,false);}
             // Collapse ALL live thinking panels
@@ -5290,15 +5313,11 @@ async function sendMessage(opts){
               // Pre-done: store for later application, resume rendering
               window._streamMediaResults[`image_search-${data.image.index}`]=data.image;
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              _responseDisplayed=fullText;
+              if(canRender()){
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
@@ -5315,15 +5334,11 @@ async function sendMessage(opts){
             _genFailures.push({type:'image_search',query:data.query||''});
             if(!_doneReceived){
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              if(_mediaLoadingCount===0&&canRender()){
+                _responseDisplayed=fullText;
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#img-loader-${data.index}`);
@@ -5338,15 +5353,11 @@ async function sendMessage(opts){
               // Pre-done: store for later, resume rendering
               window._streamMediaResults[`image_gen-${data.image.index}`]=data.image;
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              _responseDisplayed=fullText;
+              if(canRender()){
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
@@ -5379,15 +5390,11 @@ async function sendMessage(opts){
             _genFailures.push({type:'image_gen',prompt:data.prompt||'',error:data.error||''});
             if(!_doneReceived){
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              if(_mediaLoadingCount===0&&canRender()){
+                _responseDisplayed=fullText;
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#imggen-loader-${data.index}`);
@@ -5402,15 +5409,11 @@ async function sendMessage(opts){
               // Pre-done: store for later, resume rendering
               window._streamMediaResults[`stock-${data.stock.index}`]=data.stock;
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              _responseDisplayed=fullText;
+              if(canRender()){
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               // Post-done: replace DOM loader
@@ -5426,15 +5429,11 @@ async function sendMessage(opts){
           }else if(data.type==='stock_failed'){
             if(!_doneReceived){
               _mediaLoadingCount=Math.max(0,_mediaLoadingCount-1);
-              if(_mediaLoadingCount===0&&canRender()&&!_renderScheduled){
-                _renderScheduled=true;
-                requestAnimationFrame(()=>{
-                  _renderScheduled=false;
-                  if(_doneReceived||!canRender())return;
-                  const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
-                  targetEl.innerHTML=fmtLive(fullText);
-                  _autoScroll();
-                });
+              if(_mediaLoadingCount===0&&canRender()){
+                _responseDisplayed=fullText;
+                const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+                targetEl.innerHTML=fmtLive(fullText);
+                _autoScroll();
               }
             }else if(!_streamDevRaw&&canRender()){
               const loader=contentEl.querySelector(`#stock-loader-${data.index}`);
@@ -5585,6 +5584,7 @@ async function sendMessage(opts){
   }finally{
     clearInterval(_stallTimer);
     clearInterval(_partialSaveInterval);
+    if(_responseTypewriter){clearInterval(_responseTypewriter);_responseTypewriter=null;}
     // -- Handle stream ending without a done event (connection drop, timeout, etc.) --
     if(!_doneReceived&&canRender()){
       stopThinkingPhrases();
