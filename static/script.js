@@ -3385,16 +3385,15 @@ async function runResearchAgent(query, contentEl, area, chatId, existingResearch
 
     // Auto-trigger AI follow-up AFTER poll loop ends (research save is committed)
     if(_raDoneReceived&&!_raAbort.signal.aborted){
-      const _raReportText=(function(){var t='';var el=document.getElementById('_raOut');if(!el)return '';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+'\n'+(b?b.textContent:'')+'\n\n';});return t;})();
       const _raFollowTid=setTimeout(()=>{
         if(isChatRunning(chatId))return;
         sendMessage({
           silent: true,
-          noThinking: false,
-          message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps.\n\nHere is the full comprehensive report from the research:\n\n${_raReportText}\n\nThe user's original request was: "${query}"\n\nNow continue helping the user with their original request. Use the comprehensive report above as your knowledge base. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions using <<<CODE_EXECUTE: python>>> if needed). Do NOT summarize the research back to the user — it is already visible. Instead, proceed directly with executing whatever the user originally asked for.`,
+          noThinking: true,
+          message: `[SYSTEM] Deep research on "${query}" is complete and already saved in this chat as a full report. Continue directly with the user's original request now. Do NOT repeat the research summary. Execute any remaining tasks (for example: mind map, images, slideshow/PDF, or code execution). If you output Mermaid, send a complete fenced block in one response: \`\`\`mermaid ... \`\`\`.`,
           targetChat: chatId
         });
-      }, 1500);
+      }, 1200);
       const _pListR=_pendingReprompts.get(chatId)||[];_pListR.push(_raFollowTid);_pendingReprompts.set(chatId,_pListR);
     }
   }catch(e){
@@ -5018,6 +5017,9 @@ async function sendMessage(opts){
     // -- Mid-stream media loading state --
     let _mediaLoadingCount=0;     // How many media items are currently loading
     let _doneReceived=false;      // Whether the 'done' event has been processed
+    let _preserveOnAbort=false;   // Keep partial UI when we abort a stuck stream
+    const _streamStartedAt=Date.now();
+    const _hardStreamTimeoutMs=_silent?180000:240000;
     window._streamMediaResults={};// Results that arrived before 'done' (keyed by "kind-index")
     // Keep rendering alive when tab is hidden — requestAnimationFrame pauses in background tabs
     _onVisChange=()=>{
@@ -5052,6 +5054,16 @@ async function sendMessage(opts){
       if(_doneReceived){clearInterval(_stallTimer);return;}
       const noEventMs=Date.now()-_lastAnyEvent;
       const noMeaningfulMs=Date.now()-_lastMeaningfulEvent;
+      const totalRuntimeMs=Date.now()-_streamStartedAt;
+      // Hard cap: never let a chat stream run forever even if heartbeats keep arriving
+      if(totalRuntimeMs>_hardStreamTimeoutMs){
+        clearInterval(_stallTimer);
+        console.warn(`[gyro] Hard stream timeout after ${Math.round(totalRuntimeMs/1000)}s`);
+        _preserveOnAbort=true;
+        setStatus('Response timed out — showing what was generated so far.');
+        try{controller.abort();}catch(_){ }
+        return;
+      }
       // If no events at all (not even heartbeats) for 120s, connection is dead
       if(noEventMs>120000){
         clearInterval(_stallTimer);
@@ -5915,7 +5927,7 @@ async function sendMessage(opts){
     if(e.name==='AbortError'||controller.signal.aborted){
       clearInterval(_stallTimer);
       stopThinkingPhrases();
-      if(canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
+      if(!_preserveOnAbort&&canRender()&&(!contentEl.innerHTML||contentEl.querySelector('.think-active'))){msgDiv.remove();}
     }else{
       stopThinkingPhrases();
       // Auto-retry on connection error if no content was received yet
@@ -6704,6 +6716,20 @@ function fmt(text){
     }
     html+='</div>';
     blocks.push(html);
+    return `%%%BLOCK${blocks.length-1}%%%`;
+  });
+  // Recover interrupted mermaid fences by treating the trailing mermaid block as partial.
+  t=t.replace(/```mermaid\n([\s\S]*)$/g,(m,c)=>{
+    if(/```/.test(c))return m; // Already closed elsewhere; let normal parser handle it.
+    let restored=c.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').trim();
+    restored=restored.replace(/\n*\*\[Response interrupted[^\]]*\]\*\s*$/i,'').trim();
+    if(!restored)return '';
+    // Sanitize mindmap source to fix common syntax issues
+    if(/^\s*mindmap\b/i.test(restored)) restored=sanitizeMermaidSource(restored);
+    const mindId='mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);
+    const title=inferMindMapTitle(restored,blocks.length+1);
+    mindMapStore.set(mindId,{title,source:restored});
+    blocks.push(`<div class="mermaid-container" data-mindmap-id="${mindId}"><div class="mermaid-toolbar"><button class="mm-copy" onclick="copyMermaidPng(this)" title="Copy to clipboard">📋</button><a class="mm-download" href="#" onclick="return false" title="Download PNG">⬇</a></div><pre class="mermaid">${restored}</pre><div style="margin-top:8px;font-size:11px;color:var(--text-muted);font-style:italic">Mind map was partially recovered from an interrupted response.</div></div>`);
     return `%%%BLOCK${blocks.length-1}%%%`;
   });
   t=t.replace(/```mermaid\n([\s\S]*?)```/g,(_,c)=>{
