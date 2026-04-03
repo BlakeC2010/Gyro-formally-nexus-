@@ -593,7 +593,7 @@ async function reRenderCurrentChat(){
     _suppressCanvasAutoOpen=true;
     if(chat.messages?.length){
       for(const m of chat.messages){
-        if(m.hidden)continue;
+        if(m.hidden&&!m.research_agent&&!m.stock_agent)continue;
         if(m.role==='user')addMsg('user',m.text,[],m);
         else addMsg('kairo',m.text,m.files_modified||[],m);
       }
@@ -2212,7 +2212,7 @@ async function joinChatStream(chatId){
               areaEl.innerHTML='';
               if(chatData.messages?.length){
                 for(const m of chatData.messages){
-                  if(m.hidden) continue;
+                  if(m.hidden&&!m.research_agent&&!m.stock_agent) continue;
                   if(m.role==='user') addMsg('user',m.text,[],m);
                   else addMsg('kairo',m.text,m.files_modified||[],m);
                 }
@@ -2263,7 +2263,7 @@ async function joinChatStream(chatId){
             areaEl.innerHTML='';
             if(chatData.messages?.length){
               for(const m of chatData.messages){
-                if(m.hidden) continue;
+                if(m.hidden&&!m.research_agent&&!m.stock_agent) continue;
                 if(m.role==='user') addMsg('user',m.text,[],m);
                 else addMsg('kairo',m.text,m.files_modified||[],m);
               }
@@ -2329,7 +2329,7 @@ async function openChat(id){
   _suppressCanvasAutoOpen=true;
   if(chat.messages?.length){
     for(const m of chat.messages){
-      if(m.hidden)continue;
+      if(m.hidden&&!m.research_agent&&!m.stock_agent)continue;
       if(m.role==='user')addMsg('user',m.text,[],m);
       else addMsg('kairo',m.text,m.files_modified||[],m);
     }
@@ -6075,8 +6075,17 @@ function addMsg(role,text,files,extra={}){
   }
   displayText=displayText.replace(/(?:<<<QUESTION:.*?>>>\n)?<<<CHOICES(?:\|multi)?>>>[\s\S]*?<<<END_CHOICES>>>/g,'').trim();
   // Detect research/stock agent messages early — skip fmt() for these since the card replaces everything
-  const _isResearchMsg=!!(extra.research_agent||(role==='kairo'&&/^## (?:Intelligence Gathering|📋 Intelligence Brief)/m.test(displayText)));
-  const _isStockMsg=!!extra.stock_agent;
+  const _researchStepHeaderRe=/(?:^|\n)\s*##\s*(?:\d+\.?\s*)?(?:Intelligence Gathering|Deep Source Analysis|Fact Verification|Perspectives & Context|Evidence & Data Analysis|Synthesis & Insights|Conclusions & Assessment|Final Intelligence Brief|Comprehensive Report)\b/im;
+  const _researchSignalCount=(displayText.match(/(?:Intelligence Gathering|Deep Source Analysis|Fact Verification|Perspectives & Context|Evidence & Data Analysis|Synthesis & Insights|Conclusions & Assessment|Final Intelligence Brief|Comprehensive Report)/g)||[]).length;
+  const _isResearchMsg=!!(
+    extra.research_agent||
+    (extra.research_agent_steps&&extra.research_agent_steps.length)||
+    extra.research_agent_query||
+    (extra.research_agent_sources&&extra.research_agent_sources.length)||
+    (extra.research_agent_findings&&extra.research_agent_findings.length)||
+    (role==='kairo'&&(_researchStepHeaderRe.test(displayText)||_researchSignalCount>=3))
+  );
+  const _isStockMsg=!!(extra.stock_agent||(extra.stock_agent_steps&&extra.stock_agent_steps.length)||(extra.stock_agent_tickers&&extra.stock_agent_tickers.length));
   // Long user text ? collapsible file block (only for code, not regular text)
   const _looksLikeCode=(function(t){
     if(t.length<=600)return false;
@@ -6111,7 +6120,7 @@ function addMsg(role,text,files,extra={}){
       +`<span class="upf-icon">📄</span><span class="upf-label">Pasted code (${lines.length} lines)</span><span class="upf-chevron">▾</span></div>`
       +`<div class="upf-preview">${esc(preview)}${lines.length>3?'\n…':''}</div>`
       +`<div class="upf-full"><pre>${esc(displayText)}</pre></div></div>`;
-  } else if(devRawMode&&role==='kairo'){
+  } else if(devRawMode&&role==='kairo'&&!_isResearchMsg&&!_isStockMsg){
     html+='<pre class="dev-raw-log">'+esc(extra.raw_text||text||'')+'</pre>';
   } else if(!_isResearchMsg&&!_isStockMsg){
     html+=fmt(displayText);
