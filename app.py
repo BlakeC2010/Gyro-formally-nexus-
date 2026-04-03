@@ -5,7 +5,7 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io, time, threading
+import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io, time, threading, subprocess
 import urllib.request, urllib.parse
 from pathlib import Path
 from functools import wraps
@@ -1056,6 +1056,41 @@ def execute_file_operations(text):
 
 def extract_memory_ops(text):
     return [m.group(1).strip() for m in re.finditer(r'<<<MEMORY_ADD:\s*(.+?)>>>', text)]
+
+
+def _dedup_memory_facts(facts):
+    """Remove duplicate or nearly-identical memory facts.
+    Keeps the most recent (last) version of similar facts."""
+    if not facts or len(facts) <= 1:
+        return facts
+    # Group by prefix key (e.g., "Preferred name:", "Work:", etc.)
+    _prefix_re = re.compile(r'^([A-Za-z\s]+):\s*')
+    seen_prefixes = {}  # prefix -> index of latest fact
+    unique = []
+    for i, fact in enumerate(facts):
+        m = _prefix_re.match(fact)
+        if m:
+            prefix = m.group(1).strip().lower()
+            if prefix in seen_prefixes:
+                # Replace the earlier one
+                old_idx = seen_prefixes[prefix]
+                unique[old_idx] = None  # mark for removal
+            seen_prefixes[prefix] = len(unique)
+        # Check for near-duplicates (>80% word overlap)
+        fact_words = set(fact.lower().split())
+        is_dup = False
+        for j, existing in enumerate(unique):
+            if existing is None:
+                continue
+            existing_words = set(existing.lower().split())
+            if fact_words and existing_words:
+                overlap = len(fact_words & existing_words) / max(len(fact_words), len(existing_words))
+                if overlap > 0.8:
+                    unique[j] = None  # keep the newer one
+                    is_dup = False
+                    break
+        unique.append(fact)
+    return [f for f in unique if f is not None][-50:]  # cap at 50 facts
 
 
 def extract_reminders(text):
@@ -3204,19 +3239,37 @@ def prepare_chat_turn(chat, payload):
         if pinned_ctx:
             ws = "[PINNED FILES]\n" + "\n\n".join(pinned_ctx) + "\n\n" + ws
 
-    # --- Chat history: summarize old messages if conversation is long ---
+    # --- Chat history: smart context windowing with token estimation ---
     messages = chat["messages"]
-    if len(messages) > 20:
-        if ("summary_cache" not in chat or
-                chat.get("summary_at") != len(messages) - 10):
-            chat["summary_cache"] = _summarize_messages(messages[:-10], resolved)
-            chat["summary_at"] = len(messages) - 10
-        api_msgs = [
-            {"role": "user", "text": f"[CONVERSATION SUMMARY — older messages in this chat, use for continuity only]\n{chat['summary_cache']}"},
-            {"role": "assistant", "text": "Got it, I have the context from our earlier conversation."},
-        ] + list(messages[-10:])
+    _est_tokens = lambda msgs: sum(len((m.get("text") or "")) // 3 for m in msgs)
+
+    # Dynamic window: keep as many recent messages as fit within token budget
+    _MAX_HISTORY_TOKENS = 60_000  # ~180k chars — leaves room for system prompt + workspace
+    _MIN_RECENT = 6  # always keep at least this many recent messages
+    _MAX_RECENT = 30  # never send more than this many
+
+    if len(messages) > _MAX_RECENT or _est_tokens(messages) > _MAX_HISTORY_TOKENS:
+        # Find optimal split: keep as many recent messages as fit
+        _keep = min(len(messages), _MAX_RECENT)
+        while _keep > _MIN_RECENT and _est_tokens(messages[-_keep:]) > _MAX_HISTORY_TOKENS:
+            _keep -= 2  # reduce by pairs (user+assistant)
+        _keep = max(_keep, _MIN_RECENT)
+
+        if len(messages) > _keep:
+            # Summarize everything before the kept window
+            _to_summarize = messages[:-_keep]
+            if ("summary_cache" not in chat or
+                    chat.get("summary_at") != len(messages) - _keep):
+                chat["summary_cache"] = _summarize_messages(_to_summarize, resolved)
+                chat["summary_at"] = len(messages) - _keep
+            api_msgs = [
+                {"role": "user", "text": f"[CONVERSATION SUMMARY — older messages in this chat, use for continuity only]\n{chat['summary_cache']}"},
+                {"role": "assistant", "text": "Got it, I have the context from our earlier conversation. I'll reference this if needed."},
+            ] + list(messages[-_keep:])
+        else:
+            api_msgs = list(messages[-_keep:])
     else:
-        api_msgs = list(messages[-20:])
+        api_msgs = list(messages)
 
     cur = dict(user_msg)
     # --- Pre-fetch stock data for tickers mentioned in user message ---
@@ -3257,6 +3310,7 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
         for fact in new_facts:
             if fact not in ctx["memory"]["facts"]:
                 ctx["memory"]["facts"].append(fact)
+        ctx["memory"]["facts"] = _dedup_memory_facts(ctx["memory"]["facts"])
         save_memory(ctx["memory"])
 
     clean = clean_response(raw_response)
@@ -3330,40 +3384,72 @@ _STOPWORDS = {"the","and","for","that","this","with","from","have","will","are",
 def _detect_complex_query(text):
     """Return a thinking level string if the query looks complex, else None."""
     lo = text.lower()
-    # High-complexity signals ? medium thinking
-    deep_signals = ["prove ","derive ","proof","formal ","theorem","contradict",
-                    "critique ","evaluate the ","what are the flaws","steel man",
-                    "compare and contrast","trade-offs","tradeoffs","implications of",
-                    "step by step","walk me through","break down","in depth",
-                    "comprehensive","thorough","detailed analysis","deep dive"]
-    if any(s in lo for s in deep_signals): return "medium"
-    # Medium-complexity signals ? low thinking
-    signals = ["why ","how does","analyze","analyse","compare","difference",
-               "explain","debug ","optimize","design ","architecture","algorithm",
-               "prove","calculate","implement","refactor","what if ",
-               "should i","which is better","pros and cons","best approach",
-               "help me understand","can you explain","figure out"]
+
+    # Extended complexity — these need the deepest reasoning
+    extended_signals = ["prove mathematically", "formal proof", "rigorous analysis",
+                        "write a complete", "comprehensive system design", "full architecture",
+                        "evaluate all options", "thorough comparison of"]
+    if any(s in lo for s in extended_signals): return "high"
+
+    # High-complexity signals → medium thinking
+    deep_signals = ["prove ", "derive ", "proof", "formal ", "theorem", "contradict",
+                    "critique ", "evaluate the ", "what are the flaws", "steel man",
+                    "compare and contrast", "trade-offs", "tradeoffs", "implications of",
+                    "step by step", "walk me through", "break down", "in depth",
+                    "comprehensive", "thorough", "detailed analysis", "deep dive",
+                    "design a system", "architecture for", "root cause",
+                    "why doesn't", "why isn't", "what went wrong",
+                    "security implications", "performance implications",
+                    "refactor this", "optimize this", "review this code"]
+    if any(s in lo for s in deep_signals): return "medium" 
+
+    # Medium-complexity signals → low thinking
+    signals = ["why ", "how does", "analyze", "analyse", "compare", "difference",
+               "explain", "debug ", "optimize", "design ", "architecture", "algorithm",
+               "prove", "calculate", "implement", "refactor", "what if ",
+               "should i", "which is better", "pros and cons", "best approach",
+               "help me understand", "can you explain", "figure out",
+               "what's the best way", "how would you", "is it possible to",
+               "what are the options", "recommend", "suggest an approach",
+               "troubleshoot", "diagnose", "fix this", "solve this",
+               "build a", "create a plan", "strategy for", "write a function"]
     if any(s in lo for s in signals): return "low"
+
+    # Structural complexity signals
     if text.count("?") >= 2: return "low"
     if len(text) > 300: return "low"
     if "```" in text: return "low"
+    # Multi-line queries are usually more complex
+    if text.count("\n") >= 3: return "low"
     return None
 
 
 def select_relevant_files(user_text, files, max_chars=40_000):
-    """Return workspace files most relevant to user_text, capped at max_chars."""
+    """Return workspace files most relevant to user_text, capped at max_chars.
+    Uses multi-signal scoring: keyword overlap, filename match, and recency signals."""
     if not files:
         return {}
     words = set(w.lower() for w in _re.findall(r"\b\w{3,}\b", user_text)
                 if w.lower() not in _STOPWORDS)
 
     def score(path, content):
+        s = 0
         tokens = set(w.lower() for w in _re.findall(r"\b\w{3,}\b", content))
-        tokens |= set(w.lower() for w in _re.split(r"[/\\._]", path) if len(w) >= 3)
-        return len(words & tokens)
+        path_tokens = set(w.lower() for w in _re.split(r"[/\\._\-]", path) if len(w) >= 3)
+        # Keyword overlap in content
+        content_overlap = len(words & tokens)
+        s += content_overlap
+        # Path/filename matches are worth more (direct relevance)
+        path_overlap = len(words & path_tokens)
+        s += path_overlap * 3
+        # Exact phrase matches in content (higher signal)
+        lo_content = content.lower()
+        for w in words:
+            if len(w) >= 5 and w in lo_content:
+                s += 1
+        return s
 
     priority_names = {"status.md", "principles.md", "readme.md"}
-    # Only include files that are relevant (score > 0) or are priority files
     scored = {}
     for path in files:
         s = score(path, files[path]) if words else 0
@@ -3380,25 +3466,37 @@ def select_relevant_files(user_text, files, max_chars=40_000):
 
 
 def _summarize_messages(old_messages, resolved):
-    """Summarize older chat turns into a digest using a cheap model call."""
+    """Summarize older chat turns into a high-quality digest using a cheap model call."""
     lines = []
     for msg in old_messages[-30:]:
         prefix = "User" if msg.get("role") == "user" else "Assistant"
-        text = (msg.get("text") or "")[:400]
+        text = (msg.get("text") or "")[:600]
         if text:
             lines.append(f"{prefix}: {text}")
     if not lines:
         return ""
-    prompt = ("Summarize the following conversation into 4-6 concise bullet points. "
-              "Focus on key topics, decisions, and context needed to continue it:\n\n"
-              + "\n".join(lines))
+    prompt = (
+        "You are summarizing a conversation for continuity. Create a structured summary with these sections:\n\n"
+        "**KEY DECISIONS** — Any choices, preferences, or conclusions reached\n"
+        "**IMPORTANT CONTEXT** — Facts, constraints, or requirements discussed\n"
+        "**CURRENT STATE** — Where the conversation left off, what's in progress\n"
+        "**ACTION ITEMS** — Any pending tasks or next steps mentioned\n\n"
+        "Rules:\n"
+        "- Be specific and factual — include actual names, numbers, and details\n"
+        "- Don't invent or infer information not explicitly stated\n"
+        "- Keep each section to 2-4 bullet points maximum\n"
+        "- Skip sections that have no relevant content\n"
+        "- Total summary should be under 500 words\n\n"
+        "Conversation to summarize:\n\n"
+        + "\n".join(lines)
+    )
     try:
-        fast = {"google": "gemini-3-flash-preview", "openai": "gpt-5.4-mini",
+        fast = {"google": "gemini-2.5-flash", "openai": "gpt-5.4-mini",
                 "anthropic": "claude-sonnet-4-6"}
         fn = PROVIDERS.get(resolved.get("provider"), call_openai)
         return fn(resolved["api_key"],
                   fast.get(resolved.get("provider"), resolved.get("actual_model")),
-                  "You are a conversation summarizer. Output only brief bullet points.",
+                  "You are a precise conversation summarizer. Output structured bullet points. Never fabricate details not present in the conversation.",
                   [{"role": "user", "text": prompt}],
                   base_url=resolved.get("base_url"))
     except Exception:
@@ -4035,7 +4133,7 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
 
 def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
-    kw = {"api_key": api_key, "timeout": 120.0}
+    kw = {"api_key": api_key, "timeout": 180.0}
     if base_url: kw["base_url"] = base_url
     client = openai.OpenAI(**kw)
     msgs = [{"role": "system", "content": sysprompt}]
@@ -4051,7 +4149,7 @@ def call_openai(api_key, model, sysprompt, messages, base_url=None, web_search=F
             msgs.append({"role": role, "content": parts[0]["text"]})
         elif parts:
             msgs.append({"role": role, "content": parts})
-    create_kw = dict(model=model, messages=msgs, max_tokens=32768)
+    create_kw = dict(model=model, messages=msgs, max_tokens=65536)
     if web_search:
         create_kw["tools"] = [{"type": "web_search_preview"}]
         create_kw["tool_choice"] = "auto"
@@ -4095,7 +4193,7 @@ PROVIDERS = {"google": call_google, "openai": call_openai,
 
 def call_openai_stream(api_key, model, sysprompt, messages, base_url=None, web_search=False, **kwargs):
     openai = _import_openai()
-    kw = {"api_key": api_key, "timeout": 120.0}
+    kw = {"api_key": api_key, "timeout": 180.0}
     if base_url: kw["base_url"] = base_url
     client = openai.OpenAI(**kw)
     msgs = [{"role": "system", "content": sysprompt}]
@@ -4111,7 +4209,7 @@ def call_openai_stream(api_key, model, sysprompt, messages, base_url=None, web_s
             msgs.append({"role": role, "content": parts[0]["text"]})
         elif parts:
             msgs.append({"role": role, "content": parts})
-    create_kw = dict(model=model, messages=msgs, stream=True, max_tokens=32768)
+    create_kw = dict(model=model, messages=msgs, stream=True, max_tokens=65536)
     if web_search:
         create_kw["tools"] = [{"type": "web_search_preview"}]
         create_kw["tool_choice"] = "auto"
@@ -6577,6 +6675,19 @@ def chat_message_stream(chat_id):
                 done_payload["preloaded_gen_indices"] = [r["index"] for r in _fetched_gens]
             if _hf_results_stream:
                 done_payload["hf_results"] = _hf_results_stream
+
+            # Detect truncated responses and signal frontend to auto-continue
+            _clean_text = (clean_wp if (image_searches or image_generations or stock_tickers or hf_space_calls) else clean).strip()
+            if _clean_text and not code_results:
+                _truncation_signals = (
+                    _clean_text.endswith((",", ":", ";", " and", " or", " but", " the", " a", " an")) or
+                    (_clean_text.count("```") % 2 == 1) or  # unclosed code block
+                    (_clean_text.endswith("-") and not _clean_text.endswith("---")) or
+                    bool(re.search(r'\d+\.\s+\S.*\n$', _clean_text) and re.search(r'^\d+\.', _clean_text))  # numbered list cut off
+                )
+                if _truncation_signals:
+                    done_payload["auto_continue"] = True
+
             yield event(done_payload)
 
             # Persist mid-stream results in chat history
@@ -8474,6 +8585,484 @@ def research_agent_cancel():
     rsession["cancel"].set()
     return jsonify({"ok": True})
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CODER — Integrated AI Coding Agent
+# ══════════════════════════════════════════════════════════════════════════════
+
+CODER_DIR  = WORKSPACE / "Coder"
+CODER_DATA = CODER_DIR / ".coder_data"
+CODER_CHATS = CODER_DATA / "chats"
+CODER_CFG  = CODER_DIR / ".coder_config.json"
+
+CODER_MODELS = {
+    "gemma-4-31b-it":      {"label": "Gemma 4 31B",      "desc": "Dense 31B · 256K context"},
+    "gemma-4-26b-a4b-it":  {"label": "Gemma 4 26B MoE",  "desc": "MoE · 4B active params"},
+    "gemini-2.5-flash":    {"label": "Gemini 2.5 Flash",  "desc": "Fast & capable"},
+    "gemini-2.5-pro":      {"label": "Gemini 2.5 Pro",    "desc": "Most capable Gemini"},
+}
+
+CODER_IGNORE_DIRS = {'.git','__pycache__','node_modules','.venv','venv',
+                     '.next','dist','build','.cache','.coder_data','__MACOSX',
+                     '.eggs','.tox','.mypy_cache','.pytest_cache'}
+CODER_IGNORE_FILES = {'.DS_Store','Thumbs.db','.env'}
+
+CODER_DANGEROUS_CMD = [
+    r'\brm\s+-r', r'\brmdir\s+/s', r'\bdel\s+/[sfq]', r'\bformat\b',
+    r'\bdrop\s+(database|table)', r'\bshutdown\b', r'\bmkfs\b',
+    r'\bdd\s+if=', r'>\s*/dev/sd', r'\breg\s+delete\b',
+]
+
+# ── Coder helpers ────────────────────────────────────────────────────────────
+
+def _coder_safe(root, rel):
+    r = Path(root).resolve()
+    t = (r / rel).resolve()
+    if not str(t).startswith(str(r)):
+        raise ValueError("Path traversal blocked")
+    return t
+
+def _coder_load_config():
+    CODER_DIR.mkdir(parents=True, exist_ok=True)
+    if CODER_CFG.exists():
+        try: return json.loads(CODER_CFG.read_text("utf-8"))
+        except Exception: pass
+    return {"api_key":"","model":"gemma-4-31b-it","mode":"auto","project_path":""}
+
+def _coder_save_config(cfg):
+    CODER_DIR.mkdir(parents=True, exist_ok=True)
+    CODER_CFG.write_text(json.dumps(cfg, indent=2), "utf-8")
+
+def _coder_list_dir(root, rel="."):
+    t = _coder_safe(root, rel)
+    if not t.is_dir(): return {"error": f"Not a directory: {rel}"}
+    items = []
+    for p in sorted(t.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+        if p.is_dir() and p.name in CODER_IGNORE_DIRS: continue
+        if p.is_file() and p.name in CODER_IGNORE_FILES: continue
+        items.append({"name":p.name,"path":str(p.relative_to(Path(root).resolve())).replace("\\","/"),"type":"dir" if p.is_dir() else "file"})
+    return {"items": items}
+
+def _coder_read_file(root, rel):
+    t = _coder_safe(root, rel)
+    if not t.is_file(): return {"error": f"Not found: {rel}"}
+    try: return {"content":t.read_text("utf-8",errors="replace"),"path":rel,"size":t.stat().st_size}
+    except Exception as e: return {"error":str(e)}
+
+def _coder_write_file(root, rel, content):
+    t = _coder_safe(root, rel)
+    t.parent.mkdir(parents=True, exist_ok=True)
+    t.write_text(content, "utf-8")
+    return {"ok":True,"path":rel}
+
+def _coder_edit_file(root, rel, find, replace):
+    t = _coder_safe(root, rel)
+    if not t.is_file(): return {"error": f"Not found: {rel}"}
+    src = t.read_text("utf-8")
+    if find not in src: return {"error": f"Text not found in {rel}"}
+    t.write_text(src.replace(find, replace, 1), "utf-8")
+    return {"ok":True,"path":rel}
+
+def _coder_delete_path(root, rel):
+    t = _coder_safe(root, rel)
+    if t == Path(root).resolve(): return {"error":"Cannot delete project root"}
+    if t.is_file(): t.unlink()
+    elif t.is_dir(): import shutil; shutil.rmtree(t)
+    else: return {"error": f"Not found: {rel}"}
+    return {"ok":True,"path":rel}
+
+def _coder_search_text(root, query, rel="."):
+    base = Path(root).resolve()
+    t = _coder_safe(root, rel)
+    hits = []
+    for p in t.rglob("*"):
+        if not p.is_file(): continue
+        if any(d in p.parts for d in CODER_IGNORE_DIRS): continue
+        try:
+            for i, ln in enumerate(p.read_text("utf-8","ignore").splitlines(), 1):
+                if query.lower() in ln.lower():
+                    hits.append({"file":str(p.relative_to(base)).replace("\\","/"),"line":i,"text":ln.strip()[:200]})
+                    if len(hits) >= 60: return {"results":hits,"truncated":True}
+        except Exception: pass
+    return {"results":hits,"truncated":False}
+
+def _coder_run_cmd(root, cmd, timeout=120):
+    for pat in CODER_DANGEROUS_CMD:
+        if re.search(pat, cmd, re.I):
+            return {"error":"Blocked dangerous command","blocked":True}
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           cwd=root, timeout=timeout,
+                           env={**os.environ,"PYTHONIOENCODING":"utf-8"})
+        return {"stdout":(r.stdout or "")[-12000:],"stderr":(r.stderr or "")[-6000:],"code":r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"error":f"Timed out ({timeout}s)","code":-1}
+    except Exception as e:
+        return {"error":str(e),"code":-1}
+
+def _coder_build_tree(root, max_depth=3, max_files=120):
+    base = Path(root).resolve()
+    lines, count = [], [0]
+    def walk(d, pre="", depth=0):
+        if depth > max_depth or count[0] > max_files: return
+        try: entries = sorted(d.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+        except PermissionError: return
+        dirs  = [e for e in entries if e.is_dir()  and e.name not in CODER_IGNORE_DIRS]
+        files = [e for e in entries if e.is_file() and e.name not in CODER_IGNORE_FILES]
+        all_items = dirs + files
+        for i, item in enumerate(all_items):
+            last = (i==len(all_items)-1)
+            conn = "└── " if last else "├── "
+            suffix = "/" if item.is_dir() else ""
+            lines.append(f"{pre}{conn}{item.name}{suffix}")
+            count[0] += 1
+            if item.is_dir(): walk(item, pre+("    " if last else "│   "), depth+1)
+    walk(base)
+    return "\n".join(lines) if lines else "(empty project)"
+
+# ── Coder conversations ─────────────────────────────────────────────────────
+
+def _coder_conv_path(cid): return CODER_CHATS / f"{cid}.json"
+
+def _coder_list_convs():
+    CODER_CHATS.mkdir(parents=True, exist_ok=True)
+    convs = []
+    for f in sorted(CODER_CHATS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            d = json.loads(f.read_text("utf-8"))
+            convs.append({"id":d["id"],"title":d.get("title","Untitled"),"updated":d.get("updated",0)})
+        except Exception: pass
+    return convs
+
+def _coder_load_conv(cid):
+    p = _coder_conv_path(cid)
+    if p.exists(): return json.loads(p.read_text("utf-8"))
+    return None
+
+def _coder_save_conv(conv):
+    CODER_CHATS.mkdir(parents=True, exist_ok=True)
+    conv["updated"] = time.time()
+    _coder_conv_path(conv["id"]).write_text(json.dumps(conv, ensure_ascii=False), "utf-8")
+
+def _coder_delete_conv(cid):
+    p = _coder_conv_path(cid)
+    if p.exists(): p.unlink()
+
+def _coder_new_conv():
+    c = {"id":uuid.uuid4().hex[:12],"title":"New Chat","messages":[],"model_history":[],"created":time.time(),"updated":time.time()}
+    _coder_save_conv(c)
+    return c
+
+# ── Coder system prompt ─────────────────────────────────────────────────────
+
+_CODER_MODE_INSTRUCTIONS = {
+    "auto": "You are in AUTO mode. Execute tools immediately as needed to accomplish the task. Act decisively and efficiently. Do not ask for permission — just do the work.",
+    "ask": "You are in ASK mode. Before executing ANY tool, describe exactly what you plan to do and why. List the specific files you'll change and commands you'll run. Then STOP and wait for the user to say 'go ahead', 'yes', 'do it', or similar before proceeding. If the user hasn't approved yet, do NOT output any <tool_call> blocks.",
+    "plan": "You are in PLAN mode. First, create a comprehensive numbered plan listing ALL changes needed — every file to create/edit, every command to run, and why. Present the full plan. STOP and wait for the user to approve. Only after explicit approval, execute the entire plan step by step.",
+}
+
+def _coder_system_prompt(project_path, mode, tree=""):
+    return f"""You are **Coder**, an expert AI coding agent built for software development. You think step-by-step, write clean code, and use tools to interact with the user's project.
+
+## TOOLS
+Use these tools by outputting a tool_call block. Use EXACTLY this format:
+
+<tool_call>
+{{"name": "tool_name", "args": {{"param": "value"}}}}
+</tool_call>
+
+Available tools:
+
+| Tool | Args | Description |
+|------|------|-------------|
+| read_file | path | Read a file's contents |
+| write_file | path, content | Create or overwrite a file |
+| edit_file | path, find, replace | Find-and-replace in a file (first match) |
+| run_command | command | Run a shell command |
+| list_dir | path (default ".") | List directory contents |
+| search | query, path (default ".") | Search text across files |
+| delete | path | Delete a file or directory |
+
+## RULES
+1. **Always read before editing.** Never guess file contents — use read_file first.
+2. **Minimal edits.** Use edit_file for targeted changes. Only use write_file for new files or full rewrites.
+3. **Explain your reasoning.** Before acting, briefly explain what you're doing and why.
+4. **Test when possible.** After making changes, run tests or verify the code works.
+5. **One tool per block.** Each <tool_call> block should contain exactly one tool call.
+6. **Handle errors.** If a tool returns an error, explain the issue and try an alternative approach.
+7. **Security first.** Never write secrets/passwords in code. Never run destructive commands without thinking.
+8. **Clean code.** Follow the project's existing style, conventions, and patterns.
+
+## MODE
+{_CODER_MODE_INSTRUCTIONS.get(mode, _CODER_MODE_INSTRUCTIONS["auto"])}
+
+## PROJECT
+Working directory: {project_path}
+
+```
+{tree}
+```
+
+## RESPONSE STYLE
+- Use markdown formatting for explanations
+- Show code in fenced blocks with language tags
+- Be concise but thorough
+- When showing diffs or changes, be specific about what changed and why
+- If a task is ambiguous, state your interpretation before proceeding
+"""
+
+# ── Coder tool parsing ───────────────────────────────────────────────────────
+
+_CODER_TOOL_RE = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
+
+def _coder_parse_tools(text):
+    calls = []
+    for m in _CODER_TOOL_RE.finditer(text):
+        try: calls.append(json.loads(m.group(1)))
+        except json.JSONDecodeError: pass
+    return calls
+
+def _coder_strip_tools(text):
+    return _CODER_TOOL_RE.sub("", text).strip()
+
+def _coder_exec_tool(tc, root):
+    name = tc.get("name","")
+    args = tc.get("args",{})
+    try:
+        if name == "read_file": return _coder_read_file(root, args["path"])
+        elif name == "write_file": return _coder_write_file(root, args["path"], args["content"])
+        elif name == "edit_file": return _coder_edit_file(root, args["path"], args["find"], args["replace"])
+        elif name == "run_command": return _coder_run_cmd(root, args["command"], timeout=args.get("timeout",120))
+        elif name == "list_dir": return _coder_list_dir(root, args.get("path","."))
+        elif name == "search": return _coder_search_text(root, args["query"], args.get("path","."))
+        elif name == "delete": return _coder_delete_path(root, args["path"])
+        else: return {"error":f"Unknown tool: {name}"}
+    except Exception as e: return {"error":str(e)}
+
+def _coder_truncate_result(result):
+    if isinstance(result, dict):
+        r = dict(result)
+        if "content" in r and isinstance(r["content"], str) and len(r["content"]) > 3000:
+            r["content"] = r["content"][:3000] + f"\n... ({len(result['content'])} chars total)"
+        if "stdout" in r and isinstance(r["stdout"], str) and len(r["stdout"]) > 3000:
+            r["stdout"] = r["stdout"][:3000] + "\n... (truncated)"
+        if "results" in r and isinstance(r["results"], list) and len(r["results"]) > 20:
+            r["results"] = r["results"][:20]; r["truncated"] = True
+        return r
+    return result
+
+def _coder_sse(data):
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+# ── Coder agent loop ────────────────────────────────────────────────────────
+
+_CODER_MAX_TURNS = 25
+
+def _coder_agent_stream(conv_id, user_text):
+    cfg   = _coder_load_config()
+    # Use Gyro's Google key as fallback
+    key   = cfg.get("api_key","") or _load_server_key("google") or ""
+    model = cfg.get("model","gemma-4-31b-it")
+    mode  = cfg.get("mode","auto")
+    root  = cfg.get("project_path","")
+
+    if not key:
+        yield _coder_sse({"type":"error","content":"No API key configured. Add your Google AI API key in Coder settings."})
+        return
+    if not root or not Path(root).is_dir():
+        yield _coder_sse({"type":"error","content":"No valid project folder set. Open Coder settings to choose a folder."})
+        return
+
+    conv = _coder_load_conv(conv_id)
+    if not conv:
+        conv = _coder_new_conv()
+        conv["id"] = conv_id
+
+    conv["messages"].append({"role":"user","content":user_text})
+    conv["model_history"].append({"role":"user","text":user_text})
+
+    if conv["title"] == "New Chat" and len(conv["messages"]) == 1:
+        words = re.sub(r'\s+',' ', user_text).strip().split()
+        conv["title"] = " ".join(words[:6])[:48] or "New Chat"
+        yield _coder_sse({"type":"title","content":conv["title"]})
+
+    genai, types = _import_google()
+    client = genai.Client(api_key=key, http_options={"timeout": 300_000})
+
+    tree = _coder_build_tree(root, max_depth=2, max_files=80)
+    system = _coder_system_prompt(root, mode, tree)
+
+    accumulated_text = ""
+    all_tools = []
+
+    for turn in range(_CODER_MAX_TURNS):
+        yield _coder_sse({"type":"status","content":"thinking..." if turn==0 else "continuing..."})
+
+        contents = []
+        for msg in conv["model_history"]:
+            role = "user" if msg["role"]=="user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["text"])]))
+
+        config = types.GenerateContentConfig(system_instruction=system, max_output_tokens=16384, temperature=0.2)
+
+        full_text = ""
+        try:
+            stream = client.models.generate_content_stream(model=model, contents=contents, config=config)
+            for chunk in stream:
+                t = ""
+                try: t = chunk.text or ""
+                except Exception: pass
+                if t:
+                    full_text += t
+                    yield _coder_sse({"type":"text","content":t})
+        except Exception as e:
+            err_msg = str(e)
+            if "API key" in err_msg or "401" in err_msg or "403" in err_msg:
+                yield _coder_sse({"type":"error","content":"Invalid API key. Check your Google AI API key in Coder settings."})
+            elif "not found" in err_msg.lower() or "404" in err_msg:
+                yield _coder_sse({"type":"error","content":f"Model '{model}' not available. Try a different model."})
+            else:
+                yield _coder_sse({"type":"error","content":f"Model error: {err_msg[:500]}"})
+            if accumulated_text:
+                conv["messages"].append({"role":"assistant","content":accumulated_text,"tools":all_tools})
+                conv["model_history"].append({"role":"model","text":accumulated_text})
+            _coder_save_conv(conv)
+            return
+
+        tools = _coder_parse_tools(full_text)
+        clean = _coder_strip_tools(full_text)
+        accumulated_text += ("\n" if accumulated_text else "") + clean if clean else ""
+
+        if not tools:
+            conv["model_history"].append({"role":"model","text":full_text})
+            break
+
+        conv["model_history"].append({"role":"model","text":full_text})
+
+        results_parts = []
+        for tc in tools:
+            name = tc.get("name","")
+            args = tc.get("args",{})
+            yield _coder_sse({"type":"tool_start","name":name,"args":args})
+            result = _coder_exec_tool(tc, root)
+            all_tools.append({"name":name,"args":args,"result":result})
+            yield _coder_sse({"type":"tool_result","name":name,"result":_coder_truncate_result(result)})
+            if name in ("write_file","edit_file","delete"):
+                yield _coder_sse({"type":"file_changed","path":args.get("path","")})
+            results_parts.append(json.dumps(result, ensure_ascii=False))
+
+        results_text = "\n".join(f'<tool_result name="{t["name"]}">\n{r}\n</tool_result>' for t,r in zip(tools, results_parts))
+        conv["model_history"].append({"role":"user","text":results_text})
+    else:
+        yield _coder_sse({"type":"status","content":"Reached maximum agent steps."})
+
+    conv["messages"].append({"role":"assistant","content":accumulated_text,"tools":all_tools})
+    _coder_save_conv(conv)
+    yield _coder_sse({"type":"done","conversation":{"id":conv["id"],"title":conv["title"]}})
+
+# ── Coder browse ─────────────────────────────────────────────────────────────
+
+def _coder_browse(path_str):
+    p = Path(path_str).resolve()
+    if not p.is_dir(): return {"error":"Not a directory","path":str(p)}
+    dirs = []
+    try:
+        for item in sorted(p.iterdir()):
+            if item.is_dir() and not item.name.startswith('.'):
+                dirs.append({"name":item.name,"path":str(item).replace("\\","/")})
+    except PermissionError: return {"error":"Permission denied","path":str(p)}
+    parent = str(p.parent).replace("\\","/") if p.parent != p else None
+    return {"path":str(p).replace("\\","/"),"parent":parent,"dirs":dirs}
+
+# ── Coder routes ─────────────────────────────────────────────────────────────
+
+@app.route("/api/coder/config", methods=["GET","POST"])
+@require_auth_or_guest
+def coder_config_route():
+    if request.method == "GET":
+        c = _coder_load_config()
+        masked = c.copy()
+        if masked.get("api_key"):
+            k = masked["api_key"]
+            masked["api_key_display"] = k[:6]+"..."+k[-4:] if len(k)>10 else "***"
+        else:
+            masked["api_key_display"] = ""
+        return jsonify(masked)
+    data = request.json or {}
+    c = _coder_load_config()
+    for k in ("api_key","model","mode","project_path"):
+        if k in data: c[k] = data[k]
+    _coder_save_config(c)
+    return jsonify({"ok":True})
+
+@app.route("/api/coder/models")
+@require_auth_or_guest
+def coder_models_route():
+    return jsonify(CODER_MODELS)
+
+@app.route("/api/coder/browse")
+@require_auth_or_guest
+def coder_browse_route():
+    p = request.args.get("path","") or str(Path.home())
+    return jsonify(_coder_browse(p))
+
+@app.route("/api/coder/files")
+@app.route("/api/coder/files/<path:rel>")
+@require_auth_or_guest
+def coder_files_route(rel="."):
+    root = _coder_load_config().get("project_path","")
+    if not root: return jsonify({"error":"No project set"}), 400
+    return jsonify(_coder_list_dir(root, rel))
+
+@app.route("/api/coder/file/<path:rel>", methods=["GET","PUT"])
+@require_auth_or_guest
+def coder_file_route(rel):
+    root = _coder_load_config().get("project_path","")
+    if not root: return jsonify({"error":"No project set"}), 400
+    if request.method == "GET": return jsonify(_coder_read_file(root, rel))
+    return jsonify(_coder_write_file(root, rel, (request.json or {}).get("content","")))
+
+@app.route("/api/coder/terminal", methods=["POST"])
+@require_auth_or_guest
+def coder_terminal_route():
+    root = _coder_load_config().get("project_path","")
+    if not root: return jsonify({"error":"No project set"}), 400
+    data = request.json or {}
+    cmd = data.get("command","").strip()
+    if not cmd: return jsonify({"error":"No command"}), 400
+    return jsonify(_coder_run_cmd(root, cmd, timeout=data.get("timeout",120)))
+
+@app.route("/api/coder/conversations", methods=["GET","POST"])
+@require_auth_or_guest
+def coder_conversations_route():
+    if request.method == "GET": return jsonify(_coder_list_convs())
+    return jsonify(_coder_new_conv())
+
+@app.route("/api/coder/conversations/<cid>", methods=["GET","DELETE"])
+@require_auth_or_guest
+def coder_conversation_route(cid):
+    if request.method=="DELETE": _coder_delete_conv(cid); return jsonify({"ok":True})
+    c = _coder_load_conv(cid)
+    if not c: return jsonify({"error":"Not found"}), 404
+    return jsonify(c)
+
+@app.route("/api/coder/chat", methods=["POST"])
+@require_auth_or_guest
+def coder_chat_route():
+    data = request.json or {}
+    conv_id = data.get("conversation_id", uuid.uuid4().hex[:12])
+    message = (data.get("message","") or "").strip()
+    if not message: return jsonify({"error":"Empty message"}), 400
+    def generate():
+        try:
+            for event in _coder_agent_stream(conv_id, message):
+                yield event
+        except Exception as e:
+            yield _coder_sse({"type":"error","content":f"Server error: {str(e)[:500]}"})
+            yield _coder_sse({"type":"done","conversation":{"id":conv_id,"title":"Error"}})
+    return Response(stream_with_context(generate()), mimetype="text/event-stream",
+                    headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
 # --- Pre-warm heavy modules (.pyc compilation) ------------------------------

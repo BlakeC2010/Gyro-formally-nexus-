@@ -5663,6 +5663,18 @@ async function sendMessage(opts){
               },800);
               const _pList=_pendingReprompts.get(_repromptChatId)||[];_pList.push(_tid);_pendingReprompts.set(_repromptChatId,_pList);
             }
+            // -- Auto-continue if response was truncated --
+            if(data.auto_continue&&!data.code_auto_reprompt&&!data.research_trigger){
+              setStatus('Response was truncated — continuing...');
+              const _contChatId=targetChatId;
+              const _contStreamId=streamId;
+              const _contTid=setTimeout(()=>{
+                const cur=runningStreams.get(_contChatId);
+                if(cur&&cur.streamId!==_contStreamId)return;
+                sendMessage({silent:true,message:'[SYSTEM] Your previous response was cut off mid-way. Please continue EXACTLY where you left off. Do not repeat what you already said — just continue from the truncation point.',targetChat:_contChatId});
+              },600);
+              const _pList2=_pendingReprompts.get(_contChatId)||[];_pList2.push(_contTid);_pendingReprompts.set(_contChatId,_pList2);
+            }
             setStatus('Done. Ask a follow-up or start something new.');
             // If user navigated away and back, reload the chat so they see the response
             if(curChat===targetChatId&&!msgDiv.isConnected){
@@ -8473,6 +8485,663 @@ document.addEventListener('DOMContentLoaded',()=>{
     if(document.hidden) stopPing();
     else startPing();
   });
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CODER — Integrated AI Coding Agent
+// ══════════════════════════════════════════════════════════════════════════════
+(function(){
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+let _coderActive = false;
+let _coderConvId = localStorage.getItem('coder_conv') || null;
+let _coderConfig = {};
+let _coderStreaming = false;
+let _coderMonaco = null;
+let _coderTabs = [];   // [{path, model, modified}]
+let _coderActiveTab = null;
+let _coderBrowsePath = '';
+
+const _CODER_LANG = {
+  py:'python',js:'javascript',ts:'typescript',tsx:'typescriptreact',jsx:'javascriptreact',
+  html:'html',css:'css',json:'json',md:'markdown',yaml:'yaml',yml:'yaml',
+  sh:'shell',bat:'bat',java:'java',c:'c',cpp:'cpp',rs:'rust',go:'go',
+  rb:'ruby',php:'php',swift:'swift',kt:'kotlin',cs:'csharp',sql:'sql',xml:'xml',
+  txt:'plaintext',log:'plaintext',csv:'plaintext',toml:'plaintext',ini:'ini',cfg:'ini',
+};
+const _CODER_ICONS = {
+  py:'🐍',js:'📜',ts:'📘',html:'🌐',css:'🎨',json:'📋',md:'📝',rs:'🦀',go:'🔷',
+  java:'☕',rb:'💎',php:'🐘',default:'📄',folder:'📁',
+};
+
+function _coderIcon(name, isDir){
+  if(isDir) return _CODER_ICONS.folder;
+  return _CODER_ICONS[name.split('.').pop().toLowerCase()] || _CODER_ICONS.default;
+}
+function _coderLang(path){
+  return _CODER_LANG[path.split('.').pop().toLowerCase()] || 'plaintext';
+}
+function _esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+
+// ── Sidebar mode switching ───────────────────────────────────────────────────
+window.switchSidebarMode = function(mode){
+  document.querySelectorAll('.sb-mode-tab').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode===mode);
+  });
+  document.querySelectorAll('.sb-mode-panel').forEach(p=>p.classList.remove('active'));
+  if(mode==='coder'){
+    document.getElementById('sbCoderPanel').classList.add('active');
+    _coderActive = true;
+    _showCoderPanel(true);
+    _coderInit();
+  } else {
+    document.getElementById('sbChatPanel').classList.add('active');
+    _coderActive = false;
+    _showCoderPanel(false);
+  }
+};
+
+function _showCoderPanel(show){
+  const cp = document.getElementById('coderPanel');
+  const gc = document.getElementById('gyroChatCol');
+  const ca = document.getElementById('canvasPanel');
+  const cr = document.getElementById('canvasResizer');
+  if(show){
+    cp.style.display = 'flex';
+    if(gc) gc.style.display = 'none';
+    if(ca) ca.style.display = 'none';
+    if(cr) cr.style.display = 'none';
+  } else {
+    cp.style.display = 'none';
+    if(gc) gc.style.display = '';
+    if(ca) ca.style.display = '';
+    if(cr) cr.style.display = '';
+  }
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+let _coderInited = false;
+async function _coderInit(){
+  if(_coderInited) return;
+  _coderInited = true;
+  await _coderLoadConfig();
+  await _coderLoadModels();
+  _coderLoadConversations();
+  _coderLoadFileTree();
+  _coderInitMonaco();
+}
+
+async function _coderApi(url, opts={}){
+  const res = await fetch(url, {headers:{'Content-Type':'application/json',...(opts.headers||{})},...opts});
+  return res.json();
+}
+
+// ── Config ───────────────────────────────────────────────────────────────────
+async function _coderLoadConfig(){
+  _coderConfig = await _coderApi('/api/coder/config');
+  const ms = document.getElementById('coderModeSelect');
+  const mm = document.getElementById('coderModelSelect');
+  if(ms) ms.value = _coderConfig.mode || 'auto';
+  if(mm && mm.options.length) mm.value = _coderConfig.model || 'gemma-4-31b-it';
+}
+
+async function _coderSaveConfig(updates){
+  await _coderApi('/api/coder/config',{method:'POST',body:JSON.stringify(updates)});
+  await _coderLoadConfig();
+}
+
+// ── Models ───────────────────────────────────────────────────────────────────
+async function _coderLoadModels(){
+  const models = await _coderApi('/api/coder/models');
+  const populate = (sel)=>{
+    if(!sel) return;
+    sel.innerHTML='';
+    for(const[id,info] of Object.entries(models)){
+      const o=document.createElement('option');
+      o.value=id; o.textContent=info.label; o.title=info.desc||'';
+      sel.appendChild(o);
+    }
+  };
+  populate(document.getElementById('coderModelSelect'));
+  populate(document.getElementById('coderCfgModel'));
+  const mm = document.getElementById('coderModelSelect');
+  if(mm) mm.value = _coderConfig.model || 'gemma-4-31b-it';
+}
+
+window.coderSetMode = function(v){ _coderSaveConfig({mode:v}); };
+window.coderSetModel = function(v){ _coderSaveConfig({model:v}); };
+
+// ── Monaco ───────────────────────────────────────────────────────────────────
+function _coderInitMonaco(){
+  // Monaco may already be loaded by Gyro canvas - check
+  if(typeof monaco !== 'undefined'){
+    _coderEnsureTheme();
+    return;
+  }
+  // If require is not defined, Monaco CDN wasn't loaded
+  if(typeof require === 'undefined') return;
+  require(['vs/editor/editor.main'], function(){
+    _coderEnsureTheme();
+  });
+}
+
+function _coderEnsureTheme(){
+  try{
+    monaco.editor.defineTheme('coder-dark',{
+      base:'vs-dark',inherit:true,rules:[],
+      colors:{'editor.background':'#1e1e1e','editor.foreground':'#cccccc'}
+    });
+  }catch(e){}
+}
+
+function _coderOpenFile(path, content){
+  let tab = _coderTabs.find(t=>t.path===path);
+  if(!tab){
+    const lang = _coderLang(path);
+    let model = null;
+    if(typeof monaco !== 'undefined'){
+      model = monaco.editor.createModel(content, lang);
+      model.onDidChangeContent(()=>{
+        const t = _coderTabs.find(x=>x.path===path);
+        if(t && !t.modified){t.modified=true; _coderRenderTabs();}
+      });
+    }
+    tab = {path, model, modified:false};
+    _coderTabs.push(tab);
+  }
+  _coderActiveTab = path;
+  _coderRenderTabs();
+  _coderShowEditor(tab);
+}
+
+function _coderShowEditor(tab){
+  const container = document.getElementById('coderEditorContainer');
+  const welcome = container.querySelector('.coder-editor-welcome');
+  if(welcome) welcome.style.display='none';
+  if(!_coderMonaco && typeof monaco !== 'undefined'){
+    _coderMonaco = monaco.editor.create(container,{
+      theme:'coder-dark',fontSize:13,
+      fontFamily:"'JetBrains Mono','Consolas',monospace",
+      minimap:{enabled:true},automaticLayout:true,
+      wordWrap:'on',scrollBeyondLastLine:false,
+      renderLineHighlight:'line',padding:{top:8},
+    });
+    _coderMonaco.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.KeyS,()=>_coderSaveFile());
+  }
+  if(_coderMonaco && tab.model) _coderMonaco.setModel(tab.model);
+}
+
+function _coderRenderTabs(){
+  const bar = document.getElementById('coderTabsBar');
+  bar.innerHTML='';
+  _coderTabs.forEach(tab=>{
+    const el = document.createElement('button');
+    el.className = 'coder-tab'+(tab.path===_coderActiveTab?' active':'');
+    const name = tab.path.split('/').pop();
+    el.innerHTML = `${_esc(name)}${tab.modified?'<span class="ct-mod">●</span>':''}<span class="ct-close" data-path="${_esc(tab.path)}">✕</span>`;
+    el.addEventListener('click',e=>{
+      if(e.target.classList.contains('ct-close')){
+        _coderCloseTab(e.target.dataset.path);
+      } else {
+        _coderActiveTab=tab.path;
+        _coderRenderTabs();
+        _coderShowEditor(tab);
+      }
+    });
+    bar.appendChild(el);
+  });
+}
+
+function _coderCloseTab(path){
+  const idx = _coderTabs.findIndex(t=>t.path===path);
+  if(idx<0)return;
+  const tab = _coderTabs[idx];
+  if(tab.model) tab.model.dispose();
+  _coderTabs.splice(idx,1);
+  if(_coderActiveTab===path){
+    if(_coderTabs.length>0){
+      _coderActiveTab = _coderTabs[Math.min(idx,_coderTabs.length-1)].path;
+      _coderShowEditor(_coderTabs.find(t=>t.path===_coderActiveTab));
+    } else {
+      _coderActiveTab=null;
+      if(_coderMonaco) _coderMonaco.setModel(null);
+      const w = document.getElementById('coderEditorContainer').querySelector('.coder-editor-welcome');
+      if(w) w.style.display='';
+    }
+  }
+  _coderRenderTabs();
+}
+
+async function _coderSaveFile(){
+  const tab = _coderTabs.find(t=>t.path===_coderActiveTab);
+  if(!tab||!tab.model) return;
+  await _coderApi('/api/coder/file/'+tab.path,{method:'PUT',body:JSON.stringify({content:tab.model.getValue()})});
+  tab.modified=false;
+  _coderRenderTabs();
+  _coderAppendTerm('Saved: '+tab.path,'info');
+}
+
+// ── File Tree ────────────────────────────────────────────────────────────────
+async function _coderLoadFileTree(rel){
+  if(!_coderConfig.project_path) return;
+  const url = '/api/coder/files'+(rel&&rel!=='.'?'/'+rel:'');
+  const data = await _coderApi(url);
+  if(data.error) return;
+  const container = document.getElementById('coderFileTree');
+  if(!rel||rel==='.') container.innerHTML='';
+  _coderRenderTree(container, data.items, 0);
+}
+
+function _coderRenderTree(container, items, depth){
+  items.forEach(item=>{
+    const el = document.createElement('div');
+    el.className = 'coder-tree-item';
+    el.style.paddingLeft = (12+depth*16)+'px';
+    el.innerHTML = `<span class="coder-tree-icon">${item.type==='dir'?'▶':_coderIcon(item.name)}</span><span>${_esc(item.name)}</span>`;
+    if(item.type==='dir'){
+      let loaded=false, open=false;
+      const child = document.createElement('div');
+      child.style.display='none';
+      el.addEventListener('click',async()=>{
+        open=!open;
+        el.querySelector('.coder-tree-icon').textContent = open?'▼':'▶';
+        if(!loaded){
+          const d = await _coderApi('/api/coder/files/'+item.path);
+          if(d.items) _coderRenderTree(child, d.items, depth+1);
+          loaded=true;
+        }
+        child.style.display = open?'':'none';
+      });
+      container.appendChild(el);
+      container.appendChild(child);
+    } else {
+      el.addEventListener('click',async()=>{
+        const d = await _coderApi('/api/coder/file/'+item.path);
+        if(d.content!==undefined) _coderOpenFile(item.path, d.content);
+      });
+      container.appendChild(el);
+    }
+  });
+}
+
+window.coderRefreshFiles = function(){
+  document.getElementById('coderFileTree').innerHTML='';
+  _coderLoadFileTree();
+};
+
+// ── Conversations ────────────────────────────────────────────────────────────
+async function _coderLoadConversations(){
+  const convs = await _coderApi('/api/coder/conversations');
+  const list = document.getElementById('coderChatList');
+  list.innerHTML='';
+  convs.forEach(c=>{
+    const el = document.createElement('div');
+    el.className = 'sb-chat'+(c.id===_coderConvId?' active':'');
+    el.innerHTML = `<span class="ct">${_esc(c.title||'Untitled')}</span><button class="cd" onclick="event.stopPropagation();_coderDeleteConv('${c.id}')" title="Delete">✕</button>`;
+    el.addEventListener('click',()=>_coderSwitchConv(c.id));
+    list.appendChild(el);
+  });
+}
+
+async function _coderSwitchConv(cid){
+  _coderConvId = cid;
+  localStorage.setItem('coder_conv',cid);
+  const conv = await _coderApi('/api/coder/conversations/'+cid);
+  if(conv.error) return;
+  _coderRenderConv(conv);
+  _coderLoadConversations();
+}
+
+window._coderDeleteConv = async function(cid){
+  await _coderApi('/api/coder/conversations/'+cid,{method:'DELETE'});
+  if(_coderConvId===cid){
+    _coderConvId=null;
+    localStorage.removeItem('coder_conv');
+    _coderClearChat();
+  }
+  _coderLoadConversations();
+};
+
+function _coderClearChat(){
+  const cm = document.getElementById('coderChatMessages');
+  cm.innerHTML = `<div class="coder-welcome-msg"><h3>👋 Hello! I'm Coder.</h3><p>I can help you build, debug, and refactor code.</p><div style="margin-top:12px;font-size:12px;color:var(--text-muted)"><div><strong>🟢 Auto</strong> — executes immediately</div><div><strong>🟡 Ask</strong> — confirms before changes</div><div><strong>🔵 Plan</strong> — creates a full plan first</div></div></div>`;
+}
+
+function _coderRenderConv(conv){
+  const cm = document.getElementById('coderChatMessages');
+  cm.innerHTML='';
+  if(!conv.messages||conv.messages.length===0){_coderClearChat();return;}
+  conv.messages.forEach(msg=>{
+    if(msg.role==='user') _coderAddUserMsg(msg.content);
+    else _coderAddAssistantMsg(msg.content, msg.tools||[]);
+  });
+  _coderScrollChat();
+}
+
+window.coderNewChat = async function(){
+  const conv = await _coderApi('/api/coder/conversations',{method:'POST'});
+  _coderConvId = conv.id;
+  localStorage.setItem('coder_conv',conv.id);
+  _coderClearChat();
+  _coderLoadConversations();
+};
+
+window.coderFilterChats = function(){
+  const q = (document.getElementById('coderChatSearch').value||'').toLowerCase();
+  document.querySelectorAll('#coderChatList .sb-chat').forEach(el=>{
+    el.style.display = el.textContent.toLowerCase().includes(q)?'':'none';
+  });
+};
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+window.coderSendMessage = async function(){
+  const input = document.getElementById('coderChatInput');
+  const text = input.value.trim();
+  if(!text||_coderStreaming) return;
+
+  if(!_coderConvId){
+    const conv = await _coderApi('/api/coder/conversations',{method:'POST'});
+    _coderConvId = conv.id;
+    localStorage.setItem('coder_conv',conv.id);
+    document.getElementById('coderChatMessages').innerHTML='';
+  }
+
+  input.value='';
+  input.style.height='auto';
+  _coderAddUserMsg(text);
+  _coderScrollChat();
+
+  _coderStreaming = true;
+  document.getElementById('coderSendBtn').disabled=true;
+  _coderSetStatus('thinking...');
+
+  const msgEl = _coderCreateAssistantEl();
+  const contentEl = msgEl.querySelector('.coder-msg-content');
+  let fullText = '';
+
+  try{
+    const resp = await fetch('/api/coder/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({conversation_id:_coderConvId,message:text}),
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer += decoder.decode(value,{stream:true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data: '))continue;
+        try{
+          const data = JSON.parse(line.slice(6));
+          _coderHandleSSE(data, contentEl, {get:()=>fullText, set:t=>{fullText=t;}});
+        }catch(e){}
+      }
+    }
+  }catch(err){
+    contentEl.innerHTML += `<p style="color:var(--red)">Connection error: ${_esc(err.message)}</p>`;
+  }
+
+  _coderStreaming = false;
+  document.getElementById('coderSendBtn').disabled=false;
+  _coderSetStatus('');
+  _coderScrollChat();
+  _coderLoadConversations();
+};
+
+function _coderHandleSSE(data, contentEl, state){
+  switch(data.type){
+    case 'text':{
+      const t = state.get()+data.content;
+      state.set(t);
+      contentEl.innerHTML = _coderMd(t);
+      _coderScrollChat();
+      break;
+    }
+    case 'tool_start':{
+      const block = document.createElement('div');
+      block.className='coder-tool-block';
+      const label = _coderToolLabel(data.name, data.args);
+      block.innerHTML=`<div class="coder-tool-header" onclick="this.parentElement.classList.toggle('open')"><span class="coder-tool-chevron">▶</span>${label}<span class="coder-tool-status">running...</span></div><div class="coder-tool-body">Executing...</div>`;
+      contentEl.appendChild(block);
+      _coderSetStatus(data.name+'...');
+      _coderScrollChat();
+      break;
+    }
+    case 'tool_result':{
+      const blocks = contentEl.querySelectorAll('.coder-tool-block');
+      const block = blocks[blocks.length-1];
+      if(block){
+        const body = block.querySelector('.coder-tool-body');
+        const status = block.querySelector('.coder-tool-status');
+        if(data.result.error){
+          body.textContent='Error: '+data.result.error;
+          status.textContent='✗ error';status.className='coder-tool-status err';
+        } else {
+          body.textContent=_coderFormatResult(data.name,data.result);
+          status.textContent='✓ done';status.className='coder-tool-status ok';
+        }
+      }
+      _coderSetStatus('thinking...');
+      _coderScrollChat();
+      break;
+    }
+    case 'file_changed':
+      _coderLoadFileTree();
+      _coderRefreshTab(data.path);
+      break;
+    case 'status':
+      _coderSetStatus(data.content);
+      break;
+    case 'error':
+      contentEl.innerHTML+=`<p style="color:var(--red)">⚠ ${_esc(data.content)}</p>`;
+      _coderScrollChat();
+      break;
+    case 'done':
+      _coderSetStatus('');
+      break;
+  }
+}
+
+async function _coderRefreshTab(path){
+  const tab = _coderTabs.find(t=>t.path===path);
+  if(tab&&tab.model){
+    const d = await _coderApi('/api/coder/file/'+path);
+    if(d.content!==undefined){tab.model.setValue(d.content);tab.modified=false;_coderRenderTabs();}
+  }
+}
+
+// ── Message rendering ────────────────────────────────────────────────────────
+function _coderAddUserMsg(text){
+  const cm = document.getElementById('coderChatMessages');
+  const el = document.createElement('div');
+  el.className='coder-msg user';
+  el.innerHTML=`<div class="coder-msg-avatar">U</div><div class="coder-msg-body"><div class="coder-msg-content">${_esc(text)}</div></div>`;
+  cm.appendChild(el);
+}
+
+function _coderCreateAssistantEl(){
+  const cm=document.getElementById('coderChatMessages');
+  const el=document.createElement('div');
+  el.className='coder-msg assistant';
+  el.innerHTML=`<div class="coder-msg-avatar">C</div><div class="coder-msg-body"><div class="coder-msg-content"><span style="color:var(--text-muted);font-size:12px">Thinking...</span></div></div>`;
+  cm.appendChild(el);
+  _coderScrollChat();
+  return el;
+}
+
+function _coderAddAssistantMsg(text, tools){
+  const cm=document.getElementById('coderChatMessages');
+  const el=document.createElement('div');
+  el.className='coder-msg assistant';
+  let toolsHtml='';
+  if(tools&&tools.length){
+    toolsHtml=tools.map(t=>{
+      const label=_coderToolLabel(t.name,t.args);
+      const r=t.result||{};
+      const isErr=!!r.error;
+      const body=isErr?'Error: '+r.error:_coderFormatResult(t.name,r);
+      return`<div class="coder-tool-block"><div class="coder-tool-header" onclick="this.parentElement.classList.toggle('open')"><span class="coder-tool-chevron">▶</span>${label}<span class="coder-tool-status ${isErr?'err':'ok'}">${isErr?'✗ error':'✓ done'}</span></div><div class="coder-tool-body">${_esc(body)}</div></div>`;
+    }).join('');
+  }
+  el.innerHTML=`<div class="coder-msg-avatar">C</div><div class="coder-msg-body"><div class="coder-msg-content">${_coderMd(text)}${toolsHtml}</div></div>`;
+  cm.appendChild(el);
+}
+
+function _coderToolLabel(name,args){
+  const icons={read_file:'📖',write_file:'✏️',edit_file:'🔧',run_command:'⚡',list_dir:'📂',search:'🔍',delete:'🗑️'};
+  const icon=icons[name]||'🔧';
+  let detail='';
+  if(args){
+    if(args.path)detail=args.path;
+    else if(args.command)detail=args.command;
+    else if(args.query)detail='"'+args.query+'"';
+  }
+  return`${icon} <strong>${_esc(name)}</strong>${detail?' — '+_esc(detail):''}`;
+}
+
+function _coderFormatResult(name,result){
+  if(name==='read_file'&&result.content)return result.content;
+  if(name==='list_dir'&&result.items)return result.items.map(i=>(i.type==='dir'?'📁':'📄')+' '+i.name).join('\n');
+  if(name==='run_command'){
+    let o='';
+    if(result.stdout)o+=result.stdout;
+    if(result.stderr)o+=(o?'\n':'')+result.stderr;
+    if(result.code!==undefined)o+='\n[exit code: '+result.code+']';
+    return o||'(no output)';
+  }
+  if(name==='search'&&result.results)return result.results.map(r=>r.file+':'+r.line+'  '+r.text).join('\n');
+  return JSON.stringify(result,null,2);
+}
+
+function _coderSetStatus(text){
+  const el=document.getElementById('coderAgentStatus');
+  el.innerHTML = text ? `<span class="c-dot"></span>${_esc(text)}` : '';
+}
+
+function _coderScrollChat(){
+  const el=document.getElementById('coderChatMessages');
+  requestAnimationFrame(()=>el.scrollTop=el.scrollHeight);
+}
+
+function _coderMd(text){
+  if(!text)return'';
+  if(typeof marked!=='undefined'){
+    try{return marked.parse(text);}catch(e){}
+  }
+  return _esc(text).replace(/\n/g,'<br>');
+}
+
+// ── Terminal ─────────────────────────────────────────────────────────────────
+window.coderRunTerminal = async function(){
+  const input=document.getElementById('coderTermInput');
+  const cmd=input.value.trim();
+  if(!cmd)return;
+  input.value='';
+  _coderAppendTerm('$ '+cmd,'cmd');
+  const result = await _coderApi('/api/coder/terminal',{method:'POST',body:JSON.stringify({command:cmd})});
+  if(result.error) _coderAppendTerm(result.error,'err');
+  else{
+    if(result.stdout)_coderAppendTerm(result.stdout);
+    if(result.stderr)_coderAppendTerm(result.stderr,'err');
+    if(result.code!==undefined&&result.code!==0)_coderAppendTerm('[exit code: '+result.code+']','info');
+  }
+};
+
+window.coderClearTerminal = function(){
+  document.getElementById('coderTermOutput').innerHTML='';
+};
+
+function _coderAppendTerm(text,cls){
+  const el=document.getElementById('coderTermOutput');
+  const line=document.createElement('div');
+  if(cls)line.className='t-'+cls;
+  line.textContent=text;
+  el.appendChild(line);
+  el.scrollTop=el.scrollHeight;
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+window.openCoderSettings = async function(){
+  await _coderLoadConfig();
+  document.getElementById('coderCfgKey').value='';
+  document.getElementById('coderCfgKey').placeholder=_coderConfig.api_key_display||'Leave blank to use Gyro key';
+  document.getElementById('coderCfgPath').value=_coderConfig.project_path||'';
+  const m=document.getElementById('coderCfgModel');
+  if(m)m.value=_coderConfig.model||'gemma-4-31b-it';
+  const md=document.getElementById('coderCfgMode');
+  if(md)md.value=_coderConfig.mode||'auto';
+  document.getElementById('coderSettingsOverlay').style.display='flex';
+};
+
+window.closeCoderSettings = function(){
+  document.getElementById('coderSettingsOverlay').style.display='none';
+};
+
+window.saveCoderSettings = async function(){
+  const updates={};
+  const key=document.getElementById('coderCfgKey').value.trim();
+  if(key)updates.api_key=key;
+  const path=document.getElementById('coderCfgPath').value.trim();
+  if(path)updates.project_path=path;
+  updates.model=document.getElementById('coderCfgModel').value;
+  updates.mode=document.getElementById('coderCfgMode').value;
+  await _coderSaveConfig(updates);
+  closeCoderSettings();
+  _coderLoadFileTree();
+  _coderLoadConversations();
+  // Sync sidebar selects
+  const ms=document.getElementById('coderModeSelect');
+  const mm=document.getElementById('coderModelSelect');
+  if(ms)ms.value=_coderConfig.mode||'auto';
+  if(mm)mm.value=_coderConfig.model||'gemma-4-31b-it';
+};
+
+// ── Browse ───────────────────────────────────────────────────────────────────
+window.openCoderBrowse = async function(){
+  const start=document.getElementById('coderCfgPath').value.trim();
+  await _coderBrowseTo(start||'');
+  document.getElementById('coderBrowseOverlay').style.display='flex';
+};
+
+window.closeCoderBrowse = function(){
+  document.getElementById('coderBrowseOverlay').style.display='none';
+};
+
+window.coderSelectFolder = function(){
+  document.getElementById('coderCfgPath').value=_coderBrowsePath;
+  closeCoderBrowse();
+};
+
+async function _coderBrowseTo(path){
+  const data = await _coderApi('/api/coder/browse?path='+encodeURIComponent(path));
+  if(data.error)return;
+  _coderBrowsePath=data.path;
+  document.getElementById('coderBrowsePath').textContent=data.path;
+  const list=document.getElementById('coderBrowseList');
+  list.innerHTML='';
+  if(data.parent){
+    const el=document.createElement('div');
+    el.className='coder-browse-item';
+    el.innerHTML='<span>⬆️</span> ..';
+    el.addEventListener('click',()=>_coderBrowseTo(data.parent));
+    list.appendChild(el);
+  }
+  data.dirs.forEach(d=>{
+    const el=document.createElement('div');
+    el.className='coder-browse-item';
+    el.innerHTML=`<span>📁</span> ${_esc(d.name)}`;
+    el.addEventListener('click',()=>_coderBrowseTo(d.path));
+    list.appendChild(el);
+  });
+}
+
 })();
 
 

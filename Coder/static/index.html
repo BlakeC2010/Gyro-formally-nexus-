@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coder — AI Coding Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark-dimmed.min.css">
+</head>
+<body>
+    <!-- Header -->
+    <header id="header">
+        <div class="header-left">
+            <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
+            <span class="app-title">⚡ Coder</span>
+        </div>
+        <div class="header-center">
+            <div class="mode-selector">
+                <label>Mode:</label>
+                <select id="mode-select">
+                    <option value="auto">🟢 Auto</option>
+                    <option value="ask">🟡 Ask</option>
+                    <option value="plan">🔵 Plan</option>
+                </select>
+            </div>
+            <div class="model-selector">
+                <label>Model:</label>
+                <select id="model-select"></select>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="settings-btn" title="Settings">⚙️</button>
+        </div>
+    </header>
+
+    <!-- Main layout -->
+    <main id="main">
+        <!-- Left sidebar: file explorer + conversations -->
+        <aside id="sidebar">
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-panel="files-panel">Files</button>
+                <button class="sidebar-tab" data-panel="chats-panel">Chats</button>
+            </div>
+
+            <div id="files-panel" class="sidebar-panel active">
+                <div class="panel-toolbar">
+                    <span class="panel-label">EXPLORER</span>
+                    <button id="refresh-files" title="Refresh">↻</button>
+                </div>
+                <div id="file-tree"></div>
+            </div>
+
+            <div id="chats-panel" class="sidebar-panel">
+                <div class="panel-toolbar">
+                    <span class="panel-label">CONVERSATIONS</span>
+                    <button id="new-chat-btn" title="New chat">＋</button>
+                </div>
+                <div id="chat-list"></div>
+            </div>
+        </aside>
+
+        <!-- Resize handle -->
+        <div class="resize-handle" id="sidebar-resize"></div>
+
+        <!-- Center: editor + terminal -->
+        <section id="editor-section">
+            <div id="editor-tabs-bar">
+                <div id="editor-tabs"></div>
+            </div>
+            <div id="editor-container">
+                <div id="editor-welcome">
+                    <h2>⚡ Coder</h2>
+                    <p>AI-powered coding agent using Gemma 4</p>
+                    <p class="hint">Open a file from the explorer or ask the agent to help you code.</p>
+                </div>
+            </div>
+            <div class="resize-handle-h" id="terminal-resize"></div>
+            <div id="terminal-section">
+                <div class="panel-toolbar">
+                    <span class="panel-label">TERMINAL</span>
+                    <button id="clear-terminal" title="Clear">✕</button>
+                </div>
+                <div id="terminal-output"></div>
+                <div id="terminal-input-bar">
+                    <span class="prompt-char">$</span>
+                    <input type="text" id="terminal-input" placeholder="Type a command..." autocomplete="off" spellcheck="false">
+                </div>
+            </div>
+        </section>
+
+        <!-- Resize handle -->
+        <div class="resize-handle" id="chat-resize"></div>
+
+        <!-- Right: chat panel -->
+        <aside id="chat-panel">
+            <div class="panel-toolbar">
+                <span class="panel-label">AGENT</span>
+                <div id="agent-status"></div>
+            </div>
+            <div id="chat-messages">
+                <div class="welcome-message">
+                    <h3>👋 Hello! I'm Coder.</h3>
+                    <p>I can help you build, debug, and refactor code. Tell me what you need!</p>
+                    <div class="mode-hints">
+                        <div class="mode-hint"><strong>🟢 Auto:</strong> I'll execute changes immediately</div>
+                        <div class="mode-hint"><strong>🟡 Ask:</strong> I'll ask before making changes</div>
+                        <div class="mode-hint"><strong>🔵 Plan:</strong> I'll create a full plan first</div>
+                    </div>
+                </div>
+            </div>
+            <div id="chat-input-area">
+                <textarea id="chat-input" placeholder="Ask me anything... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+                <button id="send-btn" title="Send">▶</button>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Status bar -->
+    <footer id="status-bar">
+        <span id="status-mode"></span>
+        <span id="status-model"></span>
+        <span id="status-project"></span>
+        <span id="status-file"></span>
+    </footer>
+
+    <!-- Settings modal -->
+    <div id="settings-overlay" class="modal-overlay hidden">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Settings</h3>
+                <button class="modal-close" id="settings-close">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="cfg-api-key">Google AI API Key</label>
+                    <input type="password" id="cfg-api-key" placeholder="AIza...">
+                    <p class="hint">Get one at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a></p>
+                </div>
+                <div class="form-group">
+                    <label for="cfg-project-path">Project Folder</label>
+                    <div class="path-input-row">
+                        <input type="text" id="cfg-project-path" placeholder="C:\Users\you\projects\myapp">
+                        <button id="browse-btn">Browse</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="cfg-model">Default Model</label>
+                    <select id="cfg-model"></select>
+                </div>
+                <div class="form-group">
+                    <label for="cfg-mode">Default Mode</label>
+                    <select id="cfg-mode">
+                        <option value="auto">🟢 Auto — execute immediately</option>
+                        <option value="ask">🟡 Ask — confirm before changes</option>
+                        <option value="plan">🔵 Plan — full plan first</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="settings-save" class="btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Browse modal -->
+    <div id="browse-overlay" class="modal-overlay hidden">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Select Folder</h3>
+                <button class="modal-close" id="browse-close">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="browse-path" class="browse-current-path"></div>
+                <div id="browse-list" class="browse-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="browse-select" class="btn-primary">Select This Folder</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        // Monaco Editor loader
+        var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs' } };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>
