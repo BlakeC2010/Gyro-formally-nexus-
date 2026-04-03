@@ -4727,9 +4727,12 @@ def get_chat(chat_id):
             text = partial.strip()
             if partial_think and partial_think.strip():
                 text = f"<<<THINKING>>>\n{partial_think.strip()}\n<<<END_THINKING>>>\n{text}"
+            # Strip unresolved media placeholders from interrupted text
+            _clean_partial = re.sub(r'%%%IMGBLOCK:\d+%%%', '', partial).strip()
+            _clean_partial = re.sub(r'%%%IMGGEN:\d+%%%', '', _clean_partial).strip()
             c["messages"].append({
                 "role": "model",
-                "text": partial + "\n\n*[Response interrupted — connection was lost]*",
+                "text": _clean_partial + "\n\n*[Response interrupted — connection was lost]*",
                 "raw_text": text,
                 "timestamp": datetime.datetime.now().isoformat(),
                 "interrupted": True,
@@ -4838,9 +4841,12 @@ def save_partial_response(chat_id):
         chat.pop("_streaming", None)
         chat.pop("_partial_text", None)
         chat.pop("_partial_thinking", None)
+        # Strip unresolved media placeholders from interrupted text
+        _clean_partial = re.sub(r'%%%IMGBLOCK:\d+%%%', '', partial_text).strip()
+        _clean_partial = re.sub(r'%%%IMGGEN:\d+%%%', '', _clean_partial).strip()
         chat["messages"].append({
             "role": "model",
-            "text": partial_text + "\n\n*[Response interrupted]*",
+            "text": _clean_partial + "\n\n*[Response interrupted]*",
             "raw_text": partial_text,
             "timestamp": datetime.datetime.now().isoformat(),
             "interrupted": True,
@@ -4920,9 +4926,12 @@ def stream_join(chat_id):
             chat.pop("_streaming", None)
             chat.pop("_partial_text", None)
             chat.pop("_partial_thinking", None)
+            # Strip unresolved media placeholders from interrupted text
+            _clean_partial = re.sub(r'%%%IMGBLOCK:\d+%%%', '', _partial).strip()
+            _clean_partial = re.sub(r'%%%IMGGEN:\d+%%%', '', _clean_partial).strip()
             chat["messages"].append({
                 "role": "model",
-                "text": _partial + "\n\n*[Response interrupted — reconnected from another device]*",
+                "text": _clean_partial + "\n\n*[Response interrupted — reconnected from another device]*",
                 "raw_text": _partial,
                 "timestamp": datetime.datetime.now().isoformat(),
                 "interrupted": True,

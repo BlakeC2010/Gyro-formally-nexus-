@@ -995,7 +995,7 @@ body.light .think-content::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.
 .msg .artifact-card .meta .sub{font-size:10px;color:var(--text-muted)}
 .msg .artifact-card .artifact-arrow{font-size:13px;color:var(--text-muted)}
 .msg .mermaid-container .mermaid{display:flex;justify-content:center;padding:20px 12px}
-.msg .mermaid-container svg{max-width:100%;border-radius:12px;filter:drop-shadow(0 2px 16px rgba(0,0,0,.25))}
+.msg .mermaid-container svg{min-width:600px;border-radius:12px;filter:drop-shadow(0 2px 16px rgba(0,0,0,.25))}
 /* Mind map node hierarchy — rich colors with glow effects */
 .msg .mermaid-container svg .node>rect,.msg .mermaid-container svg .node>circle,.msg .mermaid-container svg .node>polygon,.msg .mermaid-container svg .node>path{rx:10!important;ry:10!important;stroke-width:1.5px!important}
 .msg .mermaid-container svg .node.section-0>rect,.msg .mermaid-container svg .node.section-0>circle,.msg .mermaid-container svg .node.section-0>path{fill:linear-gradient(135deg,#c97b42,#e8a060)!important;fill:#c97b42!important;stroke:#e8a060!important;filter:drop-shadow(0 4px 16px rgba(191,107,58,.45)) drop-shadow(0 0 8px rgba(191,107,58,.2))}

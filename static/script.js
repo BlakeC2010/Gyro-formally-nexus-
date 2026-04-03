@@ -3345,21 +3345,8 @@ async function runResearchAgent(query, contentEl, area, chatId, existingResearch
           }
           showToast('Research complete!','✅');
           _raAutoScroll();
-
-          // Auto-trigger AI follow-up turn after research completes
-          // Collect the comprehensive report text to send
-          const _raReportText=(function(){var t='';var el=document.getElementById('_raOut');if(!el)return '';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+'\n'+(b?b.textContent:'')+'\n\n';});return t;})();
-          const _raFollowTid=setTimeout(()=>{
-            // Guard: skip if user already started a new interaction in this chat
-            if(isChatRunning(chatId))return;
-            sendMessage({
-              silent: true,
-              noThinking: false,
-              message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps.\n\nHere is the full comprehensive report from the research:\n\n${_raReportText}\n\nThe user's original request was: "${query}"\n\nNow continue helping the user with their original request. Use the comprehensive report above as your knowledge base. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions using <<<CODE_EXECUTE: python>>> if needed). Do NOT summarize the research back to the user — it is already visible. Instead, proceed directly with executing whatever the user originally asked for.`,
-              targetChat: chatId
-            });
-          }, 1500);
-          const _pListR=_pendingReprompts.get(chatId)||[];_pListR.push(_raFollowTid);_pendingReprompts.set(chatId,_pListR);
+          // Auto-follow-up is triggered AFTER poll loop ends (see below)
+          // to ensure research save is committed before continuation loads the chat.
         }else if(ev.type==='heartbeat'){
           // Keepalive from server — ignore, just prevents connection timeout
         }else if(ev.type==='agent_error'){
@@ -3394,6 +3381,21 @@ async function runResearchAgent(query, contentEl, area, chatId, existingResearch
         if(actEl) actEl.innerHTML=`<span>Research ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
         contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
       }
+    }
+
+    // Auto-trigger AI follow-up AFTER poll loop ends (research save is committed)
+    if(_raDoneReceived&&!_raAbort.signal.aborted){
+      const _raReportText=(function(){var t='';var el=document.getElementById('_raOut');if(!el)return '';el.querySelectorAll('.ra-section').forEach(function(s){var h=s.querySelector('.ra-section-title');var b=s.querySelector('.ra-step-content');t+='## '+(h?h.textContent:'')+'\n'+(b?b.textContent:'')+'\n\n';});return t;})();
+      const _raFollowTid=setTimeout(()=>{
+        if(isChatRunning(chatId))return;
+        sendMessage({
+          silent: true,
+          noThinking: false,
+          message: `[SYSTEM] Deep research on "${query}" has been completed with ${discoveredSources.length} sources, ${discoveredFindings.length} findings across ${totalSteps-failedSteps} steps.\n\nHere is the full comprehensive report from the research:\n\n${_raReportText}\n\nThe user's original request was: "${query}"\n\nNow continue helping the user with their original request. Use the comprehensive report above as your knowledge base. Focus on any remaining parts of the user's request (e.g., creating documents, images, mind maps, PDFs, or answering follow-up questions using <<<CODE_EXECUTE: python>>> if needed). Do NOT summarize the research back to the user — it is already visible. Instead, proceed directly with executing whatever the user originally asked for.`,
+          targetChat: chatId
+        });
+      }, 1500);
+      const _pListR=_pendingReprompts.get(chatId)||[];_pListR.push(_raFollowTid);_pendingReprompts.set(chatId,_pListR);
     }
   }catch(e){
     const isAbort=e.name==='AbortError'||_raAbort.signal.aborted;
