@@ -2756,6 +2756,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
     let currentContentEl=null;
     let stepContent='';
     let stepThinking='';
+    let _raThinkDisplayed='';
+    let _raThinkTypewriter=null;
     let failedSteps=0;
     let followupQuestions=[];
     let _raDoneReceived=false;
@@ -2809,6 +2811,8 @@ async function runResearchAgent(query, contentEl, area, chatId){
             updateProgress(ev.step-1, icon+' '+ev.title+'...');
             stepContent='';
             stepThinking='';
+            _raThinkDisplayed='';
+            if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
             if(outEl){
               outEl.querySelectorAll('.ra-section').forEach(sec=>{
                 const sNum=parseInt(sec.id.replace('_raS',''));
@@ -2837,6 +2841,13 @@ async function runResearchAgent(query, contentEl, area, chatId){
           }else if(ev.status==='complete'){
             if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
             completedSteps.add(ev.step);
+            // Flush thinking typewriter for this step
+            if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
+            if(stepThinking){
+              _raThinkDisplayed=stepThinking;
+              const _flushThC=document.getElementById('_raThinkC'+ev.step);
+              if(_flushThC)_flushThC.innerHTML=_fmtThink(stepThinking);
+            }
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='ra-section-status ra-done';}
@@ -2860,6 +2871,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
             _raAutoScroll();
           }else if(ev.status==='failed'){
             if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
+            if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
             failedSteps++;
             const statusEl=document.querySelector('#_raS'+ev.step+' .ra-section-status');
             if(statusEl){statusEl.textContent='✗ failed';statusEl.className='ra-section-status ra-failed';}
@@ -2877,10 +2889,16 @@ async function runResearchAgent(query, contentEl, area, chatId){
           if(thEl){
             thEl.style.display='';
             const thC=document.getElementById('_raThinkC'+ev.step);
-            if(thC){
-              thC.innerHTML=_fmtThink(stepThinking);
-              const _ltpBody=thC.parentElement;
-              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+            if(thC&&!_raThinkTypewriter){
+              _raThinkTypewriter=setInterval(()=>{
+                if(_raThinkDisplayed.length>=stepThinking.length){
+                  return;
+                }
+                const end=Math.min(_raThinkDisplayed.length+8,stepThinking.length);
+                _raThinkDisplayed=stepThinking.slice(0,end);
+                thC.innerHTML=_fmtThink(_raThinkDisplayed);
+                thC.parentElement.scrollTop=thC.parentElement.scrollHeight;
+              },20);
             }
           }
         }else if(ev.type==='agent_delta'){
@@ -2900,6 +2918,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         }else if(ev.type==='agent_done'){
           _raDoneReceived=true;
           clearInterval(elTimer);
+          if(_raThinkTypewriter){clearInterval(_raThinkTypewriter);_raThinkTypewriter=null;}
           if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
           updateProgress(totalSteps,'Research complete!');
           followupQuestions=ev.followup_questions||[];
@@ -3355,6 +3374,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     let currentContentEl=null;
     let stepContent='';
     let stepThinking='';
+    let _saThinkDisplayed='';
+    let _saThinkTypewriter=null;
     let failedSteps=0;
     let lastStepText='';
     let verdictStepText='';
@@ -3381,6 +3402,8 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             updateProgress(ev.step-1, icon+' '+ev.title+'...');
             stepContent='';
             stepThinking='';
+            _saThinkDisplayed='';
+            if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
             if(outEl){
               outEl.querySelectorAll('.sa-section').forEach(sec=>{
                 const sNum=parseInt(sec.id.replace('_saS',''));
@@ -3396,6 +3419,13 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             if(window._chatAutoScroll)window._chatAutoScroll();
           }else if(ev.status==='complete'){
             completedSteps.add(ev.step);
+            // Flush thinking typewriter for this step
+            if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
+            if(stepThinking){
+              _saThinkDisplayed=stepThinking;
+              const _flushThC=document.getElementById('_saThinkC'+ev.step);
+              if(_flushThC)_flushThC.innerHTML=_fmtThink(stepThinking);
+            }
             updateProgress(ev.step, '✓ '+ev.title+' complete');
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
             if(statusEl){statusEl.textContent='✓ done';statusEl.className='sa-section-status sa-done';}
@@ -3416,6 +3446,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
             }
             if(window._chatAutoScroll)window._chatAutoScroll();
           }else if(ev.status==='failed'){
+            if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
             failedSteps++;
             const statusEl=document.querySelector('#_saS'+ev.step+' .sa-section-status');
             if(statusEl){statusEl.textContent='✗ failed';statusEl.className='sa-section-status sa-failed';}
@@ -3433,10 +3464,16 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(thEl){
             thEl.style.display='';
             const thC=document.getElementById('_saThinkC'+ev.step);
-            if(thC){
-              thC.innerHTML=_fmtThink(stepThinking);
-              const _ltpBody=thC.parentElement;
-              if(_ltpBody)_ltpBody.scrollTop=_ltpBody.scrollHeight;
+            if(thC&&!_saThinkTypewriter){
+              _saThinkTypewriter=setInterval(()=>{
+                if(_saThinkDisplayed.length>=stepThinking.length){
+                  return;
+                }
+                const end=Math.min(_saThinkDisplayed.length+8,stepThinking.length);
+                _saThinkDisplayed=stepThinking.slice(0,end);
+                thC.innerHTML=_fmtThink(_saThinkDisplayed);
+                thC.parentElement.scrollTop=thC.parentElement.scrollHeight;
+              },20);
             }
           }
         }else if(ev.type==='agent_delta'){
@@ -3447,6 +3484,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           }
         }else if(ev.type==='agent_done'){
           clearInterval(elTimer);
+          if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
           updateProgress(totalSteps,'Stock analysis complete!');
           const totalTime=((Date.now()-startTime)/1000).toFixed(1);
 
