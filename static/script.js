@@ -1,4 +1,4 @@
-// --- State ----------------------------------------
+﻿// --- State ----------------------------------------
 let curChat=null,allChats=[],ttsOn=false,recording=false,recognition=null,pendingFiles=[],pendingFolder='';
 let pendingReplies=[];  // reply context: [{type:'image',url,title},{type:'text',text}]
 let _uploadsInFlight=0,_pendingSendOpts=null;
@@ -314,17 +314,17 @@ function copyMsg(btn){
     })];
     navigator.clipboard.write(items).then(()=>{
       btn.textContent='✓ Copied';
-      setTimeout(()=>{btn.textContent='? Copy'},1500);
+      setTimeout(()=>{btn.textContent='Copy'},1500);
     }).catch(()=>{
       navigator.clipboard.writeText(text.trim()).then(()=>{
         btn.textContent='✓ Copied';
-        setTimeout(()=>{btn.textContent='? Copy'},1500);
+        setTimeout(()=>{btn.textContent='Copy'},1500);
       }).catch(()=>{});
     });
   }else{
     navigator.clipboard.writeText(text.trim()).then(()=>{
       btn.textContent='✓ Copied';
-      setTimeout(()=>{btn.textContent='? Copy'},1500);
+      setTimeout(()=>{btn.textContent='Copy'},1500);
     }).catch(()=>{});
   }
 }
@@ -3019,7 +3019,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
         if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Cancelled';}
         const actEl=document.getElementById('_raActivity');
         if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
-        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='cancelled';el.className='ra-section-status ra-failed';});
         return;
       }
       // Auto-retry if stream ended unexpectedly (server timeout, etc.)
@@ -3028,7 +3028,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       if(window._raAutoRetryCount<=2){
         const actEl=document.getElementById('_raActivity');
         if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection interrupted — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
-        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? retrying';el.className='ra-section-status ra-running';});
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='Retrying';el.className='ra-section-status ra-running';});
         clearInterval(elTimer);
         if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
         area.removeEventListener('scroll',_raOnScroll);
@@ -3053,7 +3053,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Cancelled';}
       const actEl=document.getElementById('_raActivity');
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
-      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? cancelled';el.className='ra-section-status ra-failed';});
+      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='cancelled';el.className='ra-section-status ra-failed';});
     }else if(isNetwork){
       // Auto-retry network errors
       if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
@@ -3061,7 +3061,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
       if(window._raAutoRetryCount<=2){
         const actEl=document.getElementById('_raActivity');
         if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection lost — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
-        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='? retrying';el.className='ra-section-status ra-running';});
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='Retrying';el.className='ra-section-status ra-running';});
         clearInterval(elTimer);
         if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
         area.removeEventListener('scroll',_raOnScroll);
@@ -3079,7 +3079,7 @@ async function runResearchAgent(query, contentEl, area, chatId){
     }else{
       const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='? Research Failed — '+totalTimeFmtEnd;}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Failed — '+totalTimeFmtEnd;}
       contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></div>`;
       setStatus('Research failed.');
     }
@@ -3541,7 +3541,7 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
 
           // Update badge
           const badge=document.getElementById('_saBadge');
-          if(badge){badge.classList.add('sa-badge-done');badge.textContent='? Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
+          if(badge){badge.classList.add('sa-badge-done');badge.textContent='Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
 
           if(window._chatAutoScroll)window._chatAutoScroll();
         }
@@ -3591,7 +3591,7 @@ function renderHFResult(hfData){
         <img src="${result.data}" style="max-width:100%;max-height:512px;border-radius:8px;" alt="HuggingFace generated image">
       </div>
       <div style="padding:6px 12px 8px;display:flex;gap:8px;">
-        <a href="${result.data}" download="hf_output.png" style="font-size:10px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:4px;cursor:pointer;">? Download</a>
+        <a href="${result.data}" download="hf_output.png" style="font-size:10px;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:4px;cursor:pointer;">Download</a>
       </div>
     </div>`;
   }
@@ -3738,7 +3738,7 @@ async function _fetchStockData(ticker,cardId,prefetchedData){
     }
     if(tc.macd!=null){
       const macdUp=tc.macd_histogram>0;
-      techItems.push(`<span class="stock-tech-item">MACD: <b class="${macdUp?'stock-up':'stock-down'}">${tc.macd.toFixed(2)}</b> <small style="opacity:.7">(${macdUp?'? bullish':'? bearish'})</small></span>`);
+      techItems.push(`<span class="stock-tech-item">MACD: <b class="${macdUp?'stock-up':'stock-down'}">${tc.macd.toFixed(2)}</b> <small style="opacity:.7">(${macdUp?'bullish':'bearish'})</small></span>`);
     }
     if(tc.bb_pctb!=null){
       const bbCls=tc.bb_pctb>0.8?'stock-down':tc.bb_pctb<0.2?'stock-up':'stock-neutral';
@@ -4538,7 +4538,14 @@ async function sendMessage(opts){
     if(_truncateAt!=null)_bodyObj.truncate_at=_truncateAt;
     // Inject folder custom instructions if chat is in a folder
     const _chatFolder=(allChats.find(c=>c.id===targetChatId)||{}).folder||_activeFolderView||'';
-    if(_chatFolder){const _fi=getFolderMeta(_chatFolder);if(_fi.instructions)_bodyObj.folder_instructions=_fi.instructions;}
+    if(_chatFolder){
+      const _fi=getFolderMeta(_chatFolder);
+      if(_fi.instructions)_bodyObj.folder_instructions=_fi.instructions;
+      // Include uploaded context files as part of folder instructions
+      if(_fi.instructionFiles&&_fi.instructionFiles.length){
+        _bodyObj.folder_context_files=_fi.instructionFiles.map(f=>({name:f.name,data:f.data||''})).filter(f=>f.data);
+      }
+    }
     const response=await apiFetch(`/api/chats/${targetChatId}/stream`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(_bodyObj),signal:controller.signal});
 
@@ -4945,7 +4952,7 @@ async function sendMessage(opts){
                   }
                   filesHtml+='</div>';
                 }
-                finalHTML+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'? Executed':'? Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
+                finalHTML+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'Executed':'Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
               }
             }
             if(data.memory_added?.length)finalHTML+=`<div class="mops">Remembered: ${data.memory_added.map(esc).join('; ')}</div>`;
@@ -4956,7 +4963,7 @@ async function sendMessage(opts){
                 state.reminders.push({id:'r_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),due:r.due||'',text:r.text||'',done:false,created:new Date().toISOString()});
               }
               saveProductivityState(state);
-              finalHTML+=`<div class="mops">? ${data.reminders_set.length} reminder${data.reminders_set.length!==1?'s':''} set</div>`;
+              finalHTML+=`<div class="mops">${data.reminders_set.length} reminder${data.reminders_set.length!==1?'s':''} set</div>`;
               refreshHomeWidgets();
             }
 
@@ -5100,7 +5107,7 @@ async function sendMessage(opts){
 
             if(canRender()){
               contentEl.style.opacity='1';contentEl.style.filter='';contentEl.style.transform='';
-              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">? Retry</button></div>`;
+              contentEl.innerHTML=finalHTML+`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
               renderMathInElementSafe(contentEl);
               contentEl.querySelectorAll('.stream-cursor').forEach(el=>el.remove());
               if(!schoolMode){
@@ -5700,7 +5707,7 @@ function addMsg(role,text,files,extra={}){
         }
         filesHtml+='</div>';
       }
-      html+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'? Executed':'? Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
+      html+=`<div class="code-run-block ${statusCls}"><div class="crb-header"><span class="crb-lang">${esc(cr.language)}</span><span class="crb-status">${cr.success?'Executed':'Error'}</span></div><pre class="crb-code"><code>${esc(cr.code)}</code></pre><div class="crb-output-label">Output</div><pre class="crb-output">${esc(cr.output)}</pre>${filesHtml}</div>`;
     }
   }
   if(extra.memory_added?.length)html+=`<div class="mops">Remembered: ${extra.memory_added.map(esc).join('; ')}</div>`;
@@ -5773,7 +5780,7 @@ function addMsg(role,text,files,extra={}){
       }
     }
   }
-  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="editMsg(this)">? Edit</button></div>`;
+  if(role==='user'&&text)html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="editMsg(this)">Edit</button></div>`;
   else if(role==='kairo'){
     // Render stock_agent messages with styled sections on reload
     if(extra.stock_agent){
@@ -5822,7 +5829,7 @@ function addMsg(role,text,files,extra={}){
           // Remove disclaimer from body if present
           let body=step.body||'';
           body=body.replace(/\n---\n\*Not financial advice[\s\S]*$/,'').trim();
-          saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">? done</span><span class="sa-section-chevron">✓</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
+          saHtml+=`<div class="sa-section sa-collapsed"><div class="sa-section-head" onclick="this.parentElement.classList.toggle('sa-collapsed')"><span class="sa-section-num">${i+1}</span><span class="sa-section-title">${esc(step.title)}</span><span class="sa-section-status sa-done">done</span><span class="sa-section-chevron">✓</span></div><div class="sa-section-body">${fmt(body)}</div></div>`;
         });
         saHtml+='</div><div class="stock-disclaimer sa-disclaimer"><strong>Not financial advice.</strong> AI-generated analysis for informational purposes only.</div>';
         html=`<div class="lbl">Gyro</div>`+saHtml;
@@ -5950,7 +5957,7 @@ function addMsg(role,text,files,extra={}){
         html+=fmt(displayText);
       }
     }
-    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">? Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">? Retry</button></div>`;
+    html+=`<div class="msg-actions"><button class="msg-action-btn" onclick="copyMsg(this)">Copy</button><button class="msg-action-btn" onclick="retryMsg(this)">Retry</button></div>`;
   }
   div.dataset.text=text||'';
   div.innerHTML=html;renderMathInElementSafe(div);area.appendChild(div);area.scrollTop=area.scrollHeight;
@@ -7017,7 +7024,7 @@ async function loadChatDrawer(){
     const pinnedEl=document.getElementById('pinnedFilesList');
     const pinned=chat.pinned_files||[];
     pinnedEl.innerHTML=pinned.length
-      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>? ${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">▪</button></div>`;}).join('')
+      ?pinned.map(p=>{const path=typeof p==='string'?p:p.path;return`<div class="cd-pinned-item"><span>${esc(path)}</span><button onclick="unpinFile('${encodeURIComponent(path)}')" title="Unpin">▪</button></div>`;}).join('')
       :'<div class="fb-empty">No pinned files.</div>';
     // Populate folder select
     const sel=document.getElementById('chatFolderSelect');
@@ -7224,7 +7231,7 @@ async function refreshCanvasFiles(){
     const sortedFolders=['',...Object.keys(folders).filter(f=>f).sort()];
     for(const fld of sortedFolders){
       if(!folders[fld])continue;
-      if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">? ${esc(fld)}</div><div>`;
+      if(fld) html+=`<div class="cfp-folder-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">${esc(fld)}</div><div>`;
       for(const f of folders[fld]){
         const ext=(f.name.split('.').pop()||'').toLowerCase();
         const isImg=['png','jpg','jpeg','gif','webp','svg','bmp','ico'].includes(ext);
@@ -7998,3 +8005,5 @@ document.addEventListener('DOMContentLoaded',()=>{
     else startPing();
   });
 })();
+
+

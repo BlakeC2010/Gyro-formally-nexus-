@@ -929,7 +929,7 @@ def build_system_prompt(memory=None):
             "use neutral greeting like 'hey there'."
         )
     else:
-        session_name_line = "The user's name is " + uname
+        session_name_line = f"The user you are talking to is named {uname}. Address them by this name when appropriate. Remember: YOU are Gyro, not {uname}."
 
     custom_block = ("Custom instructions:\n" + custom) if custom else ""
 
@@ -984,7 +984,7 @@ def generate_chat_title_fast(user_text):
         system_instruction="You write concise conversation titles. Keep them specific, natural, and easy to scan. Return ONLY the title text, nothing else.",
         max_output_tokens=60,
     )
-    for model_name in ("gemini-flash-lite-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash"):
+    for model_name in ("gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite", "gemini-2.5-flash"):
         try:
             r = client.models.generate_content(model=model_name, contents=contents, config=cfg)
             raw_title = r.text or ""
@@ -1372,7 +1372,7 @@ def run_hf_space(space_id, user_input, params=None, hf_token=None):
       or {"success": False, "error": "..."}
     """
     if not hf_token:
-        return {"success": False, "error": "No HuggingFace token configured. Set up the HuggingFace connector in Settings ? Connectors."}
+        return {"success": False, "error": "No HuggingFace token configured. Set up the HuggingFace connector in Settings > Connectors."}
     try:
         from gradio_client import Client, handle_file
         client = Client(space_id, hf_token=hf_token)
@@ -1409,7 +1409,7 @@ def run_hf_space(space_id, user_input, params=None, hf_token=None):
     except Exception as e:
         err = str(e)
         if "token" in err.lower() or "401" in err or "403" in err:
-            return {"success": False, "error": f"HuggingFace authentication failed. Check your token in Settings ? Connectors. ({err[:150]})"}
+            return {"success": False, "error": f"HuggingFace authentication failed. Check your token in Settings > Connectors. ({err[:150]})"}
         if "not found" in err.lower() or "404" in err:
             return {"success": False, "error": f"Space '{space_id}' not found. Check the Space ID (format: username/space-name). ({err[:150]})"}
         if "queue" in err.lower() or "timeout" in err.lower():
@@ -3128,6 +3128,36 @@ def prepare_chat_turn(chat, payload):
     if _folder_instr:
         sysprompt += f"\n\n[FOLDER INSTRUCTIONS]\nThis chat is in a folder with these custom instructions. Follow them for all responses:\n{_folder_instr}"
 
+    # --- Folder context files (uploaded to folder as reference material) ---
+    _folder_files = payload.get("folder_context_files") or []
+    if _folder_files and isinstance(_folder_files, list):
+        file_parts = []
+        for ff in _folder_files[:10]:  # Cap at 10 files
+            fname = (ff.get("name") or "file").strip()
+            fdata = (ff.get("data") or "").strip()
+            if not fdata:
+                continue
+            # Strip data URI prefix if present (e.g. data:text/plain;base64,...)
+            if fdata.startswith("data:"):
+                # It's a data URI — decode base64 for text files, skip binary
+                try:
+                    _comma = fdata.index(",")
+                    _meta = fdata[:_comma]
+                    _b64 = fdata[_comma + 1:]
+                    import base64 as _b64mod
+                    _decoded = _b64mod.b64decode(_b64)
+                    if "image/" in _meta:
+                        # Image files — note them but don't dump binary into prompt
+                        file_parts.append(f"[File: {fname}] (image file — uploaded as visual reference)")
+                        continue
+                    fdata = _decoded.decode("utf-8", errors="replace")[:50000]
+                except Exception:
+                    continue
+            if fdata:
+                file_parts.append(f"[File: {fname}]\n{fdata[:50000]}")
+        if file_parts:
+            sysprompt += "\n\n[FOLDER CONTEXT FILES]\nThe following files were uploaded as reference material for this folder:\n\n" + "\n\n".join(file_parts)
+
     # --- Active tool instructions (injected silently into system prompt) ---
     tool_instructions = _build_tool_instructions(active_tools)
     if tool_instructions:
@@ -3886,7 +3916,12 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
     else:
         cfg["max_output_tokens"] = 65536
     if web_search:
-        cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        _tools = [types.Tool(google_search=types.GoogleSearch())]
+        try:
+            _tools.append(types.Tool(url_context=types.UrlContext()))
+        except Exception:
+            pass  # url_context not available in this SDK version
+        cfg["tools"] = _tools
     r = client.models.generate_content(model=model, contents=contents,
         config=types.GenerateContentConfig(**cfg))
     # Extract thinking parts if present
@@ -3925,7 +3960,12 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
     else:
         cfg["max_output_tokens"] = 65536
     if web_search:
-        cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        _tools = [types.Tool(google_search=types.GoogleSearch())]
+        try:
+            _tools.append(types.Tool(url_context=types.UrlContext()))
+        except Exception:
+            pass  # url_context not available in this SDK version
+        cfg["tools"] = _tools
 
     # Try streaming; on 400 errors with thinking+tools, retry without thinking
     _had_thinking = use_thinking
@@ -6519,7 +6559,7 @@ def enhance_folder_instructions():
             f"User's description:\n{instructions}"
         )
         r = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-3.1-flash-lite-preview",
             contents=prompt,
         )
         enhanced = r.text.strip() if r.text else ""
