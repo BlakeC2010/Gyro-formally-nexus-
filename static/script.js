@@ -2727,20 +2727,31 @@ async function runResearchAgent(query, contentEl, area, chatId){
     // Register abort controller BEFORE fetch so stop button works immediately
     setChatRunning(chatId,true,{type:'research',controller:_raAbort});
 
-    const response=await apiFetch('/api/research-agent',{
+    // --- Poll-based architecture: POST to start research, then poll for events ---
+    const startResp=await apiFetch('/api/research-agent',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({chat_id:chatId,query:query}),
       signal:_raAbort.signal
     });
-    if(!response.ok){
-      const d=await response.json().catch(()=>({error:'Failed to start research'}));
+    if(!startResp.ok){
+      const d=await startResp.json().catch(()=>({error:'Failed to start research'}));
       throw new Error(d.error||'Research failed');
     }
+    const _raStartData=await startResp.json();
+    const _raResearchId=_raStartData.research_id;
+    if(!_raResearchId) throw new Error('Server did not return a research_id');
 
-    const reader=response.body.getReader();
-    const decoder=new TextDecoder();
-    let buffer='';
+    // Cancel handler: when user clicks stop, also tell server to cancel
+    const _cancelHandler=()=>{
+      apiFetch('/api/research-agent/cancel',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({research_id:_raResearchId})
+      }).catch(()=>{});
+    };
+    _raAbort.signal.addEventListener('abort',_cancelHandler,{once:true});
+
     const outEl=document.getElementById('_raOut');
     let currentContentEl=null;
     let stepContent='';
@@ -2748,15 +2759,37 @@ async function runResearchAgent(query, contentEl, area, chatId){
     let failedSteps=0;
     let followupQuestions=[];
     let _raDoneReceived=false;
+    let _pollCursor=0;
+    let _pollErrors=0;
 
-    while(true){
-      const{done,value}=await reader.read();
-      if(done) break;
-      buffer+=decoder.decode(value,{stream:true});
-      let nl;
-      while((nl=buffer.indexOf('\n'))>=0){
-        const line=buffer.slice(0,nl).trim();
-        buffer=buffer.slice(nl+1);
+    // Poll loop — each request is lightweight and completes in <1s
+    while(!_raDoneReceived){
+      if(_raAbort.signal.aborted) break;
+      await new Promise(r=>setTimeout(r,_pollCursor===0?300:1500));
+      if(_raAbort.signal.aborted) break;
+
+      let pollData;
+      try{
+        const pollResp=await apiFetch('/api/research-agent/poll?id='+encodeURIComponent(_raResearchId)+'&cursor='+_pollCursor);
+        if(!pollResp.ok){
+          _pollErrors++;
+          if(_pollErrors>15) throw new Error('Research polling failed repeatedly');
+          continue;
+        }
+        pollData=await pollResp.json();
+        _pollErrors=0;
+      }catch(pollErr){
+        if(_raAbort.signal.aborted) break;
+        _pollErrors++;
+        if(_pollErrors>15) throw pollErr;
+        await new Promise(r=>setTimeout(r,2000));
+        continue;
+      }
+
+      _pollCursor=pollData.cursor;
+
+      for(const rawLine of (pollData.events||[])){
+        const line=(typeof rawLine==='string'?rawLine:'').trim();
         if(!line) continue;
         let ev;
         try{ev=JSON.parse(line)}catch(e){continue}
@@ -3008,11 +3041,12 @@ async function runResearchAgent(query, contentEl, area, chatId){
           contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='✗ error';el.className='ra-section-status ra-failed';});
         }
       }
+
+      if(pollData.done) break;
     }
 
-    // Stream ended — check if we got a proper completion
+    // Poll ended — check if we got a proper completion
     if(!_raDoneReceived){
-      // If user cancelled, don't auto-retry
       if(_raAbort.signal.aborted){
         window._raAutoRetryCount=0;
         const badge=document.getElementById('_raBadge');
@@ -3020,66 +3054,28 @@ async function runResearchAgent(query, contentEl, area, chatId){
         const actEl=document.getElementById('_raActivity');
         if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
         contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='cancelled';el.className='ra-section-status ra-failed';});
-        return;
-      }
-      // Auto-retry if stream ended unexpectedly (server timeout, etc.)
-      if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
-      window._raAutoRetryCount++;
-      if(window._raAutoRetryCount<=2){
+      }else{
+        const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
+        const badge=document.getElementById('_raBadge');
+        if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Interrupted \u2014 '+totalTimeFmtEnd;}
         const actEl=document.getElementById('_raActivity');
-        if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection interrupted — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
-        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='Retrying';el.className='ra-section-status ra-running';});
-        clearInterval(elTimer);
-        if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
-        area.removeEventListener('scroll',_raOnScroll);
-        window._raIsAutoRetry=true;
-        setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},1500);
-        return;
+        if(actEl) actEl.innerHTML=`<span>Research ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
+        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
       }
-      const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
-      const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Interrupted \u2014 '+totalTimeFmtEnd;}
-      const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Research stream ended unexpectedly. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
-      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ interrupted';el.className='ra-section-status ra-failed';});
     }
   }catch(e){
     const isAbort=e.name==='AbortError'||_raAbort.signal.aborted;
-    const isNetwork=e.name==='TypeError'||e.message?.includes('network')||e.message?.includes('Failed to fetch');
     if(isAbort){
-      // User cancelled — show a clean message (don't auto-retry user cancels)
       window._raAutoRetryCount=0;
       const badge=document.getElementById('_raBadge');
       if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Cancelled';}
       const actEl=document.getElementById('_raActivity');
       if(actEl) actEl.innerHTML='<span>Research cancelled by user.</span>';
       contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='cancelled';el.className='ra-section-status ra-failed';});
-    }else if(isNetwork){
-      // Auto-retry network errors
-      if(!window._raAutoRetryCount) window._raAutoRetryCount=0;
-      window._raAutoRetryCount++;
-      if(window._raAutoRetryCount<=2){
-        const actEl=document.getElementById('_raActivity');
-        if(actEl) actEl.innerHTML=`<span class="ra-pulse"></span><span>Connection lost — automatically retrying (attempt ${window._raAutoRetryCount}/2)...</span>`;
-        contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='Retrying';el.className='ra-section-status ra-running';});
-        clearInterval(elTimer);
-        if(window._raStepLiveTimer){clearInterval(window._raStepLiveTimer);window._raStepLiveTimer=null;}
-        area.removeEventListener('scroll',_raOnScroll);
-        setChatRunning(chatId,false);
-        window._raIsAutoRetry=true;
-        setTimeout(()=>{contentEl.innerHTML='';runResearchAgent(query, contentEl, area, chatId)},2000);
-        return;
-      }
-      const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
-      const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Connection Lost \u2014 '+totalTimeFmtEnd;}
-      const actEl=document.getElementById('_raActivity');
-      if(actEl) actEl.innerHTML=`<span>Connection to server was lost. <button class="ra-action-btn ra-action-primary" style="display:inline;margin-left:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></span>`;
-      contentEl.querySelectorAll('.ra-section-status.ra-running').forEach(el=>{el.textContent='⚠ lost';el.className='ra-section-status ra-failed';});
     }else{
       const totalTimeFmtEnd=_fmtElapsed(Date.now()-startTime);
       const badge=document.getElementById('_raBadge');
-      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Failed — '+totalTimeFmtEnd;}
+      if(badge){badge.classList.add('ra-badge-done');badge.textContent='Research Failed \u2014 '+totalTimeFmtEnd;}
       contentEl.innerHTML+=`<div style="color:var(--red);margin-top:12px;padding:12px;border:1px solid rgba(239,68,68,.3);border-radius:8px;background:rgba(239,68,68,.05)">Research failed: ${esc(e.message||'Unknown error')}<br><button class="ra-action-btn ra-action-primary" style="display:inline;margin-top:8px;padding:4px 12px;font-size:12px" onclick="window._raAutoRetryCount=0;window._raRetry(this)">Retry</button></div>`;
       setStatus('Research failed.');
     }
@@ -4093,7 +4089,10 @@ function fmtLive(raw){
       else content='';
     }else{
       const labels={image_search:'🔍 Finding images...',stock:'📈 Loading stock data...',image_gen:'🎨 Generating image...'};
-      content=`<div class="stream-placeholder"><span class="sp-icon">${(labels[kind]||'⏳').split(' ')[0]}</span> ${labels[kind]||'Loading...'}</div>`;
+      const lbl=labels[kind]||'Loading...';
+      const icon=(lbl).split(' ')[0];
+      const text=lbl.split(' ').slice(1).join(' ');
+      content=`<div class="stream-placeholder"><span class="sp-icon">${icon}</span> ${text}</div>`;
     }
     _liveBlocks.push(content);
     return `%%%LIVEBLOCK${_liveBlocks.length-1}%%%`;
@@ -4807,10 +4806,8 @@ async function sendMessage(opts){
             }
             stopThinkingPhrases();
             fullText+=data.text;
-            // When media is loading, buffer deltas but skip visible rendering
-            if(_mediaLoadingCount>0){
-              // Text is still accumulated in fullText but not rendered
-            }else if(canRender()&&!_renderScheduled){
+            // Render text immediately even while media is loading
+            if(canRender()&&!_renderScheduled){
               const now=Date.now();
               if(_RENDER_INTERVAL&&(now-_lastRenderTime)<_RENDER_INTERVAL){
                 // In school mode, skip this frame — next delta will catch up

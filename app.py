@@ -5,7 +5,7 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io, time
+import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random, io, time, threading
 import urllib.request, urllib.parse
 from pathlib import Path
 from functools import wraps
@@ -6965,6 +6965,20 @@ def home_widgets_route():
 
 # --- Research Agent (multi-step with web search + URL context) ----------------
 
+# Poll-based architecture: research runs in background thread, frontend polls for events.
+# This avoids Render free-tier's 30-second request timeout killing streaming connections.
+_active_research = {}  # research_id -> { "events": [], "done": bool, "started": float, "cancel": threading.Event }
+_active_research_lock = threading.Lock()
+
+def _cleanup_stale_research():
+    """Remove research sessions older than 30 minutes."""
+    cutoff = time.time() - 1800
+    with _active_research_lock:
+        stale = [rid for rid, s in _active_research.items() if s["started"] < cutoff]
+        for rid in stale:
+            del _active_research[rid]
+            print(f"  [research] Cleaned up stale session {rid}")
+
 def _research_agent_steps(query):
     """Return the multi-step prompts for the research agent. 9 steps with web search and URL context."""
 
@@ -7919,44 +7933,57 @@ def research_agent():
                     "findings": all_findings})
 
         _research_state["done"] = True
+        # NOTE: Saving to chat history is handled by _safe_generate_to_list
+        # since generate() runs in a background thread without Flask session.
 
-        # Save to chat history
-        if chat_id:
+    def _safe_generate_to_list(events_list, cancel_event):
+        """Run generate() and collect all events into events_list. Designed for background thread."""
+        try:
+            for event_str in generate():
+                events_list.append(event_str)
+                if cancel_event.is_set():
+                    events_list.append(json.dumps({"type": "agent_error", "error": "Research cancelled by user."}) + "\n")
+                    break
+            # Save completed research to chat history
+            if _research_state["done"] and chat_id and _research_state["all_research"]:
+                try:
+                    chat, _ = _bg_load_chat(chat_id)
+                    if chat:
+                        all_r = _research_state["all_research"]
+                        step_breakdown = []
+                        for entry in all_r:
+                            nl = entry.find('\n')
+                            if nl > 0:
+                                step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
+                            else:
+                                step_breakdown.append({"title": entry[3:].strip(), "body": ""})
+                        chat["messages"].append({
+                            "role": "model",
+                            "text": "\n\n".join(all_r),
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "research_agent": True,
+                            "research_agent_steps": step_breakdown,
+                            "research_agent_query": query,
+                            "research_agent_sources": _research_state["all_sources"],
+                            "research_agent_findings": _research_state["all_findings"],
+                            "research_agent_durations": _research_state["step_durations"],
+                            "research_agent_words": _research_state["total_word_count"],
+                        })
+                        _bg_save_chat(chat)
+                        print(f"  [research] Saved completed research ({len(all_r)} steps) to chat {chat_id}")
+                except Exception as save_err:
+                    print(f"  [research] Failed to save completed research: {save_err}")
+        except Exception as e:
+            print(f"  [research] FATAL generator error: {e}")
+            import traceback; traceback.print_exc()
             try:
-                chat, _ = load_chat(chat_id)
-                if chat:
-                    step_breakdown = []
-                    for entry in all_research:
-                        nl = entry.find('\n')
-                        if nl > 0:
-                            step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
-                        else:
-                            step_breakdown.append({"title": entry[3:].strip(), "body": ""})
-                    chat["messages"].append({
-                        "role": "model",
-                        "text": full_report,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "research_agent": True,
-                        "research_agent_steps": step_breakdown,
-                        "research_agent_query": query,
-                        "research_agent_sources": all_sources,
-                        "research_agent_findings": all_findings,
-                        "research_agent_durations": step_durations,
-                        "research_agent_words": total_word_count,
-                    })
-                    save_chat(chat)
+                events_list.append(json.dumps({"type": "agent_error", "error": str(e)[:300]}) + "\n")
             except Exception:
                 pass
-
-    def _safe_generate():
-        """Wrapper that catches unexpected errors in the research generator and emits an error event."""
-        try:
-            yield from generate()
-        except GeneratorExit:
-            # Client disconnected — save partial results if not already saved
+            # Save partial results on error
             if not _research_state["done"] and chat_id and _research_state["all_research"]:
                 try:
-                    chat, _ = load_chat(chat_id)
+                    chat, _ = _bg_load_chat(chat_id)
                     if chat:
                         all_r = _research_state["all_research"]
                         step_breakdown = []
@@ -7979,74 +8006,125 @@ def research_agent():
                             "research_agent_words": _research_state["total_word_count"],
                             "research_agent_partial": True,
                         })
-                        save_chat(chat)
-                        print(f"  [research] Saved partial results ({len(all_r)} steps) on client disconnect")
+                        _bg_save_chat(chat)
+                        print(f"  [research] Saved partial results ({len(all_r)} steps) on error")
                 except Exception as save_err:
                     print(f"  [research] Failed to save partial results: {save_err}")
-        except Exception as e:
-            print(f"  [research] FATAL generator error: {e}")
-            import traceback; traceback.print_exc()
-            try:
-                yield json.dumps({"type": "agent_error", "error": str(e)[:300]}) + "\n"
-            except Exception:
-                pass
 
-    def _heartbeat_wrap(inner_gen, interval=3):
-        """Run inner_gen in a thread, yield its events, inject heartbeats if nothing arrives for `interval` seconds."""
-        import queue as _hq, threading as _ht
-        _out = _hq.Queue()
-        _stop = _ht.Event()
-        _hb_line = json.dumps({"type": "heartbeat"}) + "\n"
+    # --- Poll-based architecture ---
+    # Capture session data for background thread (load_chat/save_chat need session)
+    _s_guest = session.get("guest")
+    _s_uid = session.get("user_id")
+    _s_gid = session.get("guest_id")
 
-        def _pump():
-            try:
-                for item in inner_gen:
-                    _out.put(item)
-            except GeneratorExit:
-                pass
-            except Exception as _pe:
-                try:
-                    _out.put(json.dumps({"type": "agent_error", "error": str(_pe)[:300]}) + "\n")
-                except Exception:
-                    pass
-            finally:
-                _stop.set()
+    def _bg_load_chat(cid):
+        if not _safe_id(cid): return None, "invalid_id"
+        if _s_guest and not _s_uid:
+            if _s_gid:
+                return _load_json(_guest_dir(_s_gid) / "chats" / f"{cid}.json", None), None
+            return None, "no_guest_id"
+        if not _s_uid: return None, "no_user_id"
+        if not FIREBASE_ENABLED:
+            path = _local_user_dir(_s_uid) / "chats" / f"{cid}.json"
+            data = _load_json(path, None)
+            return (data, None) if data else (None, "file_missing")
+        col = _chats_col()
+        if not col: return None, "no_firestore"
+        snap = col.document(cid).get()
+        return (snap.to_dict(), None) if snap.exists else (None, "not_found")
 
-        _t = _ht.Thread(target=_pump, daemon=True)
-        _t.start()
+    def _bg_save_chat(c):
+        c["updated"] = datetime.datetime.now().isoformat()
+        if _s_guest and not _s_uid:
+            if _s_gid:
+                _save_json(_guest_dir(_s_gid) / "chats" / f"{c['id']}.json", c)
+            return
+        if not _s_uid: return
+        if not FIREBASE_ENABLED:
+            _save_json(_local_user_dir(_s_uid) / "chats" / f"{c['id']}.json", c)
+            return
+        col = _chats_col()
+        if col: col.document(c["id"]).set(c)
 
-        while True:
-            try:
-                item = _out.get(timeout=interval)
-                yield item
-            except _hq.Empty:
-                if _stop.is_set():
-                    # Drain remaining items
-                    while not _out.empty():
-                        try:
-                            yield _out.get_nowait()
-                        except _hq.Empty:
-                            break
-                    break
-                yield _hb_line
+    research_id = str(uuid.uuid4())
+    cancel_event = threading.Event()
+    _cleanup_stale_research()  # Housekeeping: remove old sessions
 
-    # Wrap with stream_with_context FIRST (so Flask context is captured),
-    # then wrap with heartbeat injector that runs it in a background thread.
-    ctx_gen = stream_with_context(_safe_generate())
-    resp = Response(_heartbeat_wrap(ctx_gen, interval=3), mimetype="application/x-ndjson")
-    resp.headers["X-Accel-Buffering"] = "no"
-    resp.headers["Cache-Control"] = "no-cache, no-transform"
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["Connection"] = "keep-alive"
-    resp.headers["Transfer-Encoding"] = "chunked"
-    return resp
+    with _active_research_lock:
+        _active_research[research_id] = {
+            "events": [],
+            "done": False,
+            "started": time.time(),
+            "cancel": cancel_event,
+        }
+
+    def _bg_runner():
+        session_ref = _active_research.get(research_id)
+        if not session_ref:
+            return
+        try:
+            _safe_generate_to_list(session_ref["events"], cancel_event)
+        finally:
+            session_ref["done"] = True
+            print(f"  [research] Session {research_id} finished ({len(session_ref['events'])} events)")
+
+    t = threading.Thread(target=_bg_runner, daemon=True)
+    t.start()
+
+    return jsonify({"research_id": research_id})
+
+
+@app.route("/api/research-agent/poll")
+@require_auth_or_guest
+def research_agent_poll():
+    """Return accumulated events for a running research session. Lightweight JSON response."""
+    research_id = request.args.get("id", "")
+    cursor = int(request.args.get("cursor", 0))
+
+    with _active_research_lock:
+        rsession = _active_research.get(research_id)
+
+    if not rsession:
+        return jsonify({"events": [], "cursor": cursor, "done": True, "error": "not_found"}), 404
+
+    events = rsession["events"][cursor:]
+    new_cursor = cursor + len(events)
+    is_done = rsession["done"] and new_cursor >= len(rsession["events"])
+
+    resp_data = {"events": events, "cursor": new_cursor, "done": is_done}
+
+    # Clean up completed sessions after final poll
+    if is_done:
+        def _deferred_cleanup():
+            time.sleep(30)
+            with _active_research_lock:
+                _active_research.pop(research_id, None)
+        threading.Thread(target=_deferred_cleanup, daemon=True).start()
+
+    return jsonify(resp_data)
+
+
+@app.route("/api/research-agent/cancel", methods=["POST"])
+@require_auth_or_guest
+def research_agent_cancel():
+    """Cancel a running research session."""
+    data = request.get_json() or {}
+    research_id = data.get("research_id", "")
+
+    with _active_research_lock:
+        rsession = _active_research.get(research_id)
+
+    if not rsession:
+        return jsonify({"error": "not_found"}), 404
+
+    rsession["cancel"].set()
+    return jsonify({"ok": True})
 
 
 
 # --- Pre-warm heavy modules (.pyc compilation) ------------------------------
 def _prewarm_modules():
     """Background thread that imports heavy packages once so .pyc files are cached."""
-    import threading
     def _warm():
         try:
             import subprocess as _sp
