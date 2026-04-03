@@ -1248,9 +1248,16 @@ def execute_code_blocks(text, exclude_paths=None, uploaded_image_paths=None):
             results.append({"language": lang, "code": code, "output": f"Error: {e}", "success": False, "files": []})
     return results
 
+def _strip_thinking_blocks(text):
+    """Remove <<<THINKING>>>...<<<END_THINKING>>> blocks so trigger extraction doesn't match inside AI reasoning."""
+    return re.sub(r'<<<THINKING>>>.*?<<<END_THINKING>>>', '', text, flags=re.DOTALL)
+
 def extract_research_trigger(text):
     """Extract <<<DEEP_RESEARCH: query>>> from AI response and return (cleaned_text, query_or_None)."""
-    m = re.search(r'<<<DEEP_RESEARCH:\s*(.+?)>>>', text)
+    # Search in text with thinking blocks removed, so we don't match triggers
+    # the AI merely discussed in its reasoning (e.g. "triggered by <<<DEEP_RESEARCH: ...>>>")
+    search_text = _strip_thinking_blocks(text)
+    m = re.search(r'<<<DEEP_RESEARCH:\s*(.+?)>>>', search_text)
     if m:
         query = m.group(1).strip()
         cleaned = re.sub(r'<<<DEEP_RESEARCH:\s*.+?>>>', '', text).strip()
@@ -5179,15 +5186,20 @@ def chat_message(chat_id):
         return jsonify({"error": f"API error: {err}", "files": []})
 
     original_resp = resp
-    resp, research_query = extract_research_trigger(resp)
+    # Separate thinking from response text before extracting triggers,
+    # because thinking may reference trigger syntax (e.g. AI discussing <<<DEEP_RESEARCH: ...>>>)
+    _think_blocks = re.findall(r'<<<THINKING>>>.*?<<<END_THINKING>>>\n?', resp, re.DOTALL)
+    _resp_no_think = re.sub(r'<<<THINKING>>>.*?<<<END_THINKING>>>\n?', '', resp, flags=re.DOTALL)
+    _resp_no_think, research_query = extract_research_trigger(_resp_no_think)
     # Clear research_pending flag once research actually triggers
     if research_query and chat.get("research_pending"):
         del chat["research_pending"]
-    resp, image_searches = extract_image_searches(resp)
-    resp, image_generations = extract_image_generation(resp)
-    resp, stock_tickers_sync = extract_stock_tickers(resp)
-    resp, hf_calls_sync = extract_hf_space_calls(resp)
-    resp, extracted_reminders = extract_reminders(resp)
+    _resp_no_think, image_searches = extract_image_searches(_resp_no_think)
+    _resp_no_think, image_generations = extract_image_generation(_resp_no_think)
+    _resp_no_think, stock_tickers_sync = extract_stock_tickers(_resp_no_think)
+    _resp_no_think, hf_calls_sync = extract_hf_space_calls(_resp_no_think)
+    _resp_no_think, extracted_reminders = extract_reminders(_resp_no_think)
+    resp = "".join(_think_blocks) + _resp_no_think
     # Fetch stock data synchronously for non-streaming path
     stock_results_sync = []
     if stock_tickers_sync:
@@ -6218,23 +6230,24 @@ def chat_message_stream(chat_id):
 
             # -- Post-stream processing --
             raw_text = "".join(pieces)
+            # Extract triggers from response text BEFORE prepending thinking,
+            # because thinking may reference trigger syntax like <<<DEEP_RESEARCH: ...>>>
+            # and the regex would incorrectly match the thinking discussion instead of the real trigger.
+            raw_text, research_query = extract_research_trigger(raw_text)
+            raw_text, image_searches = extract_image_searches(raw_text)
+            raw_text, image_generations = extract_image_generation(raw_text)
+            raw_text, stock_tickers = extract_stock_tickers(raw_text)
+            raw_text, hf_space_calls = extract_hf_space_calls(raw_text)
+            raw_text, stream_reminders = extract_reminders(raw_text)
             all_thinking = thinking_pieces
             if all_thinking:
                 think_text = "".join(all_thinking).strip()
                 if think_text:
                     raw_text = f"<<<THINKING>>>\n{think_text}\n<<<END_THINKING>>>\n{raw_text}"
             original_raw_text = raw_text
-            raw_text, research_query = extract_research_trigger(raw_text)
             # Clear research_pending flag once research triggers
             if research_query and chat.get("research_pending"):
                 del chat["research_pending"]
-            raw_text, image_searches = extract_image_searches(raw_text)
-            raw_text, image_generations = extract_image_generation(raw_text)
-            raw_text, stock_tickers = extract_stock_tickers(raw_text)
-            raw_text, hf_space_calls = extract_hf_space_calls(raw_text)
-            raw_text, stream_reminders = extract_reminders(raw_text)
-
-            # -- Execute HuggingFace Space calls (stop-and-wait, like code execution) --
             _hf_results_stream = []
             if hf_space_calls:
                 hf_token = _hf_token()
