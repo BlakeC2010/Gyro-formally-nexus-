@@ -1752,7 +1752,7 @@ function renderChatList(filter=''){
     }
     for(const c of grouped[fld]){
       const a=c.id===curChat?' active':'';
-      const g=isChatRunning(c.id)?' generating':'';
+      const g=(isChatRunning(c.id)||(c._streaming&&!isChatRunning(c.id)))?' generating':'';
       const u=unreadChats.has(c.id)?' unread':'';
       const sel=selectMode&&selectedItems.has(c.id)?' selected':'';
       const inFld=fld?' in-folder':'';
@@ -2022,6 +2022,273 @@ async function _loadSmartWidgets(){
   }catch{}
 }
 
+// --- Cross-device sync: join an active stream from another device ---
+async function joinChatStream(chatId){
+  const area=document.getElementById('chatArea');
+  // Create a generating msg div
+  const msgDiv=document.createElement('div');
+  msgDiv.className='msg kairo';
+  msgDiv.id='join-stream-msg';
+  msgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"><div class="think-active" style="animation:thinkingIn .5s var(--ease-spring-snappy) both"><div class="dots"><span></span><span></span><span></span></div><span> Generating (syncing from another device)...</span></div></div>';
+  area.appendChild(msgDiv);
+  area.scrollTop=area.scrollHeight;
+  const contentEl=msgDiv.querySelector('.msg-content');
+
+  let cursor=0;
+  let fullText='';
+  let thinkText='';
+  let isThinking=false;
+  let _thinkTurn=0;
+  let _turnThinkText='';
+  let _thinkDisplayed='';
+  let _responseDisplayed='';
+  let _responseTypewriter=null;
+  let _donePayload=null;
+  let thinkPanel=null;
+  let thinkTextEl=null;
+
+  const _autoScroll=()=>{area.scrollTop=area.scrollHeight;};
+
+  setChatRunning(chatId,true,{type:'join'});
+
+  function ensureThinkPanelJoin(){
+    if(thinkPanel) return;
+    const ta=contentEl.querySelector('.think-active');
+    if(ta) ta.remove();
+    thinkPanel=document.createElement('div');
+    thinkPanel.className='live-think-panel ltp-collapsed';
+    thinkPanel.innerHTML='<div class="ltp-header" style="cursor:pointer"><span class="ltp-icon">💭</span><span class="ltp-label">Thinking...</span><span class="ltp-chevron">▾</span><span class="ltp-dots"><span></span><span></span><span></span></span></div><div class="ltp-body"><div class="ltp-text"></div></div>';
+    thinkPanel.querySelector('.ltp-header').onclick=()=>thinkPanel.classList.toggle('ltp-collapsed');
+    contentEl.innerHTML='';
+    contentEl.appendChild(thinkPanel);
+    thinkTextEl=thinkPanel.querySelector('.ltp-text');
+  }
+
+  try{
+    while(true){
+      if(curChat!==chatId) break;
+      await new Promise(r=>setTimeout(r,cursor===0?300:1500));
+      if(curChat!==chatId) break;
+
+      let data;
+      try{
+        const resp=await apiFetch(`/api/chats/${chatId}/stream/join?cursor=${cursor}`);
+        if(!resp.ok){
+          // Chat not found or error
+          break;
+        }
+        data=await resp.json();
+      }catch(e){
+        console.warn('[gyro] Join stream poll error:',e);
+        await new Promise(r=>setTimeout(r,3000));
+        continue;
+      }
+
+      if(data.error==='not_found'){
+        break;
+      }
+
+      cursor=data.cursor;
+
+      // Process events
+      for(const rawLine of (data.events||[])){
+        const line=(typeof rawLine==='string'?rawLine:'').trim();
+        if(!line) continue;
+        let ev;
+        try{ev=JSON.parse(line)}catch(e){continue}
+
+        if(ev.type==='heartbeat'){
+          continue;
+        }else if(ev.type==='thinking_delta'){
+          if(!isThinking){
+            isThinking=true;
+            _turnThinkText='';
+            _thinkDisplayed='';
+          }
+          _turnThinkText+=ev.text;
+          thinkText+=ev.text;
+          ensureThinkPanelJoin();
+          if(!window._joinThinkTypewriter){
+            window._joinThinkTypewriter=setInterval(()=>{
+              if(!isThinking&&_thinkDisplayed.length>=_turnThinkText.length){
+                clearInterval(window._joinThinkTypewriter);window._joinThinkTypewriter=null;return;
+              }
+              if(_thinkDisplayed.length<_turnThinkText.length){
+                const end=Math.min(_thinkDisplayed.length+8,_turnThinkText.length);
+                _thinkDisplayed=_turnThinkText.slice(0,end);
+                if(thinkTextEl) thinkTextEl.innerHTML=_fmtThink(_thinkDisplayed);
+              }
+            },20);
+          }
+          _autoScroll();
+        }else if(ev.type==='delta'){
+          if(isThinking&&thinkPanel){
+            isThinking=false;
+            if(window._joinThinkTypewriter){clearInterval(window._joinThinkTypewriter);window._joinThinkTypewriter=null;}
+            if(thinkTextEl&&_turnThinkText) thinkTextEl.innerHTML=_fmtThink(_turnThinkText);
+            thinkPanel.classList.add('ltp-done','ltp-collapsed');
+            const dotsEl=thinkPanel.querySelector('.ltp-dots');
+            if(dotsEl) dotsEl.remove();
+            const body=thinkPanel.querySelector('.ltp-body');
+            if(body){body.style.maxHeight='0';body.style.padding='0';}
+            let respDiv=contentEl.querySelector('.stream-response-area');
+            if(!respDiv){
+              respDiv=document.createElement('div');
+              respDiv.className='stream-response-area';
+              contentEl.appendChild(respDiv);
+            }
+          }
+          // Remove thinking indicator on first delta
+          const ta=contentEl.querySelector('.think-active');
+          if(ta) ta.remove();
+          fullText+=ev.text;
+          if(!_responseTypewriter){
+            _responseTypewriter=setInterval(()=>{
+              if(_responseDisplayed.length>=fullText.length) return;
+              const end=Math.min(_responseDisplayed.length+12,fullText.length);
+              _responseDisplayed=fullText.slice(0,end);
+              const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+              targetEl.innerHTML=fmtLive(_responseDisplayed);
+              if(!schoolMode)renderMathInElementSafe(targetEl);
+              _autoScroll();
+            },20);
+          }
+        }else if(ev.type==='media_loading'){
+          const info=ev.query||ev.ticker||ev.prompt||'';
+          fullText+=`\n[[[MEDIA:${ev.kind}:${ev.index}:${info}]]]\n`;
+          _responseDisplayed=fullText;
+          const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+          targetEl.innerHTML=fmtLive(fullText);
+          _autoScroll();
+        }else if(ev.type==='image_result'||ev.type==='stock_data'||ev.type==='image_generated'){
+          // Media results — just flush and render
+          _responseDisplayed=fullText;
+          const targetEl=contentEl.querySelector('.stream-response-area')||contentEl;
+          targetEl.innerHTML=fmtLive(fullText);
+          _autoScroll();
+        }else if(ev.type==='done'){
+          _donePayload=ev;
+        }else if(ev.type==='error'){
+          contentEl.innerHTML=`<div style="color:var(--red);padding:12px 0">${esc(ev.error)}</div>`;
+        }
+      }
+
+      // Check if we should stop polling
+      if(data.done){
+        // If the done payload has research_trigger, research agent will start soon
+        // Wait a moment for the other device to POST and create the research session
+        let _hasAgents=!!data.research_id||!!data.stock_agent_id;
+        if(!_hasAgents&&_donePayload&&_donePayload.research_trigger){
+          // Research about to start — wait and re-check
+          await new Promise(r=>setTimeout(r,3000));
+          try{
+            const recheck=await apiFetch(`/api/chats/${chatId}/stream/join?cursor=${cursor}`);
+            if(recheck.ok){
+              const rd=await recheck.json();
+              if(rd.research_id){data.research_id=rd.research_id;data.research_query=rd.research_query;_hasAgents=true;}
+              if(rd.stock_agent_id){data.stock_agent_id=rd.stock_agent_id;_hasAgents=true;}
+            }
+          }catch(e){}
+        }
+        if(!_hasAgents) break;
+      }
+
+      // If main stream is done but agents are active, handle them
+      if(data.done&&(data.research_id||data.stock_agent_id)){
+        // Clean up typewriters
+        if(_responseTypewriter){clearInterval(_responseTypewriter);_responseTypewriter=null;}
+        if(window._joinThinkTypewriter){clearInterval(window._joinThinkTypewriter);window._joinThinkTypewriter=null;}
+        setChatRunning(chatId,false);
+
+        // Reload chat to show final rendered state before starting agents
+        try{
+          await refreshChats();
+          // Don't call openChat (infinite loop) — re-render in place
+          const chatResp=await apiFetch(`/api/chats/${chatId}`);
+          if(chatResp.ok){
+            const chatData=await chatResp.json();
+            if(!chatData.error){
+              const areaEl=document.getElementById('chatArea');
+              areaEl.innerHTML='';
+              if(chatData.messages?.length){
+                for(const m of chatData.messages){
+                  if(m.hidden) continue;
+                  if(m.role==='user') addMsg('user',m.text,[],m);
+                  else addMsg('kairo',m.text,m.files_modified||[],m);
+                }
+              }
+            }
+          }
+        }catch(e){console.warn('[gyro] Failed to reload chat after stream join:',e);}
+
+        // Now handle active agents
+        if(data.research_id){
+          const rQuery=data.research_query||'Research';
+          // Create a new msg div for the research agent
+          const rMsgDiv=document.createElement('div');
+          rMsgDiv.className='msg kairo';
+          rMsgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"></div>';
+          document.getElementById('chatArea').appendChild(rMsgDiv);
+          area.scrollTop=area.scrollHeight;
+          const rContentEl=rMsgDiv.querySelector('.msg-content');
+          await runResearchAgent(rQuery, rContentEl, area, chatId, data.research_id);
+        }
+        if(data.stock_agent_id){
+          const sMsgDiv=document.createElement('div');
+          sMsgDiv.className='msg kairo';
+          sMsgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"></div>';
+          document.getElementById('chatArea').appendChild(sMsgDiv);
+          area.scrollTop=area.scrollHeight;
+          const sContentEl=sMsgDiv.querySelector('.msg-content');
+          await runStockAgent([], '', sContentEl, area, chatId, data.stock_agent_id);
+        }
+        return;
+      }
+    }
+
+    // Stream ended — clean up and reload final state
+    if(_responseTypewriter){clearInterval(_responseTypewriter);_responseTypewriter=null;}
+    if(window._joinThinkTypewriter){clearInterval(window._joinThinkTypewriter);window._joinThinkTypewriter=null;}
+
+    // Reload the chat to get the final rendered state
+    if(curChat===chatId){
+      await new Promise(r=>setTimeout(r,500));
+      try{
+        await refreshChats();
+        const chatResp=await apiFetch(`/api/chats/${chatId}`);
+        if(chatResp.ok){
+          const chatData=await chatResp.json();
+          if(!chatData.error){
+            const areaEl=document.getElementById('chatArea');
+            areaEl.innerHTML='';
+            if(chatData.messages?.length){
+              for(const m of chatData.messages){
+                if(m.hidden) continue;
+                if(m.role==='user') addMsg('user',m.text,[],m);
+                else addMsg('kairo',m.text,m.files_modified||[],m);
+              }
+            }
+            // Re-render mermaid
+            setTimeout(()=>{
+              try{
+                const mermaidEls=areaEl.querySelectorAll('pre.mermaid:not([data-processed])');
+                if(mermaidEls.length) mermaid.run({nodes:mermaidEls}).then(()=>enhanceMermaidDiagrams()).catch(()=>enhanceMermaidDiagrams());
+              }catch(e){}
+            },200);
+          }
+        }
+      }catch(e){console.warn('[gyro] Failed to reload after join:',e);}
+    }
+  }catch(e){
+    console.error('[gyro] Join stream error:',e);
+  }finally{
+    if(_responseTypewriter){clearInterval(_responseTypewriter);_responseTypewriter=null;}
+    if(window._joinThinkTypewriter){clearInterval(window._joinThinkTypewriter);window._joinThinkTypewriter=null;}
+    setChatRunning(chatId,false);
+    updateComposerBusyUI();
+  }
+}
+
 async function openChat(id){
   if(curChat===id) return;
   _activeFolderView=null;
@@ -2090,6 +2357,32 @@ async function openChat(id){
     genDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"><div class="think-active"><div class="dots"><span></span><span></span><span></span></div><span> Generating...</span></div></div>';
     area.appendChild(genDiv);
     area.scrollTop=area.scrollHeight;
+  }
+  // Cross-device sync: detect active generation from another device
+  else if(chat._streaming||chat._active_research_id||chat._active_stock_agent_id){
+    // Something is actively running on the server but not on this device
+    if(chat._streaming){
+      // Main chat stream is active — join it
+      joinChatStream(id);
+    }else if(chat._active_research_id){
+      // Research agent is running — join it
+      const rMsgDiv=document.createElement('div');
+      rMsgDiv.className='msg kairo';
+      rMsgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"></div>';
+      area.appendChild(rMsgDiv);
+      area.scrollTop=area.scrollHeight;
+      const rContentEl=rMsgDiv.querySelector('.msg-content');
+      runResearchAgent(chat._active_research_query||'Research', rContentEl, area, id, chat._active_research_id);
+    }else if(chat._active_stock_agent_id){
+      // Stock agent is running — join it
+      const sMsgDiv=document.createElement('div');
+      sMsgDiv.className='msg kairo';
+      sMsgDiv.innerHTML='<div class="lbl">Gyro</div><div class="msg-content"></div>';
+      area.appendChild(sMsgDiv);
+      area.scrollTop=area.scrollHeight;
+      const sContentEl=sMsgDiv.querySelector('.msg-content');
+      runStockAgent([], '', sContentEl, area, id, chat._active_stock_agent_id);
+    }
   }
   renderChatList(document.getElementById('chatSearch').value);
   updateComposerBusyUI();
@@ -2544,7 +2837,7 @@ async function showResearchPlan(query, contentEl, area, chatId){
   await runResearchAgent(query, contentEl, area, chatId);
 }
 
-async function runResearchAgent(query, contentEl, area, chatId){
+async function runResearchAgent(query, contentEl, area, chatId, existingResearchId){
   // Reset auto-retry counter on fresh invocation (not from auto-retry itself)
   if(!window._raIsAutoRetry) window._raAutoRetryCount=0;
   window._raIsAutoRetry=false;
@@ -2727,20 +3020,26 @@ async function runResearchAgent(query, contentEl, area, chatId){
     // Register abort controller BEFORE fetch so stop button works immediately
     setChatRunning(chatId,true,{type:'research',controller:_raAbort});
 
-    // --- Poll-based architecture: POST to start research, then poll for events ---
-    const startResp=await apiFetch('/api/research-agent',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chatId,query:query}),
-      signal:_raAbort.signal
-    });
-    if(!startResp.ok){
-      const d=await startResp.json().catch(()=>({error:'Failed to start research'}));
-      throw new Error(d.error||'Research failed');
+    let _raResearchId;
+    if(existingResearchId){
+      // Cross-device sync: skip POST, use existing research session
+      _raResearchId=existingResearchId;
+    }else{
+      // --- Poll-based architecture: POST to start research, then poll for events ---
+      const startResp=await apiFetch('/api/research-agent',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({chat_id:chatId,query:query}),
+        signal:_raAbort.signal
+      });
+      if(!startResp.ok){
+        const d=await startResp.json().catch(()=>({error:'Failed to start research'}));
+        throw new Error(d.error||'Research failed');
+      }
+      const _raStartData=await startResp.json();
+      _raResearchId=_raStartData.research_id;
+      if(!_raResearchId) throw new Error('Server did not return a research_id');
     }
-    const _raStartData=await startResp.json();
-    const _raResearchId=_raStartData.research_id;
-    if(!_raResearchId) throw new Error('Server did not return a research_id');
 
     // Cancel handler: when user clicks stop, also tell server to cancel
     const _cancelHandler=()=>{
@@ -3269,7 +3568,7 @@ function buildGrowthChart(stockDataArr){
 }
 
 // --- Stock Analysis Agent -------------------------
-async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId){
+async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, chatId, existingStockAgentId){
   const stepIcons=['🔍','📊','📰','📉','💰','🔬','⚠','🎯','🔎','🏆','💰'];
   const stepNames=['Stock Screening','Market Snapshot','News & Headlines','Technical Analysis','Fundamental Deep Dive','Deep Research','Risk & Ownership','Valuation & Price Targets','Winner Deep Dive','Final Verdict','Buying Plan'];
   const totalSteps=11;
@@ -3370,20 +3669,36 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
   };
 
   try{
-    const response=await apiFetch('/api/stock-agent',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chatId,stock_data:stockDataArray,query:userQuery}),
-      signal:_saController.signal
-    });
-    if(!response.ok){
-      const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
-      throw new Error(d.error||'Stock analysis failed');
+    let _saStockAgentId;
+    if(existingStockAgentId){
+      // Cross-device sync: skip POST, use existing stock agent session
+      _saStockAgentId=existingStockAgentId;
+    }else{
+      const response=await apiFetch('/api/stock-agent',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({chat_id:chatId,stock_data:stockDataArray,query:userQuery}),
+        signal:_saController.signal
+      });
+      if(!response.ok){
+        const d=await response.json().catch(()=>({error:'Failed to start stock analysis'}));
+        throw new Error(d.error||'Stock analysis failed');
+      }
+      const startData=await response.json();
+      _saStockAgentId=startData.stock_agent_id;
+      if(!_saStockAgentId) throw new Error('Server did not return a stock_agent_id');
     }
 
-    const reader=response.body.getReader();
-    const decoder=new TextDecoder();
-    let buffer='';
+    // Cancel handler: when user clicks stop, also tell server to cancel
+    const _saCancelHandler=()=>{
+      apiFetch('/api/stock-agent/cancel',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({stock_agent_id:_saStockAgentId})
+      }).catch(()=>{});
+    };
+    _saController.signal.addEventListener('abort',_saCancelHandler,{once:true});
+
     const outEl=document.getElementById('_saOut');
     let currentContentEl=null;
     let stepContent='';
@@ -3396,15 +3711,38 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
     let lastStepText='';
     let verdictStepText='';
     let allStepTexts={};
+    let _saDoneReceived=false;
+    let _pollCursor=0;
+    let _pollErrors=0;
 
-    while(true){
-      const{done,value}=await reader.read();
-      if(done) break;
-      buffer+=decoder.decode(value,{stream:true});
-      let nl;
-      while((nl=buffer.indexOf('\n'))>=0){
-        const line=buffer.slice(0,nl).trim();
-        buffer=buffer.slice(nl+1);
+    // Poll loop — same pattern as research agent
+    while(!_saDoneReceived){
+      if(_saController.signal.aborted) break;
+      await new Promise(r=>setTimeout(r,_pollCursor===0?300:1500));
+      if(_saController.signal.aborted) break;
+
+      let pollData;
+      try{
+        const pollResp=await apiFetch('/api/stock-agent/poll?id='+encodeURIComponent(_saStockAgentId)+'&cursor='+_pollCursor);
+        if(!pollResp.ok){
+          _pollErrors++;
+          if(_pollErrors>15) throw new Error('Stock analysis polling failed repeatedly');
+          continue;
+        }
+        pollData=await pollResp.json();
+        _pollErrors=0;
+      }catch(pollErr){
+        if(_saController.signal.aborted) break;
+        _pollErrors++;
+        if(_pollErrors>15) throw pollErr;
+        await new Promise(r=>setTimeout(r,2000));
+        continue;
+      }
+
+      _pollCursor=pollData.cursor;
+
+      for(const rawLine of (pollData.events||[])){
+        const line=(typeof rawLine==='string'?rawLine:'').trim();
         if(!line) continue;
         let ev;
         try{ev=JSON.parse(line)}catch(e){continue}
@@ -3606,8 +3944,19 @@ async function runStockAgent(stockDataArray, userQuery, contentEl, chatArea, cha
           if(badge){badge.classList.add('sa-badge-done');badge.textContent='Stock Analysis Complete'+(tickerStr?' — '+tickerStr:'');}
 
           if(window._chatAutoScroll)window._chatAutoScroll();
+          _saDoneReceived=true;
+        }else if(ev.type==='agent_error'){
+          clearInterval(elTimer);
+          if(_saThinkTypewriter){clearInterval(_saThinkTypewriter);_saThinkTypewriter=null;}
+          if(_saContentTypewriter){clearInterval(_saContentTypewriter);_saContentTypewriter=null;}
+          const badge=document.getElementById('_saBadge');
+          if(badge){badge.classList.add('sa-badge-done');badge.textContent='❌ Stock Analysis Error';}
+          const actEl=document.getElementById('_saActivity');
+          if(actEl) actEl.innerHTML=`<span>Error: ${esc((ev.error||'Unknown error').slice(0,150))}</span>`;
         }
       }
+
+      if(pollData.done) break;
     }
   }catch(e){
     clearInterval(elTimer);

@@ -4857,6 +4857,85 @@ def del_chat(chat_id):
     delete_chat(chat_id)
     return jsonify({"ok": True})
 
+
+@app.route("/api/chats/<chat_id>/stream/join")
+@require_auth_or_guest
+def stream_join(chat_id):
+    """Cross-device sync: return buffered streaming events so another device can join.
+
+    Query params:
+        cursor (int): position in event buffer to read from (0 = start)
+    Returns:
+        events: list of NDJSON event strings from cursor onward
+        cursor: new cursor position for next poll
+        done: whether the main stream has finished
+        research_id / research_query: if a research agent is active
+        stock_agent_id: if a stock agent is active
+    """
+    cursor = int(request.args.get("cursor", 0))
+
+    # 1. Check in-memory stream buffer
+    with _active_streams_lock:
+        stream = _active_streams.get(chat_id)
+
+    if stream:
+        events = stream["events"][cursor:]
+        new_cursor = cursor + len(events)
+        is_done = stream["done"] and new_cursor >= len(stream["events"])
+        resp = {"events": events, "cursor": new_cursor, "done": is_done}
+        if stream.get("research_id"):
+            resp["research_id"] = stream["research_id"]
+            resp["research_query"] = stream.get("research_query", "")
+        if stream.get("stock_agent_id"):
+            resp["stock_agent_id"] = stream["stock_agent_id"]
+        return jsonify(resp)
+
+    # 2. No in-memory buffer — check the chat object for active agents
+    chat, _ = load_chat(chat_id)
+    if not chat:
+        return jsonify({"events": [], "cursor": 0, "done": True, "error": "not_found"}), 404
+
+    resp = {"events": [], "cursor": 0, "done": True}
+
+    # Check for active research agent
+    _rid = chat.get("_active_research_id")
+    if _rid:
+        with _active_research_lock:
+            if _active_research.get(_rid) and not _active_research[_rid]["done"]:
+                resp["research_id"] = _rid
+                resp["research_query"] = chat.get("_active_research_query", "")
+
+    # Check for active stock agent
+    _sid = chat.get("_active_stock_agent_id")
+    if _sid:
+        with _active_stock_agents_lock:
+            if _active_stock_agents.get(_sid) and not _active_stock_agents[_sid]["done"]:
+                resp["stock_agent_id"] = _sid
+
+    # If chat has _streaming flag but no buffer, the server restarted — clean up
+    if chat.get("_streaming") and not resp.get("research_id") and not resp.get("stock_agent_id"):
+        # Check if there's a partial text we can use
+        _partial = chat.get("_partial_text", "").strip()
+        if _partial:
+            chat.pop("_streaming", None)
+            chat.pop("_partial_text", None)
+            chat.pop("_partial_thinking", None)
+            chat["messages"].append({
+                "role": "model",
+                "text": _partial + "\n\n*[Response interrupted — reconnected from another device]*",
+                "raw_text": _partial,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "interrupted": True,
+            })
+            save_chat(chat)
+        else:
+            chat.pop("_streaming", None)
+            save_chat(chat)
+        resp["recovered"] = True
+
+    return jsonify(resp)
+
+
 @app.route("/api/chats/bulk-delete", methods=["POST"])
 @require_auth_or_guest
 def bulk_delete_chats():
@@ -5724,14 +5803,16 @@ def stock_agent():
     def evt(payload):
         return json.dumps(payload) + "\n"
 
-    @stream_with_context
-    def generate():
+    def generate(cancel_event=None):
         import time as _time
         all_analysis = []
 
         yield evt({"type": "agent_start", "total_steps": len(steps), "tickers": tickers})
 
         for i, step in enumerate(steps):
+            if cancel_event and cancel_event.is_set():
+                yield evt({"type": "agent_error", "error": "Stock analysis cancelled by user."})
+                return
             step_start = _time.time()
             yield evt({"type": "agent_step", "step": i + 1, "title": step["title"], "status": "running"})
 
@@ -5787,48 +5868,206 @@ def stock_agent():
         full_analysis += "\n\n---\n*Not financial advice. AI analysis may be inaccurate. Always do your own research and consult a licensed financial advisor. You could lose money.*"
         yield evt({"type": "agent_done", "analysis": full_analysis, "tickers": tickers})
 
-        # Save to chat history
-        if chat_id:
+    # --- Poll-based architecture (mirrors research agent) ---
+    _s_guest = session.get("guest")
+    _s_uid = session.get("user_id")
+    _s_gid = session.get("guest_id")
+
+    def _bg_load_chat_sa(cid):
+        if not _safe_id(cid): return None, "invalid_id"
+        if _s_guest and not _s_uid:
+            if _s_gid:
+                return _load_json(_guest_dir(_s_gid) / "chats" / f"{cid}.json", None), None
+            return None, "no_guest_id"
+        if not _s_uid: return None, "no_user_id"
+        if not FIREBASE_ENABLED:
+            path = _local_user_dir(_s_uid) / "chats" / f"{cid}.json"
+            data = _load_json(path, None)
+            return (data, None) if data else (None, "file_missing")
+        col = _chats_col()
+        if not col: return None, "no_firestore"
+        snap = col.document(cid).get()
+        return (snap.to_dict(), None) if snap.exists else (None, "not_found")
+
+    def _bg_save_chat_sa(c):
+        c["updated"] = datetime.datetime.now().isoformat()
+        if _s_guest and not _s_uid:
+            if _s_gid:
+                _save_json(_guest_dir(_s_gid) / "chats" / f"{c['id']}.json", c)
+            return
+        if not _s_uid: return
+        if not FIREBASE_ENABLED:
+            _save_json(_local_user_dir(_s_uid) / "chats" / f"{c['id']}.json", c)
+            return
+        col = _chats_col()
+        if col: col.document(c["id"]).set(c)
+
+    stock_agent_id = str(uuid.uuid4())
+    cancel_event = threading.Event()
+    _cleanup_stale_stock_agents()
+
+    with _active_stock_agents_lock:
+        _active_stock_agents[stock_agent_id] = {
+            "events": [],
+            "done": False,
+            "started": time.time(),
+            "cancel": cancel_event,
+        }
+
+    # Cross-device sync: store stock_agent_id on chat
+    if chat_id:
+        try:
+            _sc, _ = load_chat(chat_id)
+            if _sc:
+                _sc["_active_stock_agent_id"] = stock_agent_id
+                save_chat(_sc)
+        except Exception:
+            pass
+        with _active_streams_lock:
+            _sb = _active_streams.get(chat_id)
+            if _sb is not None:
+                _sb["stock_agent_id"] = stock_agent_id
+
+    def _bg_runner():
+        sa_ref = _active_stock_agents.get(stock_agent_id)
+        if not sa_ref:
+            return
+        try:
+            for event_str in generate(cancel_event=cancel_event):
+                sa_ref["events"].append(event_str)
+                if cancel_event.is_set():
+                    sa_ref["events"].append(json.dumps({"type": "agent_error", "error": "Stock analysis cancelled."}) + "\n")
+                    break
+            # Save to chat history
+            if chat_id:
+                try:
+                    chat, _ = _bg_load_chat_sa(chat_id)
+                    if chat:
+                        # Reconstruct full analysis from events
+                        all_analysis_text = []
+                        for ev_str in sa_ref["events"]:
+                            try:
+                                ev = json.loads(ev_str.strip())
+                                if ev.get("type") == "agent_done":
+                                    all_analysis_text = [ev.get("analysis", "")]
+                                    break
+                            except Exception:
+                                pass
+                        full_analysis = all_analysis_text[0] if all_analysis_text else ""
+                        # Build step breakdown from events
+                        step_breakdown = []
+                        _step_content = {}
+                        for ev_str in sa_ref["events"]:
+                            try:
+                                ev = json.loads(ev_str.strip())
+                                if ev.get("type") == "agent_delta":
+                                    sn = ev.get("step", 0)
+                                    _step_content.setdefault(sn, []).append(ev.get("text", ""))
+                                elif ev.get("type") == "agent_step" and ev.get("status") == "running":
+                                    sn = ev.get("step", 0)
+                                    _step_content.setdefault(sn, [])
+                            except Exception:
+                                pass
+                        # Build from agent_step events for titles
+                        for ev_str in sa_ref["events"]:
+                            try:
+                                ev = json.loads(ev_str.strip())
+                                if ev.get("type") == "agent_step" and ev.get("status") in ("complete", "failed"):
+                                    sn = ev.get("step", 0)
+                                    body = "".join(_step_content.get(sn, []))
+                                    step_breakdown.append({"title": ev.get("title", f"Step {sn}"), "body": body})
+                            except Exception:
+                                pass
+                        slim_stock = []
+                        for sd in stock_data_list:
+                            slim_stock.append({k: sd.get(k) for k in (
+                                "ticker","currentPrice","revenueGrowth","earningsGrowth",
+                                "forwardEps","trailingEps","targetMeanPrice","error"
+                            ) if sd.get(k) is not None})
+                        chat["messages"].append({
+                            "role": "model",
+                            "text": full_analysis,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "stock_agent": True,
+                            "stock_agent_steps": step_breakdown,
+                            "stock_agent_tickers": tickers,
+                            "stock_agent_data": slim_stock,
+                        })
+                        chat.pop("_active_stock_agent_id", None)
+                        _bg_save_chat_sa(chat)
+                        print(f"  [stock-agent] Saved analysis to chat {chat_id}")
+                except Exception as save_err:
+                    print(f"  [stock-agent] Failed to save analysis: {save_err}")
+        except Exception as e:
+            print(f"  [stock-agent] FATAL error: {e}")
+            import traceback; traceback.print_exc()
             try:
-                chat, _ = load_chat(chat_id)
-                if chat:
-                    # Build per-step breakdown for reliable reconstruction on reload
-                    step_breakdown = []
-                    for entry in all_analysis:
-                        # Each entry is "## Title\ncontent"
-                        nl = entry.find('\n')
-                        if nl > 0:
-                            step_breakdown.append({"title": entry[3:nl].strip(), "body": entry[nl+1:]})
-                        else:
-                            step_breakdown.append({"title": entry[3:].strip(), "body": ""})
-                    # Strip heavy raw data from stock_data before saving (keep only display-relevant fields)
-                    slim_stock = []
-                    for sd in stock_data_list:
-                        slim_stock.append({k: sd.get(k) for k in (
-                            "ticker","currentPrice","revenueGrowth","earningsGrowth",
-                            "forwardEps","trailingEps","targetMeanPrice","error"
-                        ) if sd.get(k) is not None})
-                    chat["messages"].append({
-                        "role": "model",
-                        "text": full_analysis,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "stock_agent": True,
-                        "stock_agent_steps": step_breakdown,
-                        "stock_agent_tickers": tickers,
-                        "stock_agent_data": slim_stock,
-                    })
-                    save_chat(chat)
+                sa_ref["events"].append(json.dumps({"type": "agent_error", "error": str(e)[:300]}) + "\n")
             except Exception:
                 pass
+            # Clear active flag on error
+            if chat_id:
+                try:
+                    chat, _ = _bg_load_chat_sa(chat_id)
+                    if chat:
+                        chat.pop("_active_stock_agent_id", None)
+                        _bg_save_chat_sa(chat)
+                except Exception:
+                    pass
+        finally:
+            sa_ref["done"] = True
+            print(f"  [stock-agent] Session {stock_agent_id} finished ({len(sa_ref['events'])} events)")
 
-    resp = Response(generate(), mimetype="application/x-ndjson")
-    # Anti-proxy-buffering headers — critical for school/corporate WiFi
-    resp.headers["X-Accel-Buffering"] = "no"           # Nginx
-    resp.headers["Cache-Control"] = "no-cache, no-transform"
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["Connection"] = "keep-alive"
-    resp.headers["Transfer-Encoding"] = "chunked"
-    return resp
+    t = threading.Thread(target=_bg_runner, daemon=True)
+    t.start()
+
+    return jsonify({"stock_agent_id": stock_agent_id})
+
+
+@app.route("/api/stock-agent/poll")
+@require_auth_or_guest
+def stock_agent_poll():
+    """Return accumulated events for a running stock analysis session."""
+    stock_agent_id = request.args.get("id", "")
+    cursor = int(request.args.get("cursor", 0))
+
+    with _active_stock_agents_lock:
+        sa_session = _active_stock_agents.get(stock_agent_id)
+
+    if not sa_session:
+        return jsonify({"events": [], "cursor": cursor, "done": True, "error": "not_found"}), 404
+
+    events = sa_session["events"][cursor:]
+    new_cursor = cursor + len(events)
+    is_done = sa_session["done"] and new_cursor >= len(sa_session["events"])
+
+    resp_data = {"events": events, "cursor": new_cursor, "done": is_done}
+
+    if is_done:
+        def _deferred_cleanup():
+            time.sleep(30)
+            with _active_stock_agents_lock:
+                _active_stock_agents.pop(stock_agent_id, None)
+        threading.Thread(target=_deferred_cleanup, daemon=True).start()
+
+    return jsonify(resp_data)
+
+
+@app.route("/api/stock-agent/cancel", methods=["POST"])
+@require_auth_or_guest
+def stock_agent_cancel():
+    """Cancel a running stock analysis session."""
+    data = request.get_json() or {}
+    stock_agent_id = data.get("stock_agent_id", "")
+
+    with _active_stock_agents_lock:
+        sa_session = _active_stock_agents.get(stock_agent_id)
+
+    if not sa_session:
+        return jsonify({"error": "not_found"}), 404
+
+    sa_session["cancel"].set()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/detect-tools", methods=["POST"])
@@ -5874,8 +6113,22 @@ def chat_message_stream(chat_id):
         chat["_streaming"] = True  # Mark that we're mid-stream
         save_chat(chat)
 
+    # Cross-device sync: create stream buffer for this chat
+    _stream_chat_id = chat_id
+    _cleanup_stale_streams()
+    with _active_streams_lock:
+        _active_streams[_stream_chat_id] = {
+            "events": [], "done": False, "started": time.time(),
+            "research_id": None, "stock_agent_id": None,
+        }
+
     def event(payload):
-        return json.dumps(payload) + "\n"
+        line = json.dumps(payload) + "\n"
+        with _active_streams_lock:
+            s = _active_streams.get(_stream_chat_id)
+            if s is not None:
+                s["events"].append(line)
+        return line
 
     @stream_with_context
     def generate():
@@ -6352,6 +6605,17 @@ def chat_message_stream(chat_id):
                     _gen_complete["user_query"] = ctx.get("user_text", "")
                 yield event(_gen_complete)
 
+            # Mark stream buffer as done for cross-device sync
+            with _active_streams_lock:
+                _s = _active_streams.get(_stream_chat_id)
+                if _s is not None:
+                    _s["done"] = True
+            def _cleanup_stream_buf():
+                time.sleep(300)
+                with _active_streams_lock:
+                    _active_streams.pop(_stream_chat_id, None)
+            threading.Thread(target=_cleanup_stream_buf, daemon=True).start()
+
         except Exception as e:
             try: _media_executor.shutdown(wait=False)
             except: pass
@@ -6375,6 +6639,11 @@ def chat_message_stream(chat_id):
                 yield event({"type": "error", "error": f"Rate limit hit \u2014 wait a moment and try again. ({err[:200]})"})
             else:
                 yield event({"type": "error", "error": f"API error: {err}"})
+            # Mark stream buffer as done on error too
+            with _active_streams_lock:
+                _s = _active_streams.get(_stream_chat_id)
+                if _s is not None:
+                    _s["done"] = True
 
     resp = Response(generate(), mimetype="application/x-ndjson")
     # Anti-proxy-buffering headers — critical for school/corporate WiFi
@@ -6978,10 +7247,36 @@ def home_widgets_route():
 
 # --- Research Agent (multi-step with web search + URL context) ----------------
 
+# ── Cross-device sync: buffer streaming events so another device can join ──
+_active_streams = {}   # chat_id -> {"events": [], "done": bool, "started": float, "research_id": str|None, "stock_agent_id": str|None}
+_active_streams_lock = threading.Lock()
+
+def _cleanup_stale_streams():
+    """Remove stream sessions older than 10 minutes."""
+    cutoff = time.time() - 600
+    with _active_streams_lock:
+        stale = [cid for cid, s in _active_streams.items() if s["started"] < cutoff]
+        for cid in stale:
+            del _active_streams[cid]
+            print(f"  [stream-sync] Cleaned up stale stream buffer {cid}")
+
 # Poll-based architecture: research runs in background thread, frontend polls for events.
 # This avoids Render free-tier's 30-second request timeout killing streaming connections.
 _active_research = {}  # research_id -> { "events": [], "done": bool, "started": float, "cancel": threading.Event }
 _active_research_lock = threading.Lock()
+
+# Poll-based stock agent (mirrors research pattern)
+_active_stock_agents = {}  # stock_agent_id -> { "events": [], "done": bool, "started": float, "cancel": threading.Event }
+_active_stock_agents_lock = threading.Lock()
+
+def _cleanup_stale_stock_agents():
+    """Remove stock agent sessions older than 30 minutes."""
+    cutoff = time.time() - 1800
+    with _active_stock_agents_lock:
+        stale = [sid for sid, s in _active_stock_agents.items() if s["started"] < cutoff]
+        for sid in stale:
+            del _active_stock_agents[sid]
+            print(f"  [stock-agent] Cleaned up stale session {sid}")
 
 def _cleanup_stale_research():
     """Remove research sessions older than 30 minutes."""
@@ -7986,6 +8281,16 @@ def research_agent():
                         print(f"  [research] Saved completed research ({len(all_r)} steps) to chat {chat_id}")
                 except Exception as save_err:
                     print(f"  [research] Failed to save completed research: {save_err}")
+            # Clear the active research flags from the chat
+            if chat_id:
+                try:
+                    _rc2, _ = _bg_load_chat(chat_id)
+                    if _rc2:
+                        _rc2.pop("_active_research_id", None)
+                        _rc2.pop("_active_research_query", None)
+                        _bg_save_chat(_rc2)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"  [research] FATAL generator error: {e}")
             import traceback; traceback.print_exc()
@@ -8023,6 +8328,16 @@ def research_agent():
                         print(f"  [research] Saved partial results ({len(all_r)} steps) on error")
                 except Exception as save_err:
                     print(f"  [research] Failed to save partial results: {save_err}")
+            # Clear the active research flags even on error
+            if chat_id:
+                try:
+                    _rc3, _ = _bg_load_chat(chat_id)
+                    if _rc3:
+                        _rc3.pop("_active_research_id", None)
+                        _rc3.pop("_active_research_query", None)
+                        _bg_save_chat(_rc3)
+                except Exception:
+                    pass
 
     # --- Poll-based architecture ---
     # Capture session data for background thread (load_chat/save_chat need session)
@@ -8070,6 +8385,23 @@ def research_agent():
             "started": time.time(),
             "cancel": cancel_event,
         }
+
+    # Cross-device sync: store research_id on chat so other devices can discover it
+    if chat_id:
+        try:
+            _rc, _ = load_chat(chat_id)
+            if _rc:
+                _rc["_active_research_id"] = research_id
+                _rc["_active_research_query"] = query
+                save_chat(_rc)
+        except Exception:
+            pass
+        # Also store in the active stream buffer if one exists
+        with _active_streams_lock:
+            _sb = _active_streams.get(chat_id)
+            if _sb is not None:
+                _sb["research_id"] = research_id
+                _sb["research_query"] = query
 
     def _bg_runner():
         session_ref = _active_research.get(research_id)
