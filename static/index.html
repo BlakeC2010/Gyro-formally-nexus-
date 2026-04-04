@@ -119,11 +119,6 @@
     <div class="sb-brand" onclick="goHome()" style="cursor:pointer"><img src="/static/logos/gyro.svg" alt="Gyro" class="sb-logo"><span class="sb-title">Gyro</span></div>
     <button class="sb-x" onclick="toggleSB()">✕</button>
   </div>
-  <!-- Sidebar mode tabs -->
-  <div class="sb-mode-tabs">
-    <button class="sb-mode-tab active" data-mode="chat" onclick="switchSidebarMode('chat')">💬 Chat</button>
-    <button class="sb-mode-tab" data-mode="coder" onclick="switchSidebarMode('coder')">⚡ Coder</button>
-  </div>
   <!-- Chat sidebar content (default) -->
   <div class="sb-mode-panel active" id="sbChatPanel">
   <div class="sb-actions">
@@ -152,32 +147,6 @@
   <div class="sb-search"><input type="text" id="chatSearch" placeholder="Search chats..." oninput="filterChats()"></div>
   <div class="sb-chats" id="chatList"></div>
   </div><!-- end sbChatPanel -->
-  <!-- Coder sidebar panel -->
-  <div class="sb-mode-panel" id="sbCoderPanel">
-    <div class="sb-actions">
-      <button class="sb-btn sb-btn-primary" onclick="coderNewChat()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New Session
-      </button>
-      <button class="sb-btn sb-btn-icon" onclick="openCoderSettings()" title="Coder settings">⚙️</button>
-    </div>
-    <div class="coder-controls">
-      <div class="coder-ctrl-row">
-        <label>Mode:</label>
-        <select id="coderModeSelect" onchange="coderSetMode(this.value)">
-          <option value="auto">🟢 Auto</option>
-          <option value="ask">🟡 Ask</option>
-          <option value="plan">🔵 Plan</option>
-        </select>
-      </div>
-      <div class="coder-ctrl-row">
-        <label>Model:</label>
-        <select id="coderModelSelect" onchange="coderSetModel(this.value)"></select>
-      </div>
-    </div>
-    <div class="sb-search"><input type="text" id="coderChatSearch" placeholder="Search sessions..." oninput="coderFilterChats()"></div>
-    <div class="sb-chats" id="coderChatList"></div>
-  </div><!-- end sbCoderPanel -->
   <div class="sb-footer">
     <div class="sb-avatar" id="userAvatar">?</div>
     <div class="sb-user">
@@ -226,63 +195,6 @@
   </div>
 
   <div class="main-body">
-    <!-- Coder IDE Panel (hidden by default) -->
-    <div class="coder-panel" id="coderPanel" style="display:none">
-      <div class="coder-layout">
-        <!-- Left: File Explorer -->
-        <div class="coder-explorer" id="coderExplorer">
-          <div class="coder-expl-head">
-            <span>EXPLORER</span>
-            <button onclick="coderRefreshFiles()" title="Refresh">↻</button>
-          </div>
-          <div class="coder-file-tree" id="coderFileTree"></div>
-        </div>
-        <!-- Center: Editor + Terminal -->
-        <div class="coder-editor-area">
-          <div class="coder-tabs-bar" id="coderTabsBar"></div>
-          <div class="coder-editor" id="coderEditorContainer">
-            <div class="coder-editor-welcome">
-              <h2>⚡ Coder</h2>
-              <p>AI coding agent powered by Gemma 4</p>
-              <p style="color:var(--text-muted);font-size:12px;margin-top:8px">Open a file or ask the agent to help</p>
-            </div>
-          </div>
-          <div class="coder-terminal" id="coderTerminal">
-            <div class="coder-term-head">
-              <span>TERMINAL</span>
-              <button onclick="coderClearTerminal()" title="Clear">✕</button>
-            </div>
-            <div class="coder-term-output" id="coderTermOutput"></div>
-            <div class="coder-term-input-row">
-              <span style="color:var(--green,#4ec9b0);font-family:var(--font-mono);margin-right:8px;font-size:12px">$</span>
-              <input type="text" id="coderTermInput" placeholder="Type a command..." autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')coderRunTerminal()">
-            </div>
-          </div>
-        </div>
-        <!-- Right: Chat -->
-        <div class="coder-chat" id="coderChatArea">
-          <div class="coder-chat-head">
-            <span>AGENT</span>
-            <span class="coder-agent-status" id="coderAgentStatus"></span>
-          </div>
-          <div class="coder-chat-messages" id="coderChatMessages">
-            <div class="coder-welcome-msg">
-              <h3>👋 Hello! I'm Coder.</h3>
-              <p>I can help you build, debug, and refactor code.</p>
-              <div style="margin-top:12px;font-size:12px;color:var(--text-muted)">
-                <div><strong>🟢 Auto</strong> — executes immediately</div>
-                <div><strong>🟡 Ask</strong> — confirms before changes</div>
-                <div><strong>🔵 Plan</strong> — creates a full plan first</div>
-              </div>
-            </div>
-          </div>
-          <div class="coder-chat-input-area">
-            <textarea id="coderChatInput" placeholder="Ask me anything... (Enter to send)" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();coderSendMessage()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,160)+'px'"></textarea>
-            <button id="coderSendBtn" onclick="coderSendMessage()" title="Send">▶</button>
-          </div>
-        </div>
-      </div>
-    </div>
     <!-- Normal Gyro chat -->
     <div class="chat-col" id="gyroChatCol" style="position:relative">
       <div class="chat-area" id="chatArea"></div>
@@ -717,32 +629,6 @@
     </div>
   </div>
 </div>
-</div>
-
-<!-- Coder Settings Modal -->
-<div class="coder-modal-overlay" id="coderSettingsOverlay" style="display:none" onclick="if(event.target===this)closeCoderSettings()">
-  <div class="coder-modal">
-    <div class="coder-modal-head"><h3>Coder Settings</h3><button onclick="closeCoderSettings()">✕</button></div>
-    <div class="coder-modal-body">
-      <div class="form-group"><label for="coderCfgKey">Google AI API Key</label><input type="password" id="coderCfgKey" placeholder="AIza..."><p style="font-size:11px;color:var(--text-muted);margin-top:4px">Get one at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a>. Leave blank to use Gyro's key.</p></div>
-      <div class="form-group"><label for="coderCfgPath">Project Folder</label><div style="display:flex;gap:8px"><input type="text" id="coderCfgPath" placeholder="C:\Users\you\projects\myapp"><button class="sb-btn sb-btn-primary" onclick="openCoderBrowse()" style="flex-shrink:0">Browse</button></div></div>
-      <div class="form-group"><label for="coderCfgModel">Default Model</label><select id="coderCfgModel"></select></div>
-      <div class="form-group"><label for="coderCfgMode">Default Mode</label><select id="coderCfgMode"><option value="auto">🟢 Auto</option><option value="ask">🟡 Ask</option><option value="plan">🔵 Plan</option></select></div>
-    </div>
-    <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end"><button class="sb-btn sb-btn-primary" onclick="saveCoderSettings()">Save</button></div>
-  </div>
-</div>
-
-<!-- Coder Browse Modal -->
-<div class="coder-modal-overlay" id="coderBrowseOverlay" style="display:none" onclick="if(event.target===this)closeCoderBrowse()">
-  <div class="coder-modal">
-    <div class="coder-modal-head"><h3>Select Folder</h3><button onclick="closeCoderBrowse()">✕</button></div>
-    <div class="coder-modal-body">
-      <div id="coderBrowsePath" style="font-family:var(--font-mono);font-size:12px;padding:6px 10px;background:var(--bg-deep);border-radius:4px;margin-bottom:12px;color:var(--accent)"></div>
-      <div id="coderBrowseList" style="max-height:320px;overflow-y:auto"></div>
-    </div>
-    <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end"><button class="sb-btn sb-btn-primary" onclick="coderSelectFolder()">Select This Folder</button></div>
-  </div>
 </div>
 
 <!-- File Browser Panel -->

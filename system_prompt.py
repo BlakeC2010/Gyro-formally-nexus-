@@ -1,4 +1,4 @@
-﻿"""Centralized prompt library for Gyro.
+"""Centralized prompt library for Gyro.
 
 This module holds all major system-prompt text so behavior stays consistent,
 maintainable, and token-efficient.

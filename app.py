@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Gyro - The Flow-State Architect"""
 
 import sys
@@ -9,7 +9,7 @@ import os, json, uuid, datetime, re, base64, mimetypes, secrets, hashlib, random
 import urllib.request, urllib.parse
 from pathlib import Path
 from functools import wraps
-from flask import Flask, request, jsonify, send_from_directory, session, Response, stream_with_context
+from flask import Flask, request, jsonify, send_from_directory, send_file, session, Response, stream_with_context
 from system_prompt import (
     build_system_prompt as _build_system_prompt_template,
     build_tool_instructions as _build_tool_instructions_template,
@@ -81,7 +81,7 @@ def _init_firebase():
         # Verify Firestore is actually reachable (not just authenticated)
         try:
             db.collection("_health").document("ping").set({"ts": datetime.datetime.now().isoformat()})
-            print("  [✓] Firebase connected & Firestore verified — data will persist across deploys.")
+            print("  [âœ“] Firebase connected & Firestore verified â€” data will persist across deploys.")
         except Exception as fs_err:
             print(f"  [!] Firebase authenticated but Firestore unreachable: {fs_err}")
             print("      Make sure you've created a Firestore database in Firebase Console.")
@@ -163,16 +163,16 @@ CREATOR_EMAIL = "blakecary2010@gmail.com"
 GUEST_MODEL = "gemini-2.5-flash"
 
 MODELS = {
-    # Google — free tier (server API key, no per-user cost)
+    # Google â€” free tier (server API key, no per-user cost)
     "gemini-2.5-flash":  {"provider": "google",    "label": "Gemini 2.5 Flash",    "tier": "free"},
     "gemini-2.5-pro":  {"provider": "google",    "label": "Gemini 2.5 Pro",    "tier": "free"},
-    # Google — pro tier
+    # Google â€” pro tier
     "gemini-3-flash-preview":        {"provider": "google",    "label": "Gemini 3 Flash",   "tier": "pro"},
     "gemini-3.1-pro-preview":        {"provider": "google",    "label": "Gemini 3.1 Pro",     "tier": "pro"},
-    # OpenAI — pro tier
+    # OpenAI â€” pro tier
     "gpt-5.4-mini":            {"provider": "openai",    "label": "GPT-5.4 Mini",       "tier": "pro"},
     "gpt-5.4":                 {"provider": "openai",    "label": "GPT-5.4",            "tier": "pro"},
-    # Anthropic — pro tier
+    # Anthropic â€” pro tier
     "claude-sonnet-4-6":       {"provider": "anthropic", "label": "Claude Sonnet 4.6",  "tier": "pro"},
     "claude-opus-4-6":         {"provider": "anthropic", "label": "Claude Opus 4.6",    "tier": "pro"},
 }
@@ -339,7 +339,7 @@ def require_auth_or_guest(f):
         return f(*args, **kw)
     return dec
 
-# ~20k tokens/day ˜ 80 typical exchanges with the lite model
+# ~20k tokens/day Ëœ 80 typical exchanges with the lite model
 GUEST_TOKEN_LIMIT = 20_000
 
 def _guest_runtime_state():
@@ -533,7 +533,7 @@ def model_access(model_id, settings):
             return True, "", "server"
         return False, f"No {provider} API key configured on this server.", ""
 
-    # Pro-tier model — requires pro/max/dev plan
+    # Pro-tier model â€” requires pro/max/dev plan
     if plan in ("pro", "max", "dev"):
         server_key = _load_server_key(provider)
         if server_key:
@@ -847,7 +847,7 @@ def _build_cross_chat_context(current_chat_id, max_chats=8):
             return ""
         return (
             "\n\n[OTHER RECENT CONVERSATIONS]\n"
-            "These are titles of the user's OTHER chats — completely separate conversations with their own context. "
+            "These are titles of the user's OTHER chats â€” completely separate conversations with their own context. "
             "CRITICAL RULES:\n"
             "- NEVER bring up topics from these other chats unless the user EXPLICITLY asks about them.\n"
             "- NEVER assume this conversation is related to or a continuation of any other chat.\n"
@@ -1514,7 +1514,7 @@ def _process_hf_result(result, space_id):
     if result is None:
         return {"success": True, "type": "text", "data": "(Space returned no output)"}
     
-    # Tuple results (multiple outputs) — take the most interesting one
+    # Tuple results (multiple outputs) â€” take the most interesting one
     if isinstance(result, tuple):
         for item in result:
             processed = _process_hf_result(item, space_id)
@@ -1523,7 +1523,7 @@ def _process_hf_result(result, space_id):
         # Fall back to first item
         return _process_hf_result(result[0], space_id) if result else {"success": True, "type": "text", "data": ""}
     
-    # String result — could be a file path or text
+    # String result â€” could be a file path or text
     if isinstance(result, str):
         if os.path.isfile(result):
             return _process_hf_file(result)
@@ -1699,6 +1699,70 @@ def search_images(query, num=8):
     print(f"  [image-search] ALL methods failed for '{query}'")
     return []
 
+
+_TOOL_LEAK_KEYWORDS = (
+    "read_file",
+    "read_file_lines",
+    "write_file",
+    "edit_file",
+    "create_file",
+    "delete_file",
+    "apply_patch",
+    "run_in_terminal",
+    "run_command",
+    "list_dir",
+    "file_search",
+    "grep_search",
+    "semantic_search",
+    "open_file",
+    "bug_scan",
+)
+
+
+def _looks_like_tool_json(blob):
+    s = (blob or "").lower()
+    has_args = any(k in s for k in ('"arguments"', '"args"', '"input"'))
+    has_tool_shape = any(k in s for k in (
+        '"name"',
+        '"tool_name"',
+        '"type":"tool_use"',
+        '"type": "tool_use"',
+        '"type":"tool_call"',
+        '"type": "tool_call"',
+        '"type":"function"',
+        '"type": "function"',
+    ))
+    if not (has_args and has_tool_shape):
+        return False
+    return any(k in s for k in _TOOL_LEAK_KEYWORDS)
+
+
+def _strip_tool_json_leaks(text):
+    if not text:
+        return text or ""
+
+    def _strip_fenced(match):
+        inner = match.group(1)
+        return "" if _looks_like_tool_json(inner) else match.group(0)
+
+    cleaned = re.sub(r'```(?:json|javascript)?\s*([\s\S]*?)```', _strip_fenced, text, flags=re.IGNORECASE)
+
+    patterns = [
+        r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|args|input)"\s*:\s*\{[\s\S]*?\}\s*\}',
+        r'\{\s*"type"\s*:\s*"(?:tool_use|tool_call|function)"[\s\S]*?\}',
+        r'\[\s*\{\s*"name"\s*:\s*"[^"]+"[\s\S]*?\}\s*\]',
+    ]
+
+    for pattern in patterns:
+        def _strip_match(match):
+            raw = match.group(0)
+            return "" if _looks_like_tool_json(raw) else raw
+
+        cleaned = re.sub(pattern, _strip_match, cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned
+
 def clean_response(text, keep_img_placeholders=False):
     text = re.sub(r'<<<THINKING>>>[\s\S]*?<<<END_THINKING>>>', '', text, flags=re.DOTALL)
     text = re.sub(r'<<</?THINKING/?>>>', '', text)
@@ -1720,6 +1784,7 @@ def clean_response(text, keep_img_placeholders=False):
         text = re.sub(r'%%%IMGGEN:\d+%%%', '', text)
         text = re.sub(r'%%%STOCKBLOCK:\d+%%%', '', text)
         text = re.sub(r'%%%HFBLOCK:\d+%%%', '', text)
+    text = _strip_tool_json_leaks(text)
     return text.strip()
 
 _YT_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w-]{11})')
@@ -1909,7 +1974,7 @@ def _assess_chart_health(stock_data):
         elif 30 <= rsi < 40:
             score += 5  # oversold bounce potential
         elif rsi < 30:
-            score += 2  # deeply oversold — risky
+            score += 2  # deeply oversold â€” risky
         elif 60 < rsi <= 70:
             score += 4  # bullish momentum
         elif rsi > 70:
@@ -1987,7 +2052,7 @@ def _build_stock_reprompt_summary(stock_results):
         d = sr.get("data", {})
         if not d or d.get("error"):
             continue
-        line = f"{d['ticker']} ({d.get('name','')}) — ${d['price']:.2f}"
+        line = f"{d['ticker']} ({d.get('name','')}) â€” ${d['price']:.2f}"
         if d.get('changePct') is not None:
             sign = '+' if d['changePct'] >= 0 else ''
             line += f" ({sign}{d['changePct']:.2f}%)"
@@ -2040,14 +2105,14 @@ def _build_full_stock_dump(stock_data_list):
         if not d or d.get("error"):
             continue
         try:
-            lines = [f"{'-'*60}", f"  {d.get('ticker','?')} — {d.get('name','Unknown')}", f"{'-'*60}"]
+            lines = [f"{'-'*60}", f"  {d.get('ticker','?')} â€” {d.get('name','Unknown')}", f"{'-'*60}"]
 
             # -- Price & Trading --
-            lines.append("\n📈 PRICE & TRADING")
+            lines.append("\nðŸ“ˆ PRICE & TRADING")
             lines.append(f"  Price: ${d.get('price',0):.2f} | Change: ${d.get('change',0):.2f} ({d.get('changePct',0):+.2f}%)")
             lines.append(f"  Open: ${d['open']:.2f}" if d.get('open') else "  Open: N/A")
-            lines.append(f"  Day Range: ${d['dayLow']:.2f} – ${d['dayHigh']:.2f}" if d.get('dayLow') and d.get('dayHigh') else "  Day Range: N/A")
-            lines.append(f"  52-Week: ${d['low52']:.2f} – ${d['high52']:.2f} (Position: {d['pos52']:.1f}%)" if d.get('low52') and d.get('high52') and d.get('pos52') is not None else "  52-Week: N/A")
+            lines.append(f"  Day Range: ${d['dayLow']:.2f} â€“ ${d['dayHigh']:.2f}" if d.get('dayLow') and d.get('dayHigh') else "  Day Range: N/A")
+            lines.append(f"  52-Week: ${d['low52']:.2f} â€“ ${d['high52']:.2f} (Position: {d['pos52']:.1f}%)" if d.get('low52') and d.get('high52') and d.get('pos52') is not None else "  52-Week: N/A")
             vol = d.get('volume'); avg_vol = d.get('avgVolume')
             lines.append(f"  Volume: {vol:,}" if vol else "  Volume: N/A")
             lines.append(f"  Avg Volume (10D): {avg_vol:,}" if avg_vol else "  Avg Volume: N/A")
@@ -2062,7 +2127,7 @@ def _build_full_stock_dump(stock_data_list):
                 lines.append(f"  Market Cap: {_fmt_big(mc)} ({cap_category})")
 
             # -- Valuation --
-            lines.append("\n💰 VALUATION")
+            lines.append("\nðŸ’° VALUATION")
             lines.append(f"  P/E (TTM): {d['pe']:.2f}" if d.get('pe') else "  P/E (TTM): N/A")
             lines.append(f"  Forward P/E: {d['forwardPe']:.2f}" if d.get('forwardPe') else "  Forward P/E: N/A")
             lines.append(f"  PEG Ratio: {d['health']['pegRatio']:.2f}" if d.get('health',{}).get('pegRatio') else "  PEG Ratio: N/A")
@@ -2077,40 +2142,40 @@ def _build_full_stock_dump(stock_data_list):
 
             # -- Dividends --
             if d.get('dividend') or d.get('dividendRate'):
-                lines.append("\n💵 DIVIDENDS")
+                lines.append("\nðŸ’µ DIVIDENDS")
                 lines.append(f"  Yield: {d['dividend']*100:.2f}%" if d.get('dividend') else "  Yield: N/A")
                 lines.append(f"  Annual Rate: ${d['dividendRate']:.2f}" if d.get('dividendRate') else "")
                 lines.append(f"  Payout Ratio: {_fmt_pct(d.get('health',{}).get('payoutRatio'))}")
                 lines.append(f"  Ex-Dividend Date: {d.get('exDividendDate','N/A')}")
 
             # -- Technical Indicators --
-            lines.append("\n📊 TECHNICAL INDICATORS")
+            lines.append("\nðŸ“Š TECHNICAL INDICATORS")
             perf = d.get('perf', {})
             tech = d.get('technicals', {})
             # Moving averages
             sma50 = perf.get('sma50'); sma200 = perf.get('sma200')
             p = d.get('price', 0)
             if sma50:
-                above50 = "ABOVE ✅" if p > sma50 else "BELOW ❌"
+                above50 = "ABOVE âœ…" if p > sma50 else "BELOW âŒ"
                 lines.append(f"  SMA 50: ${sma50:.2f} (Price {above50}, {((p-sma50)/sma50*100):+.1f}%)")
             if sma200:
-                above200 = "ABOVE ✅" if p > sma200 else "BELOW ❌"
+                above200 = "ABOVE âœ…" if p > sma200 else "BELOW âŒ"
                 lines.append(f"  SMA 200: ${sma200:.2f} (Price {above200}, {((p-sma200)/sma200*100):+.1f}%)")
             if sma50 and sma200:
-                cross = "🟢 GOLDEN CROSS (Bullish)" if sma50 > sma200 else "🔴 DEATH CROSS (Bearish)"
+                cross = "ðŸŸ¢ GOLDEN CROSS (Bullish)" if sma50 > sma200 else "ðŸ”´ DEATH CROSS (Bearish)"
                 lines.append(f"  MA Cross: {cross}")
             if tech.get('ema12'):
                 lines.append(f"  EMA 12: ${tech['ema12']:.2f} | EMA 26: ${tech.get('ema26',0):.2f}")
             # MACD
             if tech.get('macd') is not None:
-                macd_signal = "Bullish 🟢" if tech['macd'] > tech.get('macd_signal', 0) else "Bearish 🔴"
+                macd_signal = "Bullish ðŸŸ¢" if tech['macd'] > tech.get('macd_signal', 0) else "Bearish ðŸ”´"
                 lines.append(f"  MACD Line: {tech['macd']:.4f} | Signal: {tech.get('macd_signal',0):.4f} | Histogram: {tech.get('macd_histogram',0):.4f}")
                 lines.append(f"  MACD Signal: {macd_signal}")
             # RSI
             if perf.get('rsi') is not None:
                 rsi = perf['rsi']
-                rsi_label = "🔴 OVERBOUGHT (>70)" if rsi > 70 else "🟢 OVERSOLD (<30)" if rsi < 30 else "🟡 Neutral"
-                lines.append(f"  RSI(14): {rsi:.1f} — {rsi_label}")
+                rsi_label = "ðŸ”´ OVERBOUGHT (>70)" if rsi > 70 else "ðŸŸ¢ OVERSOLD (<30)" if rsi < 30 else "ðŸŸ¡ Neutral"
+                lines.append(f"  RSI(14): {rsi:.1f} â€” {rsi_label}")
             if tech.get('stoch_rsi') is not None:
                 lines.append(f"  Stochastic RSI: {tech['stoch_rsi']:.1f}")
             # Bollinger Bands
@@ -2119,15 +2184,15 @@ def _build_full_stock_dump(stock_data_list):
                 if tech.get('bb_pctb') is not None:
                     pctb = tech['bb_pctb']
                     bb_pos = "Near Upper (Overbought)" if pctb > 0.8 else "Near Lower (Oversold)" if pctb < 0.2 else "Mid-Band"
-                    lines.append(f"  %B: {pctb:.3f} — {bb_pos}")
+                    lines.append(f"  %B: {pctb:.3f} â€” {bb_pos}")
             # ATR
             if tech.get('atr14'):
                 lines.append(f"  ATR(14): ${tech['atr14']:.2f} ({tech.get('atr_pct',0):.2f}% daily volatility)")
             # Volume trend
             if tech.get('vol_ratio_5d_20d'):
                 vr = tech['vol_ratio_5d_20d']
-                vol_trend = "📈 Rising volume" if vr > 1.2 else "📉 Declining volume" if vr < 0.8 else "Stable"
-                lines.append(f"  Volume Trend (5D/20D): {vr:.2f}x — {vol_trend}")
+                vol_trend = "ðŸ“ˆ Rising volume" if vr > 1.2 else "ðŸ“‰ Declining volume" if vr < 0.8 else "Stable"
+                lines.append(f"  Volume Trend (5D/20D): {vr:.2f}x â€” {vol_trend}")
             # Support/Resistance
             if tech.get('support_20d'):
                 lines.append(f"  Support: ${tech['support_20d']:.2f} (20D) / ${tech.get('support_50d',0):.2f} (50D)" if tech.get('support_50d') else f"  Support: ${tech['support_20d']:.2f} (20D)")
@@ -2136,12 +2201,12 @@ def _build_full_stock_dump(stock_data_list):
 
             # -- Performance --
             if perf:
-                lines.append("\n📈 PERFORMANCE")
+                lines.append("\nðŸ“ˆ PERFORMANCE")
                 perf_items = [('1w','1W'),('1m','1M'),('3m','3M'),('6m','6M'),('ytd','YTD'),('1y','1Y')]
                 perf_parts = []
                 for k, label in perf_items:
                     if perf.get(k) is not None:
-                        emoji = "🟢" if perf[k] > 0 else "🔴"
+                        emoji = "ðŸŸ¢" if perf[k] > 0 else "ðŸ”´"
                         perf_parts.append(f"  {label}: {perf[k]:+.2f}% {emoji}")
                 if perf_parts:
                     lines.extend(perf_parts)
@@ -2149,7 +2214,7 @@ def _build_full_stock_dump(stock_data_list):
             # -- Recent 5-Day Prices --
             rp = d.get('recentPrices', [])
             if rp:
-                lines.append("\n📅 LAST 5 TRADING DAYS")
+                lines.append("\nðŸ“… LAST 5 TRADING DAYS")
                 lines.append("  Date       | Open    | High    | Low     | Close   | Volume")
                 lines.append("  " + "-"*65)
                 for dp in rp:
@@ -2158,7 +2223,7 @@ def _build_full_stock_dump(stock_data_list):
             # -- Financial Health --
             h = d.get('health', {})
             if h:
-                lines.append("\n🏦 FINANCIAL HEALTH")
+                lines.append("\nðŸ¦ FINANCIAL HEALTH")
                 lines.append(f"  Health Score: {h['score']}/100" if h.get('score') is not None else "  Health Score: N/A")
                 lines.append(f"  Gross Margin: {_fmt_pct(h.get('grossMargin'))}")
                 lines.append(f"  Operating Margin: {_fmt_pct(h.get('operatingMargin'))}")
@@ -2192,13 +2257,13 @@ def _build_full_stock_dump(stock_data_list):
                 if sh.get('shortRatio') is not None: lines.append(f"  Short Ratio (Days to Cover): {sh['shortRatio']:.1f}")
 
             # -- Analyst Consensus --
-            lines.append("\n🎯 ANALYST CONSENSUS")
+            lines.append("\nðŸŽ¯ ANALYST CONSENSUS")
             lines.append(f"  Recommendation: {d.get('recommendation','N/A').upper()}")
             lines.append(f"  Number of Analysts: {d.get('numAnalysts','N/A')}")
             lines.append(f"  Target Mean: ${d['targetPrice']:.2f}" if d.get('targetPrice') else "  Target Mean: N/A")
             lines.append(f"  Target Median: ${d['targetMedian']:.2f}" if d.get('targetMedian') else "")
             if d.get('targetLow') and d.get('targetHigh'):
-                lines.append(f"  Target Range: ${d['targetLow']:.2f} – ${d['targetHigh']:.2f}")
+                lines.append(f"  Target Range: ${d['targetLow']:.2f} â€“ ${d['targetHigh']:.2f}")
             if d.get('targetPrice') and p:
                 upside = (d['targetPrice'] - p) / p * 100
                 lines.append(f"  Implied Upside/Downside: {upside:+.1f}%")
@@ -2210,7 +2275,7 @@ def _build_full_stock_dump(stock_data_list):
             # -- Earnings History --
             eh = d.get('earningsHistory', [])
             if eh:
-                lines.append("\n📋 RECENT EARNINGS")
+                lines.append("\nðŸ“‹ RECENT EARNINGS")
                 for e in eh:
                     eps_est = e.get('epsEstimate') or e.get('Earnings Estimate')
                     eps_act = e.get('epsActual') or e.get('Reported EPS')
@@ -2221,13 +2286,13 @@ def _build_full_stock_dump(stock_data_list):
                             surprise_f = float(surprise) if surprise is not None else None
                         except (TypeError, ValueError):
                             surprise_f = None
-                        beat = "✅ BEAT" if (surprise_f and surprise_f > 0) else "❌ MISS" if (surprise_f and surprise_f < 0) else ""
+                        beat = "âœ… BEAT" if (surprise_f and surprise_f > 0) else "âŒ MISS" if (surprise_f and surprise_f < 0) else ""
                         lines.append(f"  {qtr}: Est ${eps_est} ? Actual ${eps_act} ({surprise_f:+.1f}% {beat})" if surprise_f is not None else f"  {qtr}: ${eps_act}")
 
             # -- Insider Trades --
             ins = d.get('insiderTrades', [])
             if ins:
-                lines.append("\n👤 RECENT INSIDER TRADES")
+                lines.append("\nðŸ‘¤ RECENT INSIDER TRADES")
                 for t in ins[:5]:
                     insider = t.get('Insider Trading') or t.get('insider') or t.get('Text') or '?'
                     action = t.get('Transaction') or t.get('transaction') or '?'
@@ -2237,7 +2302,7 @@ def _build_full_stock_dump(stock_data_list):
 
             sections.append("\n".join([l for l in lines if l]))  # filter empty lines
         except Exception:
-            sections.append(f"  {d.get('ticker','?')} — Error formatting data")
+            sections.append(f"  {d.get('ticker','?')} â€” Error formatting data")
     return "\n\n".join(sections)
 
 
@@ -2247,21 +2312,21 @@ def _stock_agent_steps(stock_data_list, user_query):
     ticker_str = ", ".join(tickers)
     is_comparison = len(tickers) > 1
     uq = user_query.strip() if user_query else ""
-    uq_note = f'\n\n⚡ USER\'S QUESTION: "{uq}"\nTailor your analysis to directly answer this. Reference it explicitly.' if uq and len(uq) > 3 else ''
+    uq_note = f'\n\nâš¡ USER\'S QUESTION: "{uq}"\nTailor your analysis to directly answer this. Reference it explicitly.' if uq and len(uq) > 3 else ''
 
     base_system = (
         "You are an elite institutional equity research analyst at a top Wall Street firm. "
-        "You write like a Goldman Sachs/Morgan Stanley research note — authoritative, data-dense, no fluff. "
+        "You write like a Goldman Sachs/Morgan Stanley research note â€” authoritative, data-dense, no fluff. "
         "You are given REAL market data pulled from Yahoo Finance seconds ago.\n\n"
         "ABSOLUTE RULES:\n"
         "1. Use ONLY the data provided for financial numbers. NEVER fabricate, estimate, or hallucinate any number.\n"
         "2. Cite EXACT values from the data: '$142.50', 'P/E of 28.3x', 'RSI at 67.2'\n"
-        "3. INTERPRET every number — don't just restate it. What does it MEAN?\n"
+        "3. INTERPRET every number â€” don't just restate it. What does it MEAN?\n"
         "4. Use markdown: **bold** key figures, use tables for comparisons, emoji for quick signals\n"
         "5. NO disclaimers, NO 'I'm an AI', NO 'this is not financial advice'\n"
-        "6. NO restating the raw data dump — synthesize and add insight\n"
-        "7. Be DECISIVE — give clear signals, not wishy-washy hedge-everything language\n"
-        "8. If a data point is N/A, skip it — don't say 'data not available'"
+        "6. NO restating the raw data dump â€” synthesize and add insight\n"
+        "7. Be DECISIVE â€” give clear signals, not wishy-washy hedge-everything language\n"
+        "8. If a data point is N/A, skip it â€” don't say 'data not available'"
     )
 
     news_system = (
@@ -2284,7 +2349,7 @@ def _stock_agent_steps(stock_data_list, user_query):
         "RULES:\n"
         "1. Search the web for competitive analysis, industry trends, and company developments\n"
         "2. Verify claims against the hard financial data provided\n"
-        "3. Look for information that ISN'T in the financial data — partnerships, products, lawsuits, management changes\n"
+        "3. Look for information that ISN'T in the financial data â€” partnerships, products, lawsuits, management changes\n"
         "4. Be specific with sources and dates\n"
         "5. Use markdown formatting\n"
         "6. NO disclaimers, NO 'I'm an AI'"
@@ -2300,25 +2365,25 @@ def _stock_agent_steps(stock_data_list, user_query):
                 chart_summary_lines.append(f"{d.get('ticker','?')}: chart_health={cs}/100 ({cv})")
     chart_summary = "\n".join(chart_summary_lines) if chart_summary_lines else ""
 
-    # Screening step — validates stocks against user criteria before deep analysis
+    # Screening step â€” validates stocks against user criteria before deep analysis
     screening_step = {
         "title": "Stock Screening",
         "system": (
             "You are a stock screener and validator. Your job is to quickly evaluate whether the stocks provided "
-            "meet the user's stated criteria BEFORE doing deep analysis. Be ruthless — if a stock doesn't match what "
+            "meet the user's stated criteria BEFORE doing deep analysis. Be ruthless â€” if a stock doesn't match what "
             "the user asked for, say so immediately. Look at the REAL prices, chart health scores, and performance data.\n\n"
             "RULES:\n"
             "1. Check EVERY stock against the user's criteria (price range, sector, growth, etc.)\n"
             "2. Evaluate chart health using the provided chart_health scores and performance data\n"
             "3. Flag stocks with POOR charts (declining trends, below 200 SMA, negative YTD) as risky\n"
-            "4. Be STRICT about price criteria — a $50 stock doesn't qualify for 'under $25'\n"
+            "4. Be STRICT about price criteria â€” a $50 stock doesn't qualify for 'under $25'\n"
             "5. Give a clear PASS/FAIL for each stock with brief reasoning\n"
             "6. Use markdown tables for clarity"
         ),
         "web_search": False,
         "prompt": (
             f"SCREEN these stocks against the user's request.{uq_note}\n\n"
-            + (f"📊 CHART HEALTH:\n{chart_summary}\n\n" if chart_summary else "")
+            + (f"ðŸ“Š CHART HEALTH:\n{chart_summary}\n\n" if chart_summary else "")
             + "For EACH stock, evaluate:\n\n"
             "**Screening Table:**\n"
             "| Stock | Price | Criteria Match | Chart Health | Performance Trend | Verdict |\n"
@@ -2329,18 +2394,18 @@ def _stock_agent_steps(stock_data_list, user_query):
             "   - Price vs SMA 50 & 200 (above = good, below = bad)\n"
             "   - RSI (30-70 normal, <30 oversold, >70 overbought)\n"
             "   - MACD direction (positive histogram = bullish)\n"
-            "   - Performance trend (1M/3M/YTD — is it trending up or down?)\n"
+            "   - Performance trend (1M/3M/YTD â€” is it trending up or down?)\n"
             "   - 52-week position (near lows = weak, near highs = strong)\n"
             "3. **Quick Fundamental Check**: Health score, analyst recommendation, revenue growth\n\n"
             "**Verdict for each stock:** ? PASS / ?? CAUTION / ? FAIL\n\n"
-            "**📊 Power Ranking** (CRITICAL — rank ALL stocks from best to worst candidate):\n"
+            "**ðŸ“Š Power Ranking** (CRITICAL â€” rank ALL stocks from best to worst candidate):\n"
             "| Rank | Stock | Score /10 | Key Strength | Key Weakness |\n\n"
             "**Screening Summary:** Which stocks survived screening and deserve deep analysis? "
-            "Which should the user avoid? Be honest and direct — don't waste the user's time on bad stocks.\n\n"
-            "**🎯 Narrowing the Field:** If there are 5+ stocks, explicitly identify the TOP 3 candidates "
+            "Which should the user avoid? Be honest and direct â€” don't waste the user's time on bad stocks.\n\n"
+            "**ðŸŽ¯ Narrowing the Field:** If there are 5+ stocks, explicitly identify the TOP 3 candidates "
             "that deserve the deepest analysis. Explain WHY the others are weaker.\n\n"
             "If a stock has a terrible chart (declining, below key moving averages, negative performance), "
-            "say so CLEARLY — even if it's 'cheap', a bad chart means it's cheap for a reason."
+            "say so CLEARLY â€” even if it's 'cheap', a bad chart means it's cheap for a reason."
         ),
     }
 
@@ -2375,32 +2440,32 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
-                    "Search AGGRESSIVELY — do at least 2-3 separate web searches to cover all stocks.\n\n"
+                    "Search AGGRESSIVELY â€” do at least 2-3 separate web searches to cover all stocks.\n\n"
                     "For EACH stock, search for and report:\n\n"
-                    "**📰 Recent Headlines** (last 1-4 weeks):\n"
+                    "**ðŸ“° Recent Headlines** (last 1-4 weeks):\n"
                     "- List 3-5 most important recent news stories for each company\n"
                     "- Include source name and approximate date\n"
                     "- Focus on: earnings reports, product launches, partnerships, management changes, regulatory news, analyst upgrades/downgrades\n\n"
-                    "**📊 Market Sentiment:**\n"
+                    "**ðŸ“Š Market Sentiment:**\n"
                     "- What's the overall media/analyst sentiment? Bullish, bearish, or mixed?\n"
                     "- Any viral social media buzz or Reddit/WallStreetBets attention?\n"
                     "- Recent analyst rating changes or price target updates?\n\n"
-                    "**⚡ Catalysts & Events:**\n"
+                    "**âš¡ Catalysts & Events:**\n"
                     "- Upcoming earnings dates, FDA decisions, product launches, conferences\n"
                     "- Any pending lawsuits, investigations, or regulatory decisions?\n"
                     "- Sector-wide trends affecting these stocks\n\n"
-                    "**🔥 News Impact Assessment:**\n"
+                    "**ðŸ”¥ News Impact Assessment:**\n"
                     "For each stock: is the news flow Positive / Neutral / Negative?\n"
                     "Which company has the better news momentum right now?"
                 ),
             },
             {
                 "title": "Technical Analysis",
-                "system": base_system + "\nYou are a technical analysis specialist. Think in terms of trends, momentum, and chart patterns. A stock with a terrible chart should NEVER be recommended, no matter how cheap it is — cheap stocks with bad charts are cheap for a reason.",
+                "system": base_system + "\nYou are a technical analysis specialist. Think in terms of trends, momentum, and chart patterns. A stock with a terrible chart should NEVER be recommended, no matter how cheap it is â€” cheap stocks with bad charts are cheap for a reason.",
                 "web_search": False,
                 "prompt": (
                     f"Deep technical comparison of {ticker_str}.{uq_note}\n\n"
-                    "**CHART HEALTH ASSESSMENT** (CRITICAL — this determines if a stock is even worth considering):\n"
+                    "**CHART HEALTH ASSESSMENT** (CRITICAL â€” this determines if a stock is even worth considering):\n"
                     "For each stock, evaluate the overall chart picture:\n"
                     "- Is the stock in an UPTREND, DOWNTREND, or SIDEWAYS consolidation?\n"
                     "- Is price ABOVE or BELOW the 50-day and 200-day moving averages?\n"
@@ -2412,15 +2477,15 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "|-----------|" + "|".join(["--------|"] * len(tickers)) + "------|\n"
                     "Fill in: SMA 50/200 position, MA Cross signal, RSI reading, MACD direction, "
                     "Bollinger Band position, ATR volatility, Volume trend.\n\n"
-                    "**Momentum Comparison** (use emoji 🟢🔴🟡):\n"
+                    "**Momentum Comparison** (use emoji ðŸŸ¢ðŸ”´ðŸŸ¡):\n"
                     "- 1W / 1M / 3M / YTD / 1Y performance side-by-side\n"
                     "- Who's accelerating? Who's decelerating?\n"
-                    "- Any stock with ALL RED performance numbers is a clear ❌\n\n"
+                    "- Any stock with ALL RED performance numbers is a clear âŒ\n\n"
                     "**Support & Resistance**:\n"
                     "- Key levels for each stock\n"
                     "- Which is closer to support (safer entry)? Which is near resistance (risky)?\n\n"
-                    "**Chart Verdict per Stock:** 🟢 Strong Chart / 🟡 Neutral / 🔴 Weak Chart — with specific reasoning\n\n"
-                    "**Technical Edge:** 🏆 [TICKER] — one paragraph explaining the technical advantage. "
+                    "**Chart Verdict per Stock:** ðŸŸ¢ Strong Chart / ðŸŸ¡ Neutral / ðŸ”´ Weak Chart â€” with specific reasoning\n\n"
+                    "**Technical Edge:** ðŸ† [TICKER] â€” one paragraph explaining the technical advantage. "
                     "DO NOT give the technical edge to a stock with a bad chart."
                 ),
             },
@@ -2441,7 +2506,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "Debt/Equity, Current Ratio, Quick Ratio, Total Cash vs Total Debt, FCF\n\n"
                     "**Health Score:** Compare the scores and explain what they mean.\n\n"
                     "Declare category winners, then:\n"
-                    "**Fundamental Edge:** 🏆 [TICKER] — one paragraph on why they're the better business."
+                    "**Fundamental Edge:** ðŸ† [TICKER] â€” one paragraph on why they're the better business."
                 ),
             },
             {
@@ -2451,23 +2516,23 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "prompt": (
                     f"Do deep research on {ticker_str} to find information NOT in the financial data.{uq_note}\n\n"
                     "Search the web and investigate:\n\n"
-                    "**🏢 Company Deep Dive** (for each):\n"
+                    "**ðŸ¢ Company Deep Dive** (for each):\n"
                     "- What does the company actually DO? Core products/services and competitive moat\n"
                     "- Recent product launches, partnerships, or strategic moves\n"
-                    "- Management quality — any recent executive changes?\n"
-                    "- Competitive landscape — who are the main rivals and how do they compare?\n\n"
-                    "**📈 Industry & Macro Context:**\n"
+                    "- Management quality â€” any recent executive changes?\n"
+                    "- Competitive landscape â€” who are the main rivals and how do they compare?\n\n"
+                    "**ðŸ“ˆ Industry & Macro Context:**\n"
                     "- What sector trends are helping or hurting these companies?\n"
                     "- Any regulatory changes or government policies affecting them?\n"
                     "- How does the current macro environment (interest rates, inflation, economy) impact them?\n\n"
-                    "**🔍 Hidden Risks & Opportunities:**\n"
-                    "- Anything the financial data doesn't show — pending lawsuits, patent issues, supply chain problems?\n"
+                    "**ðŸ” Hidden Risks & Opportunities:**\n"
+                    "- Anything the financial data doesn't show â€” pending lawsuits, patent issues, supply chain problems?\n"
                     "- Growth catalysts not yet priced in?\n"
                     "- Insider sentiment beyond just the trade data\n\n"
                     "**Cross-Reference with Data:**\n"
                     "Connect your web research findings with the actual financial data provided. "
                     "Does the news confirm or contradict what the numbers show?\n\n"
-                    "**🎯 Research Edge:** After all this digging, which stock has the most HIDDEN UPSIDE "
+                    "**ðŸŽ¯ Research Edge:** After all this digging, which stock has the most HIDDEN UPSIDE "
                     "that the basic financial data doesn't capture? Which has hidden risks?"
                 ),
             },
@@ -2487,7 +2552,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "- Recent insider trades: buying or selling?\n\n"
                     "**Catalysts & Risks:**\n"
                     "For each stock:\n"
-                    "- 🔼 Next catalyst (earnings date, etc.)\n"
+                    "- ðŸ”¼ Next catalyst (earnings date, etc.)\n"
                     "- ?? Biggest risk factor\n\n"
                     "**Risk-Adjusted Winner:** Which offers better risk/reward?"
                 ),
@@ -2501,9 +2566,9 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "For each stock:\n"
                     "**Current vs Fair Value:**\n"
                     "- Analyst consensus target and implied upside/downside\n"
-                    "- Target range (low to high) — what does the spread tell us?\n"
-                    "- P/E vs forward P/E — is earnings growth being priced in?\n"
-                    "- PEG ratio interpretation — paying too much for growth?\n\n"
+                    "- Target range (low to high) â€” what does the spread tell us?\n"
+                    "- P/E vs forward P/E â€” is earnings growth being priced in?\n"
+                    "- PEG ratio interpretation â€” paying too much for growth?\n\n"
                     "**Value Comparison Table:**\n"
                     "| Metric | " + " | ".join(tickers) + " | Better Value |\n"
                     "Price vs Target, Upside %, P/E, Forward P/E, PEG, P/B, EV/EBITDA\n\n"
@@ -2514,80 +2579,80 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "title": "Winner Deep Dive",
                 "system": research_system + (
                     "\n\nYou have completed 8 steps of analysis. You now know which stock is the frontrunner. "
-                    "Your job is to do an EXTRA round of deep web research specifically on the leading candidate — "
+                    "Your job is to do an EXTRA round of deep web research specifically on the leading candidate â€” "
                     "the one that scored best across screening, technicals, fundamentals, and valuation. "
                     "Search aggressively for anything that could change the verdict, either positively or negatively."
                 ),
                 "web_search": True,
                 "prompt": (
                     f"WINNER DEEP DIVE for the top candidate among {ticker_str}.{uq_note}\n\n"
-                    "Based on your 8 steps of analysis, identify the FRONTRUNNER — the stock that has "
+                    "Based on your 8 steps of analysis, identify the FRONTRUNNER â€” the stock that has "
                     "consistently scored best across screening, technicals, fundamentals, valuation, and risk.\n\n"
-                    "**State your frontrunner:** 🏆 [TICKER] is the clear leader because [1 sentence summary].\n\n"
+                    "**State your frontrunner:** ðŸ† [TICKER] is the clear leader because [1 sentence summary].\n\n"
                     "Now do EXTRA deep research specifically on this stock:\n\n"
-                    "**🔎 Competitive Moat Analysis** (search the web):\n"
+                    "**ðŸ”Ž Competitive Moat Analysis** (search the web):\n"
                     "- What makes this company defensible? Patents, network effects, switching costs, brand, scale?\n"
                     "- Who are the top 3 competitors and how does this company compare on key metrics?\n"
                     "- Is the moat widening or narrowing?\n\n"
-                    "**📊 Earnings & Growth Deep Dive** (search the web):\n"
+                    "**ðŸ“Š Earnings & Growth Deep Dive** (search the web):\n"
                     "- Last 4 quarters: did they beat or miss estimates? By how much?\n"
-                    "- Revenue growth trajectory — accelerating, stable, or decelerating?\n"
+                    "- Revenue growth trajectory â€” accelerating, stable, or decelerating?\n"
                     "- What are analysts saying about next quarter expectations?\n"
                     "- Any guidance updates from management?\n\n"
-                    "**🔍 Bear Case Investigation** (search the web):\n"
+                    "**ðŸ” Bear Case Investigation** (search the web):\n"
                     "- What are the bears and short sellers saying about this stock?\n"
                     "- Search for '[TICKER] bearish case' or '[TICKER] risks'\n"
                     "- Are there any red flags you may have missed in earlier steps?\n"
                     "- Any upcoming headwinds (regulation, competition, macro)?\n\n"
-                    "**💡 Catalyst Timeline:**\n"
+                    "**ðŸ’¡ Catalyst Timeline:**\n"
                     "- List the next 3-5 potential catalysts with approximate dates\n"
                     "- Which catalyst could move the stock the most?\n"
                     "- Any events in the next 30/60/90 days the investor should know about?\n\n"
-                    "**🏁 Deep Dive Conclusion:**\n"
+                    "**ðŸ Deep Dive Conclusion:**\n"
                     "After this extra research, is the frontrunner STILL the best pick? "
                     "Did you find anything that changes your conviction? Rate your confidence: High / Medium / Low."
                 ),
             },
             {
                 "title": "Final Verdict",
-                "system": base_system + "\nThis is your FINAL CALL. Incorporate ALL previous analysis including news and research. Be bold, be decisive. Your reputation depends on this call. NEVER recommend a stock with a terrible chart — cheap and falling is not a buying opportunity, it's a trap.",
+                "system": base_system + "\nThis is your FINAL CALL. Incorporate ALL previous analysis including news and research. Be bold, be decisive. Your reputation depends on this call. NEVER recommend a stock with a terrible chart â€” cheap and falling is not a buying opportunity, it's a trap.",
                 "web_search": False,
                 "prompt": (
                     f"FINAL VERDICT: {ticker_str}.{uq_note}\n\n"
                     "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Deep Dive, "
                     "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
-                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings on the frontrunner — into your final call.\n\n"
+                    "Now synthesize EVERYTHING â€” data, news, research, technicals, fundamentals, AND the deep dive findings on the frontrunner â€” into your final call.\n\n"
                     "?? CRITICAL RULES FOR YOUR VERDICT:\n"
                     "1. If the user specified price criteria and a stock FAILS it, rate it SELL regardless of other merits.\n"
                     "2. If a stock has a TERRIBLE CHART (below both SMAs, negative YTD, negative 1Y, near 52-week lows), "
                     "it should NOT receive a BUY rating. A cheap stock with a bad chart is cheap for a reason.\n"
                     "3. Only recommend stocks that PASS the screening step AND have decent chart health.\n"
-                    "4. If NO stocks deserve a BUY rating, say so honestly — don't force a recommendation.\n\n"
+                    "4. If NO stocks deserve a BUY rating, say so honestly â€” don't force a recommendation.\n\n"
                     "Structure EXACTLY like this:\n\n"
                     "---\n\n"
-                    "## 🏆 Winner: [TICKER]\n\n"
-                    "**Why [TICKER] wins** (1 punchy paragraph — weave together your best data points AND recent news/research findings)\n\n"
+                    "## ðŸ† Winner: [TICKER]\n\n"
+                    "**Why [TICKER] wins** (1 punchy paragraph â€” weave together your best data points AND recent news/research findings)\n\n"
                     "### Scoreboard\n"
                     "| Category | " + " | ".join(tickers) + " |\n"
-                    "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment, **Chart Health** — rate each A/B/C/D/F\n\n"
+                    "Technical, Fundamental, Valuation, Risk/Reward, Momentum, News Sentiment, **Chart Health** â€” rate each A/B/C/D/F\n\n"
                     "### For each stock:\n"
-                    "**[TICKER]: 🟢 BUY / 🟡 HOLD / 🔴 SELL — Rating: [X]/100**\n"
+                    "**[TICKER]: ðŸŸ¢ BUY / ðŸŸ¡ HOLD / ðŸ”´ SELL â€” Rating: [X]/100**\n"
                     "Give a precise numeric rating from 1-100 where:\n"
                     "- 90-100: STRONG BUY, 75-89: BUY, 60-74: LEAN BUY, 45-59: HOLD, 30-44: LEAN SELL, 15-29: SELL, 1-14: STRONG SELL\n\n"
                     "- 3 bullet **Bull Case** (mix data + news + research)\n"
                     "- 3 bullet **Bear Case** (mix data + news + research)\n"
-                    "- **Trade Setup:** Entry $X – $X | Target $X (X% upside) | Stop $X (X% risk) | R:R X:1\n"
+                    "- **Trade Setup:** Entry $X â€“ $X | Target $X (X% upside) | Stop $X (X% risk) | R:R X:1\n"
                     "- Risk level with beta reference\n"
                     "- Ideal investor type (growth, value, income, swing trader)\n\n"
                     "### Bottom Line\n"
                     "2-3 sentences. Clear winner, clear action, specific price levels. "
                     "Reference the most compelling news/catalyst that tips the scale.\n\n"
-                    "### ?? MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "### ?? MACHINE-READABLE RATINGS (REQUIRED â€” emit this EXACT format at the very end):\n"
                     "<<<STOCK_RATINGS>>>\n"
                     '{"ratings":{' + ','.join(f'"{t}":{{"score":0,"verdict":"hold"}}' for t in tickers) + '},"winner":"' + (tickers[0] if tickers else '?') + '"}\n'
                     "<<<END_STOCK_RATINGS>>>\n"
                     "Replace each score with your ACTUAL rating (1-100) and verdict with buy/hold/sell. "
-                    "Replace winner with the actual winning ticker. This data block is parsed by the UI — do NOT skip it."
+                    "Replace winner with the actual winning ticker. This data block is parsed by the UI â€” do NOT skip it."
                 ),
             },
             {
@@ -2598,13 +2663,13 @@ def _stock_agent_steps(stock_data_list, user_query):
                     f"BUYING PLAN for the user.{uq_note}\n\n"
                     "You just completed a full stock analysis. Now give the user a SPECIFIC, ACTIONABLE buying plan.\n\n"
                     "Structure EXACTLY like this:\n\n"
-                    "## 💰 Your Buying Plan\n\n"
+                    "## ðŸ’° Your Buying Plan\n\n"
                     "**Your Budget:** [reference the user's stated budget if mentioned]\n\n"
                     "### Step-by-Step Instructions:\n"
                     "1. **Open your brokerage app** (Robinhood, Fidelity, Schwab, etc.)\n"
-                    "2. **Search for [TICKER]** — this is your primary buy\n"
-                    "3. **Order type:** [Market order / Limit order at $X.XX] — explain why\n"
-                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] — show the math\n"
+                    "2. **Search for [TICKER]** â€” this is your primary buy\n"
+                    "3. **Order type:** [Market order / Limit order at $X.XX] â€” explain why\n"
+                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] â€” show the math\n"
                     "   - If the stock is too expensive for full shares, explain fractional shares\n"
                     "5. **Set a stop-loss** at $X.XX to protect your downside\n\n"
                     "### If you want to split your money:\n"
@@ -2653,34 +2718,34 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Search the web for the LATEST news and headlines about {ticker_str}.{uq_note}\n\n"
-                    "Search AGGRESSIVELY — do at least 2-3 separate web searches to find comprehensive coverage.\n\n"
-                    "**📰 Recent Headlines** (last 1-4 weeks):\n"
+                    "Search AGGRESSIVELY â€” do at least 2-3 separate web searches to find comprehensive coverage.\n\n"
+                    "**ðŸ“° Recent Headlines** (last 1-4 weeks):\n"
                     "- Include source name (e.g., Reuters, Bloomberg, CNBC, WSJ) and approximate date\n"
                     "- Focus on: earnings reports, product launches, partnerships, management changes, "
                     "regulatory news, analyst upgrades/downgrades, SEC filings\n\n"
-                    "**📊 Market Sentiment:**\n"
+                    "**ðŸ“Š Market Sentiment:**\n"
                     "- What's the overall media/analyst sentiment? Bullish, bearish, or mixed?\n"
                     "- Any social media buzz or retail investor attention?\n"
                     "- Recent analyst rating changes or price target updates?\n\n"
-                    "**⚡ Upcoming Catalysts:**\n"
+                    "**âš¡ Upcoming Catalysts:**\n"
                     "- Upcoming earnings dates, product launches, conferences\n"
                     "- Any pending lawsuits, investigations, or regulatory decisions?\n"
                     "- Sector-wide trends or macro events that could move the stock\n\n"
-                    "**🔥 News Verdict:** Is the recent news flow Positive / Neutral / Negative for this stock?"
+                    "**ðŸ”¥ News Verdict:** Is the recent news flow Positive / Neutral / Negative for this stock?"
                 ),
             },
             {
                 "title": "Technical Analysis",
-                "system": base_system + "\nYou are a CMT-certified technical analyst. Think in terms of trend, momentum, volatility, and key levels. A stock with a terrible chart should NOT be recommended regardless of how cheap it looks — bad charts mean the market is telling you something.",
+                "system": base_system + "\nYou are a CMT-certified technical analyst. Think in terms of trend, momentum, volatility, and key levels. A stock with a terrible chart should NOT be recommended regardless of how cheap it looks â€” bad charts mean the market is telling you something.",
                 "web_search": False,
                 "prompt": (
                     f"Full technical breakdown of {ticker_str}.{uq_note}\n\n"
-                    "**CHART HEALTH CHECK** (CRITICAL — evaluate this first):\n"
+                    "**CHART HEALTH CHECK** (CRITICAL â€” evaluate this first):\n"
                     "- Is the stock in an UPTREND, DOWNTREND, or SIDEWAYS?\n"
-                    "- Price vs 50 SMA and 200 SMA — above both = healthy, below both = sick chart\n"
+                    "- Price vs 50 SMA and 200 SMA â€” above both = healthy, below both = sick chart\n"
                     "- Golden cross or death cross?\n"
-                    "- 52-week position — near highs = strong trend, near lows = danger\n"
-                    "- YTD performance — is this stock delivering returns or destroying value?\n"
+                    "- 52-week position â€” near highs = strong trend, near lows = danger\n"
+                    "- YTD performance â€” is this stock delivering returns or destroying value?\n"
                     "?? If the stock is below BOTH moving averages with negative YTD/1Y performance, "
                     "this is a TERRIBLE chart and should be flagged as high-risk regardless of price.\n\n"
                     "**Trend Analysis:**\n"
@@ -2690,16 +2755,16 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "| Indicator | Value | Reading |\n"
                     "RSI(14), Stochastic RSI, MACD (line vs signal + histogram direction)\n\n"
                     "**Volatility:**\n"
-                    "- Bollinger Bands position (%B) — squeezing, expanding, or normal?\n"
-                    "- ATR(14) and daily volatility % — is this a choppy or smooth mover?\n\n"
+                    "- Bollinger Bands position (%B) â€” squeezing, expanding, or normal?\n"
+                    "- ATR(14) and daily volatility % â€” is this a choppy or smooth mover?\n\n"
                     "**Key Levels:**\n"
                     "- Support: 20D and 50D support levels\n"
                     "- Resistance: 20D and 50D resistance levels\n"
                     "- How far from each? Which is the stock gravitating toward?\n\n"
                     "**Performance Momentum** (use table with emoji):\n"
-                    "1W ? 1M ? 3M ? YTD ? 1Y — is the trend accelerating or fading?\n\n"
-                    "**Technical Verdict:** 🟢 Bullish / 🟡 Neutral / 🔴 Bearish\n"
-                    "One paragraph connecting all the dots. Be HONEST — if the chart looks bad, say it clearly."
+                    "1W ? 1M ? 3M ? YTD ? 1Y â€” is the trend accelerating or fading?\n\n"
+                    "**Technical Verdict:** ðŸŸ¢ Bullish / ðŸŸ¡ Neutral / ðŸ”´ Bearish\n"
+                    "One paragraph connecting all the dots. Be HONEST â€” if the chart looks bad, say it clearly."
                 ),
             },
             {
@@ -2711,20 +2776,20 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "**Valuation Assessment:**\n"
                     "| Metric | Value | Grade |\n"
                     "P/E (TTM), Forward P/E, PEG Ratio, P/B, EV/Revenue, EV/EBITDA\n"
-                    "Grade: 🟢 Cheap / 🟡 Fair / 🔴 Expensive (vs typical ranges for this sector)\n\n"
+                    "Grade: ðŸŸ¢ Cheap / ðŸŸ¡ Fair / ðŸ”´ Expensive (vs typical ranges for this sector)\n\n"
                     "**Profitability Scorecard:**\n"
                     "| Metric | Value | Rating |\n"
                     "Gross Margin, Operating Margin, Net Margin, EBITDA Margin, ROE, ROA\n"
                     "Rating: **Strong** / **Average** / **Weak**\n\n"
                     "**Growth Profile:**\n"
-                    "- Revenue growth + earnings growth — accelerating or decelerating?\n"
-                    "- Forward EPS vs trailing EPS — what's the market expecting?\n"
+                    "- Revenue growth + earnings growth â€” accelerating or decelerating?\n"
+                    "- Forward EPS vs trailing EPS â€” what's the market expecting?\n"
                     "- Earnings history: has it beaten estimates recently?\n\n"
                     "**Balance Sheet Health:**\n"
                     "- Debt/Equity, Current Ratio, Quick Ratio\n"
-                    "- Cash vs Debt — net cash or net debt position?\n"
-                    "- Free cash flow — is the business generating real money?\n\n"
-                    f"**Health Score: {h0.get('score', 'N/A')}/100** — explain what this means and how it was derived.\n\n"
+                    "- Cash vs Debt â€” net cash or net debt position?\n"
+                    "- Free cash flow â€” is the business generating real money?\n\n"
+                    f"**Health Score: {h0.get('score', 'N/A')}/100** â€” explain what this means and how it was derived.\n\n"
                     "**Fundamental Grade:** A through F, with justification."
                 ),
             },
@@ -2734,27 +2799,27 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "web_search": True,
                 "prompt": (
                     f"Do deep research on {ticker_str} to find information NOT in the financial data.{uq_note}\n\n"
-                    "Search the web THOROUGHLY — do at least 3-4 separate searches covering different angles "
+                    "Search the web THOROUGHLY â€” do at least 3-4 separate searches covering different angles "
                     "(company news, industry analysis, competitive landscape, recent developments).\n\n"
                     "Search the web and investigate:\n\n"
-                    "**🏢 Company Deep Dive:**\n"
+                    "**ðŸ¢ Company Deep Dive:**\n"
                     "- What does the company actually DO? Core products/services and competitive moat\n"
                     "- Recent product launches, partnerships, or strategic moves\n"
-                    "- Management quality — any recent executive changes? CEO track record?\n"
-                    "- Competitive landscape — who are the main rivals and how do they stack up?\n\n"
-                    "**📈 Industry & Macro Context:**\n"
+                    "- Management quality â€” any recent executive changes? CEO track record?\n"
+                    "- Competitive landscape â€” who are the main rivals and how do they stack up?\n\n"
+                    "**ðŸ“ˆ Industry & Macro Context:**\n"
                     "- What sector trends are helping or hurting this company?\n"
-                    "- Total addressable market (TAM) — how big is the opportunity?\n"
+                    "- Total addressable market (TAM) â€” how big is the opportunity?\n"
                     "- Any regulatory changes or government policies affecting them?\n"
                     "- How does the current macro environment (interest rates, inflation, economy) impact them?\n\n"
-                    "**🔍 Hidden Risks & Opportunities:**\n"
-                    "- Anything the financial data doesn't show — pending lawsuits, patent issues, supply chain problems?\n"
+                    "**ðŸ” Hidden Risks & Opportunities:**\n"
+                    "- Anything the financial data doesn't show â€” pending lawsuits, patent issues, supply chain problems?\n"
                     "- Growth catalysts not yet priced in?\n"
                     "- What are bears saying about this stock? What are bulls saying?\n\n"
                     "**Cross-Reference with Data:**\n"
                     "Connect your web research findings with the actual financial data provided. "
                     "Does the research confirm or contradict what the numbers show?\n\n"
-                    "**🎯 Research Edge:** What did you find that the basic financial data DOESN'T show? "
+                    "**ðŸŽ¯ Research Edge:** What did you find that the basic financial data DOESN'T show? "
                     "Any hidden upside or hidden risks?"
                 ),
             },
@@ -2768,16 +2833,16 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "| Factor | Value | Assessment |\n"
                     "Beta, ATR daily volatility %, Short interest/float %, Debt/Equity\n\n"
                     "**Smart Money:**\n"
-                    "- Institutional ownership % — do the big boys believe?\n"
-                    "- Insider ownership % — is management eating their own cooking?\n"
-                    "- Short interest and days to cover — any squeeze potential or danger signal?\n"
-                    "- Recent insider trades — net buying or selling?\n\n"
+                    "- Institutional ownership % â€” do the big boys believe?\n"
+                    "- Insider ownership % â€” is management eating their own cooking?\n"
+                    "- Short interest and days to cover â€” any squeeze potential or danger signal?\n"
+                    "- Recent insider trades â€” net buying or selling?\n\n"
                     "**Upcoming Events:**\n"
                     "- Next earnings date and what to watch for\n"
                     "- Dividend schedule if applicable\n\n"
-                    "**Key Risks** (3 bullet points — specific, not generic):\n"
+                    "**Key Risks** (3 bullet points â€” specific, not generic):\n"
                     "- What specific data points concern you?\n\n"
-                    "**Risk Rating:** Low / Moderate / High / Very High — with reasoning."
+                    "**Risk Rating:** Low / Moderate / High / Very High â€” with reasoning."
                 ),
             },
             {
@@ -2789,7 +2854,7 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "**Analyst Consensus:**\n"
                     "- Number of analysts covering\n"
                     "- Mean target price and implied move %\n"
-                    "- Target range (low to high) — what does the spread tell us about uncertainty?\n"
+                    "- Target range (low to high) â€” what does the spread tell us about uncertainty?\n"
                     "- Current recommendation\n\n"
                     "**Valuation Math:**\n"
                     "- Current P/E vs Forward P/E ? Are earnings expected to grow or shrink?\n"
@@ -2810,32 +2875,32 @@ def _stock_agent_steps(stock_data_list, user_query):
                 "system": research_system + (
                     "\n\nYou have completed 8 steps of analysis on this stock. "
                     "Now do one final round of aggressive web research to find anything that could "
-                    "change the investment thesis — for better or worse. Search for angles you haven't covered yet."
+                    "change the investment thesis â€” for better or worse. Search for angles you haven't covered yet."
                 ),
                 "web_search": True,
                 "prompt": (
                     f"WINNER DEEP DIVE on {ticker_str}.{uq_note}\n\n"
                     "You've done 8 steps of rigorous analysis. Now it's time for one final deep research push "
                     "to leave no stone unturned.\n\n"
-                    "**🔎 Competitive Moat Analysis** (search the web):\n"
+                    "**ðŸ”Ž Competitive Moat Analysis** (search the web):\n"
                     "- What makes this company defensible? Patents, network effects, switching costs, brand, scale?\n"
                     "- Who are the top 3 competitors and how does this company compare on key metrics?\n"
                     "- Is the moat widening or narrowing?\n\n"
-                    "**📊 Earnings & Growth Deep Dive** (search the web):\n"
+                    "**ðŸ“Š Earnings & Growth Deep Dive** (search the web):\n"
                     "- Last 4 quarters: did they beat or miss estimates? By how much?\n"
-                    "- Revenue growth trajectory — accelerating, stable, or decelerating?\n"
+                    "- Revenue growth trajectory â€” accelerating, stable, or decelerating?\n"
                     "- Any guidance updates from management?\n"
                     "- What are analysts saying about future expectations?\n\n"
-                    "**🔍 Bear Case Investigation** (search the web):\n"
+                    "**ðŸ” Bear Case Investigation** (search the web):\n"
                     "- What are the bears and short sellers saying about this stock?\n"
                     "- Are there any red flags you may have missed in earlier steps?\n"
                     "- Any upcoming headwinds (regulation, competition, macro)?\n"
                     "- Search for recent negative articles or downgrades\n\n"
-                    "**💡 Catalyst Timeline:**\n"
+                    "**ðŸ’¡ Catalyst Timeline:**\n"
                     "- List the next 3-5 potential catalysts with approximate dates\n"
                     "- Which catalyst could move the stock the most?\n"
                     "- Any events in the next 30/60/90 days investors should know about?\n\n"
-                    "**🏁 Deep Dive Conclusion:**\n"
+                    "**ðŸ Deep Dive Conclusion:**\n"
                     "After this extra research, has your thesis changed at all? "
                     "Rate your overall conviction: High / Medium / Low, and explain why."
                 ),
@@ -2848,26 +2913,26 @@ def _stock_agent_steps(stock_data_list, user_query):
                     f"FINAL VERDICT on {ticker_str}.{uq_note}\n\n"
                     "You have completed: Stock Screening, Market Snapshot, News & Headlines, Technical Analysis, Fundamental Analysis, "
                     "Deep Research, Risk & Ownership, Valuation & Price Targets, and Winner Deep Dive.\n\n"
-                    "Now synthesize EVERYTHING — data, news, research, technicals, fundamentals, AND the deep dive findings — into your final call.\n\n"
+                    "Now synthesize EVERYTHING â€” data, news, research, technicals, fundamentals, AND the deep dive findings â€” into your final call.\n\n"
                     "?? CRITICAL RULES FOR YOUR VERDICT:\n"
                     "1. If the user specified price criteria and this stock FAILS it, rate it SELL regardless of other merits.\n"
                     "2. If the chart is TERRIBLE (below both SMAs, negative YTD/1Y, near 52-week lows), "
-                    "it should NOT receive a BUY rating — cheap + bad chart = value trap.\n"
-                    "3. Refer back to your Stock Screening step — did this stock pass or fail?\n"
+                    "it should NOT receive a BUY rating â€” cheap + bad chart = value trap.\n"
+                    "3. Refer back to your Stock Screening step â€” did this stock pass or fail?\n"
                     "4. If this stock doesn't deserve a BUY, say so honestly. Don't force a recommendation.\n\n"
                     "Structure EXACTLY like this:\n\n"
                     "---\n\n"
-                    "## Verdict: 🟢 BUY / 🟡 HOLD / 🔴 SELL\n"
+                    "## Verdict: ðŸŸ¢ BUY / ðŸŸ¡ HOLD / ðŸ”´ SELL\n"
                     "## Rating: [X]/100\n\n"
                     "Give a precise numeric rating from 1-100 where:\n"
-                    "- 90-100: 🟢 STRONG BUY — exceptional opportunity, strong on all fronts\n"
-                    "- 75-89: 🟢 BUY — solid fundamentals, good entry, more upside than downside\n"
-                    "- 60-74: 🟢 LEAN BUY — decent opportunity with some risks, but net positive\n"
-                    "- 45-59: 🟡 HOLD — balanced risk/reward, wait for better entry or catalyst\n"
-                    "- 30-44: 🔴 LEAN SELL — more downside risk than upside, concerning signals\n"
-                    "- 15-29: 🔴 SELL — significant red flags, poor fundamentals or technicals\n"
-                    "- 1-14: 🔴 STRONG SELL — avoid completely, major structural problems\n\n"
-                    "**The Case** (one powerful paragraph — weave together your best data points AND recent news/research findings. "
+                    "- 90-100: ðŸŸ¢ STRONG BUY â€” exceptional opportunity, strong on all fronts\n"
+                    "- 75-89: ðŸŸ¢ BUY â€” solid fundamentals, good entry, more upside than downside\n"
+                    "- 60-74: ðŸŸ¢ LEAN BUY â€” decent opportunity with some risks, but net positive\n"
+                    "- 45-59: ðŸŸ¡ HOLD â€” balanced risk/reward, wait for better entry or catalyst\n"
+                    "- 30-44: ðŸ”´ LEAN SELL â€” more downside risk than upside, concerning signals\n"
+                    "- 15-29: ðŸ”´ SELL â€” significant red flags, poor fundamentals or technicals\n"
+                    "- 1-14: ðŸ”´ STRONG SELL â€” avoid completely, major structural problems\n\n"
+                    "**The Case** (one powerful paragraph â€” weave together your best data points AND recent news/research findings. "
                     "If the stock contradicts the user's stated requirements, lead with that.)\n\n"
                     "### Scorecard\n"
                     "| Category | Grade | Key Reason |\n"
@@ -2879,16 +2944,16 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "| Risk/Reward | A-F | ... |\n"
                     "| News & Catalysts | A-F | ... |\n"
                     "| **Overall** | **A-F** | **...** |\n\n"
-                    "### Bull Case 🐂\n"
-                    "1. [strongest reason — specific number + news support]\n"
-                    "2. [second reason — specific data point]\n"
-                    "3. [third reason — catalyst or research finding]\n\n"
-                    "### Bear Case 🐻\n"
-                    "1. [biggest risk — specific number + news context]\n"
-                    "2. [second risk — data-backed concern]\n"
-                    "3. [third risk — research finding or macro headwind]\n\n"
+                    "### Bull Case ðŸ‚\n"
+                    "1. [strongest reason â€” specific number + news support]\n"
+                    "2. [second reason â€” specific data point]\n"
+                    "3. [third reason â€” catalyst or research finding]\n\n"
+                    "### Bear Case ðŸ»\n"
+                    "1. [biggest risk â€” specific number + news context]\n"
+                    "2. [second risk â€” data-backed concern]\n"
+                    "3. [third risk â€” research finding or macro headwind]\n\n"
                     "### Trade Setup\n"
-                    "- **Entry:** $X.XX – $X.XX\n"
+                    "- **Entry:** $X.XX â€“ $X.XX\n"
                     "- **Target:** $X.XX (X% upside)\n"
                     "- **Stop-Loss:** $X.XX (X% downside)\n"
                     "- **Risk/Reward Ratio:** X:1\n"
@@ -2897,12 +2962,12 @@ def _stock_agent_steps(stock_data_list, user_query):
                     "### Bottom Line\n"
                     "2-3 sentences. Crystal clear. No ambiguity. What should the investor DO? "
                     "Reference the most compelling news/catalyst that tips the scale.\n\n"
-                    "### ?? MACHINE-READABLE RATINGS (REQUIRED — emit this EXACT format at the very end):\n"
+                    "### ?? MACHINE-READABLE RATINGS (REQUIRED â€” emit this EXACT format at the very end):\n"
                     "<<<STOCK_RATINGS>>>\n"
                     + ('{"ratings":{"' + tickers[0] + '":{"score":0,"verdict":"hold"}},"winner":"' + tickers[0] + '"}\n' if tickers else '{"ratings":{},"winner":""}\n') +
                     "<<<END_STOCK_RATINGS>>>\n"
                     "Replace score with your ACTUAL rating (1-100) and verdict with buy/hold/sell. "
-                    "This data block is parsed by the UI — do NOT skip it."
+                    "This data block is parsed by the UI â€” do NOT skip it."
                 ),
             },
             {
@@ -2913,13 +2978,13 @@ def _stock_agent_steps(stock_data_list, user_query):
                     f"BUYING PLAN for the user.{uq_note}\n\n"
                     "You just completed a full stock analysis. Now give the user a SPECIFIC, ACTIONABLE buying plan.\n\n"
                     "Structure EXACTLY like this:\n\n"
-                    "## 💰 Your Buying Plan\n\n"
+                    "## ðŸ’° Your Buying Plan\n\n"
                     "**Your Budget:** [reference the user's stated budget if mentioned]\n\n"
                     "### Step-by-Step Instructions:\n"
                     "1. **Open your brokerage app** (Robinhood, Fidelity, Schwab, etc.)\n"
-                    "2. **Search for [TICKER]** — this is your primary buy\n"
-                    "3. **Order type:** [Market order / Limit order at $X.XX] — explain why\n"
-                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] — show the math\n"
+                    "2. **Search for [TICKER]** â€” this is your primary buy\n"
+                    "3. **Order type:** [Market order / Limit order at $X.XX] â€” explain why\n"
+                    "4. **Number of shares:** [X shares at ~$X.XX = $X.XX total] â€” show the math\n"
                     "   - If the stock is too expensive for full shares, explain fractional shares\n"
                     "5. **Set a stop-loss** at $X.XX to protect your downside\n\n"
                     "### If you want to split your money:\n"
@@ -2970,7 +3035,7 @@ def _prefetch_stock_context(user_text):
     # Build a concise summary for the AI
     lines = ["Below is real-time stock data fetched from Yahoo Finance. Use these exact numbers in your analysis."]
     for d in results:
-        line = f"• {d['ticker']} ({d.get('name','')}) — ${d['price']:.2f}"
+        line = f"â€¢ {d['ticker']} ({d.get('name','')}) â€” ${d['price']:.2f}"
         if d.get('changePct') is not None:
             sign = '+' if d['changePct'] >= 0 else ''
             line += f" ({sign}{d['changePct']:.2f}%)"
@@ -3026,7 +3091,7 @@ def prepare_chat_turn(chat, payload):
     documents = []
     for f in attached:
         mime = f.get("mime", "")
-        # Reply images from search results — download from URL
+        # Reply images from search results â€” download from URL
         if f.get("url") and not f.get("data"):
             try:
                 import requests as _req
@@ -3125,7 +3190,7 @@ def prepare_chat_turn(chat, payload):
                 active_tools = list(active_tools) + ['research']
 
     # --- Auto-enable research_go if chat has pending research (AI asked questions, user answered) ---
-    # Only activate once — clear the flag immediately so it doesn't persist across multiple turns
+    # Only activate once â€” clear the flag immediately so it doesn't persist across multiple turns
     if 'research' not in active_tools and 'research_go' not in active_tools:
         if chat.get("research_pending"):
             active_tools = list(active_tools) + ['research_go']
@@ -3181,7 +3246,7 @@ def prepare_chat_turn(chat, payload):
                 continue
             # Strip data URI prefix if present (e.g. data:text/plain;base64,...)
             if fdata.startswith("data:"):
-                # It's a data URI — decode base64 for text files, skip binary
+                # It's a data URI â€” decode base64 for text files, skip binary
                 try:
                     _comma = fdata.index(",")
                     _meta = fdata[:_comma]
@@ -3189,8 +3254,8 @@ def prepare_chat_turn(chat, payload):
                     import base64 as _b64mod
                     _decoded = _b64mod.b64decode(_b64)
                     if "image/" in _meta:
-                        # Image files — note them but don't dump binary into prompt
-                        file_parts.append(f"[File: {fname}] (image file — uploaded as visual reference)")
+                        # Image files â€” note them but don't dump binary into prompt
+                        file_parts.append(f"[File: {fname}] (image file â€” uploaded as visual reference)")
                         continue
                     fdata = _decoded.decode("utf-8", errors="replace")[:50000]
                 except Exception:
@@ -3244,7 +3309,7 @@ def prepare_chat_turn(chat, payload):
     _est_tokens = lambda msgs: sum(len((m.get("text") or "")) // 3 for m in msgs)
 
     # Dynamic window: keep as many recent messages as fit within token budget
-    _MAX_HISTORY_TOKENS = 60_000  # ~180k chars — leaves room for system prompt + workspace
+    _MAX_HISTORY_TOKENS = 60_000  # ~180k chars â€” leaves room for system prompt + workspace
     _MIN_RECENT = 6  # always keep at least this many recent messages
     _MAX_RECENT = 30  # never send more than this many
 
@@ -3263,7 +3328,7 @@ def prepare_chat_turn(chat, payload):
                 chat["summary_cache"] = _summarize_messages(_to_summarize, resolved)
                 chat["summary_at"] = len(messages) - _keep
             api_msgs = [
-                {"role": "user", "text": f"[CONVERSATION SUMMARY — older messages in this chat, use for continuity only]\n{chat['summary_cache']}"},
+                {"role": "user", "text": f"[CONVERSATION SUMMARY â€” older messages in this chat, use for continuity only]\n{chat['summary_cache']}"},
                 {"role": "assistant", "text": "Got it, I have the context from our earlier conversation. I'll reference this if needed."},
             ] + list(messages[-_keep:])
         else:
@@ -3274,10 +3339,10 @@ def prepare_chat_turn(chat, payload):
     cur = dict(user_msg)
     # --- Pre-fetch stock data for tickers mentioned in user message ---
     stock_context = _prefetch_stock_context(user_text)
-    cur["text"] = f"[WORKSPACE CONTEXT — reference only when user asks about their project/files]\n{ws}\n\n"
+    cur["text"] = f"[WORKSPACE CONTEXT â€” reference only when user asks about their project/files]\n{ws}\n\n"
     if stock_context:
-        cur["text"] += f"[LIVE STOCK DATA — present when user asks about stocks]\n{stock_context}\n\n"
-    cur["text"] += f"[USER MESSAGE — this is the actual request, respond to THIS]\n{user_text}"
+        cur["text"] += f"[LIVE STOCK DATA â€” present when user asks about stocks]\n{stock_context}\n\n"
+    cur["text"] += f"[USER MESSAGE â€” this is the actual request, respond to THIS]\n{user_text}"
     if file_texts:
         cur["text"] += "\n\n" + "\n\n".join(file_texts)
     api_msgs.append(cur)
@@ -3333,7 +3398,7 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
         _fresh_title = (_fresh_chat.get("title") if _fresh_chat else chat.get("title")) or ""
         _fresh_title = _fresh_title.strip().lower()
         if _fresh_title in ("", "new chat"):
-            # Use fast fallback (no AI call — instant) so we don't block the done event
+            # Use fast fallback (no AI call â€” instant) so we don't block the done event
             chat["title"] = fallback_chat_title(ctx["user_text"], clean)
         else:
             chat["title"] = _fresh_chat["title"]
@@ -3369,7 +3434,7 @@ def finalize_chat_response(chat, ctx, raw_response, original_raw=None):
                 existing.add(f["path"])
         chat["generated_files"] = chat_files
     save_chat(chat)
-    # Track token usage for guests (estimate: 1 token ˜ 4 chars)
+    # Track token usage for guests (estimate: 1 token Ëœ 4 chars)
     if session.get("guest") and not session.get("user_id"):
         _add_guest_tokens((len(ctx.get("user_text", "")) + len(clean)) // 4)
     return clean, executed, new_facts, code_results, clean_with_placeholders
@@ -3385,13 +3450,13 @@ def _detect_complex_query(text):
     """Return a thinking level string if the query looks complex, else None."""
     lo = text.lower()
 
-    # Extended complexity — these need the deepest reasoning
+    # Extended complexity â€” these need the deepest reasoning
     extended_signals = ["prove mathematically", "formal proof", "rigorous analysis",
                         "write a complete", "comprehensive system design", "full architecture",
                         "evaluate all options", "thorough comparison of"]
     if any(s in lo for s in extended_signals): return "high"
 
-    # High-complexity signals → medium thinking
+    # High-complexity signals â†’ medium thinking
     deep_signals = ["prove ", "derive ", "proof", "formal ", "theorem", "contradict",
                     "critique ", "evaluate the ", "what are the flaws", "steel man",
                     "compare and contrast", "trade-offs", "tradeoffs", "implications of",
@@ -3403,7 +3468,7 @@ def _detect_complex_query(text):
                     "refactor this", "optimize this", "review this code"]
     if any(s in lo for s in deep_signals): return "medium" 
 
-    # Medium-complexity signals → low thinking
+    # Medium-complexity signals â†’ low thinking
     signals = ["why ", "how does", "analyze", "analyse", "compare", "difference",
                "explain", "debug ", "optimize", "design ", "architecture", "algorithm",
                "prove", "calculate", "implement", "refactor", "what if ",
@@ -3477,12 +3542,12 @@ def _summarize_messages(old_messages, resolved):
         return ""
     prompt = (
         "You are summarizing a conversation for continuity. Create a structured summary with these sections:\n\n"
-        "**KEY DECISIONS** — Any choices, preferences, or conclusions reached\n"
-        "**IMPORTANT CONTEXT** — Facts, constraints, or requirements discussed\n"
-        "**CURRENT STATE** — Where the conversation left off, what's in progress\n"
-        "**ACTION ITEMS** — Any pending tasks or next steps mentioned\n\n"
+        "**KEY DECISIONS** â€” Any choices, preferences, or conclusions reached\n"
+        "**IMPORTANT CONTEXT** â€” Facts, constraints, or requirements discussed\n"
+        "**CURRENT STATE** â€” Where the conversation left off, what's in progress\n"
+        "**ACTION ITEMS** â€” Any pending tasks or next steps mentioned\n\n"
         "Rules:\n"
-        "- Be specific and factual — include actual names, numbers, and details\n"
+        "- Be specific and factual â€” include actual names, numbers, and details\n"
         "- Don't invent or infer information not explicitly stated\n"
         "- Keep each section to 2-4 bullet points maximum\n"
         "- Skip sections that have no relevant content\n"
@@ -3520,7 +3585,7 @@ def _detect_friction_points(chats, todos, profile):
             if days_stale >= 3:
                 nudges.append({
                     "category": "stale_chat",
-                    "message": f"\"{c.get('title','Untitled')}\" — untouched for {days_stale} day{'s' if days_stale!=1 else ''}",
+                    "message": f"\"{c.get('title','Untitled')}\" â€” untouched for {days_stale} day{'s' if days_stale!=1 else ''}",
                     "next_step": "Review where you left off and decide: continue, archive, or close it out.",
                     "action": {"type": "open_chat", "chat_id": c.get("id", "")},
                 })
@@ -3536,7 +3601,7 @@ def _detect_friction_points(chats, todos, profile):
     if len(pending) >= 6:
         nudges.append({
             "category": "task_overload",
-            "message": f"{len(pending)} open tasks — time to triage",
+            "message": f"{len(pending)} open tasks â€” time to triage",
             "next_step": "Pick the 1-2 that actually move the needle today and defer the rest.",
             "action": {"type": "prompt", "text": "Help me triage my open tasks and pick the top priorities for today"},
         })
@@ -3547,9 +3612,9 @@ def _detect_friction_points(chats, todos, profile):
     if total_count >= 8 and done_count < total_count * 0.2:
         nudges.append({
             "category": "scope_creep",
-            "message": f"Only {done_count}/{total_count} tasks done — scope may be expanding faster than execution",
+            "message": f"Only {done_count}/{total_count} tasks done â€” scope may be expanding faster than execution",
             "next_step": "Consider trimming low-value tasks or breaking big ones into smaller wins.",
-            "action": {"type": "prompt", "text": "Help me identify which tasks I can cut or defer — I'm adding faster than finishing"},
+            "action": {"type": "prompt", "text": "Help me identify which tasks I can cut or defer â€” I'm adding faster than finishing"},
         })
 
     # --- Stalled project files: project .md files not updated in 7+ days ---
@@ -3565,7 +3630,7 @@ def _detect_friction_points(chats, todos, profile):
                         "category": "stalled_project",
                         "message": f"Project \"{name}\" hasn't been updated in {days_stale} days",
                         "next_step": "Quick check: still active, paused, or done? One line update keeps it alive.",
-                        "action": {"type": "prompt", "text": f"Help me do a quick status check on my \"{name}\" project — is it still active?"},
+                        "action": {"type": "prompt", "text": f"Help me do a quick status check on my \"{name}\" project â€” is it still active?"},
                     })
         except Exception:
             pass
@@ -3586,8 +3651,8 @@ def _detect_friction_points(chats, todos, profile):
                         time_note = "today!" if days_left == 0 else f"{days_left} day{plural} away"
                         nudges.append({
                             "category": "deadline_soon",
-                            "message": f"Deadline in {fname}: {m.group(1)} — {time_note}",
-                            "next_step": "Make sure this is on track — what's the one thing to finish first?",
+                            "message": f"Deadline in {fname}: {m.group(1)} â€” {time_note}",
+                            "next_step": "Make sure this is on track â€” what's the one thing to finish first?",
                             "action": {"type": "prompt", "text": f"I have a deadline on {m.group(1)} mentioned in {fname}. Help me make sure I'm on track."},
                         })
                 except ValueError:
@@ -3605,7 +3670,7 @@ def _detect_friction_points(chats, todos, profile):
             if len(recent_projects) >= 5:
                 nudges.append({
                     "category": "resource_spread",
-                    "message": f"{len(recent_projects)} active projects in the last week — spreading thin?",
+                    "message": f"{len(recent_projects)} active projects in the last week â€” spreading thin?",
                     "next_step": "Pick your top 2-3 priorities and pause the rest to protect focus.",
                     "action": {"type": "prompt", "text": "I have too many active projects. Help me pick the top 2-3 to focus on and pause the rest."},
                 })
@@ -3641,7 +3706,7 @@ def _detect_friction_points(chats, todos, profile):
     if not focus and (chats or todos):
         nudges.append({
             "category": "no_focus",
-            "message": "No current focus set — easy to drift without a north star",
+            "message": "No current focus set â€” easy to drift without a north star",
             "next_step": "Set a one-line focus for this week in your profile.",
             "action": {"type": "prompt", "text": "Help me define my current focus for this week"},
         })
@@ -3789,7 +3854,7 @@ def _detect_workflow_patterns(chats):
     if action_counts["file_ops"] >= 5 and action_counts["todos"] == 0:
         patterns.append({
             "detected": "Lots of file activity but no task tracking",
-            "suggestion": "You're creating content fast — a todo list could help you stay organized.",
+            "suggestion": "You're creating content fast â€” a todo list could help you stay organized.",
             "action": {"type": "prompt", "text": "Create a todo list based on the files I've been working on recently"},
         })
 
@@ -3804,12 +3869,12 @@ def _detect_workflow_patterns(chats):
     if len(recent_types) >= 2:
         pair = f"{recent_types[1]}?{recent_types[0]}"
         common_flows = {
-            "research?brainstorm": "You often brainstorm after research — this is becoming your flow!",
-            "brainstorm?plan": "You like to plan right after brainstorming — nice workflow!",
-            "plan?write": "Planning then writing — your systematic approach is working!",
-            "decide?write": "Making decisions then documenting — great habit!",
-            "research?write": "Research then write — you work fast from findings to output!",
-            "brainstorm?write": "Brainstorm then write — creative to concrete, solid pattern!",
+            "research?brainstorm": "You often brainstorm after research â€” this is becoming your flow!",
+            "brainstorm?plan": "You like to plan right after brainstorming â€” nice workflow!",
+            "plan?write": "Planning then writing â€” your systematic approach is working!",
+            "decide?write": "Making decisions then documenting â€” great habit!",
+            "research?write": "Research then write â€” you work fast from findings to output!",
+            "brainstorm?write": "Brainstorm then write â€” creative to concrete, solid pattern!",
         }
         if pair in common_flows:
             patterns.append({
@@ -3837,7 +3902,7 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, reminders=
     heading = f"Welcome back, {first_name}."
     widgets = []
 
-    # Reminders — show pending/overdue ones prominently
+    # Reminders â€” show pending/overdue ones prominently
     active_reminders = [r for r in (reminders or []) if not r.get("done")]
     if active_reminders:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -3848,16 +3913,16 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, reminders=
         overdue_cnt = len(overdue)
         sub = f"{cnt} active"
         if overdue_cnt:
-            sub += f" · {overdue_cnt} overdue!"
+            sub += f" Â· {overdue_cnt} overdue!"
         widgets.append({
             "type": "reminders",
             "size": "medium",
-            "title": "⏰ Reminders",
+            "title": "â° Reminders",
             "subtitle": sub,
             "items": reminder_items,
         })
 
-    # Proactive friction detection — surface nudges early
+    # Proactive friction detection â€” surface nudges early
     nudges = _detect_friction_points(chats, todos, profile)
     if nudges:
         widgets.append({
@@ -3913,7 +3978,7 @@ def _fallback_home_widgets(user_name, profile, chats, todos, visions, reminders=
             "text": "Add tasks or start a chat to make this dashboard uniquely yours.",
         }]
 
-    # Workflow automation — surface detected patterns
+    # Workflow automation â€” surface detected patterns
     wf_patterns = _detect_workflow_patterns(chats)
     if wf_patterns:
         widgets.append({
@@ -4047,7 +4112,7 @@ def call_google(api_key, model, sysprompt, messages, base_url=None, thinking=Fal
 
 def call_google_stream(api_key, model, sysprompt, messages, base_url=None, thinking=False, web_search=False, thinking_level=None, **kwargs):
     genai, types = _import_google()
-    # Use a longer timeout when thinking is enabled — large thinking budgets can take 3-5 minutes
+    # Use a longer timeout when thinking is enabled â€” large thinking budgets can take 3-5 minutes
     _timeout = 300_000 if (thinking or (thinking_level and thinking_level != "off")) else 120_000
     client = genai.Client(api_key=api_key, http_options={"timeout": _timeout})
     contents = _google_contents_from_messages(messages, types)
@@ -4108,9 +4173,9 @@ def call_google_stream(api_key, model, sysprompt, messages, base_url=None, think
             if thinking or use_thinking:
                 print(f"  [thinking] Google stream: total thought chunks={_thought_count}, content chunks={_content_count}")
             # If thinking produced output but content didn't, retry without thinking
-            # (regardless of web_search — this can happen with any thinking+model combo)
+            # (regardless of web_search â€” this can happen with any thinking+model combo)
             if _thought_count > 0 and _content_count == 0 and _attempt < 2 and use_thinking:
-                print(f"  [thinking] Google stream: thinking produced output but no content — retrying without thinking (attempt {_attempt+1})")
+                print(f"  [thinking] Google stream: thinking produced output but no content â€” retrying without thinking (attempt {_attempt+1})")
                 cfg.pop("thinking_config", None)
                 use_thinking = False
                 # Also try without tools if we have them, as the combo may be causing issues
@@ -4236,7 +4301,7 @@ def call_anthropic_stream(api_key, model, sysprompt, messages, base_url=None, th
     if thinking:
         _ant_budget = 32000 if kwargs.get("thinking_level") in ("high", "extended") else 16000
         print(f"  [thinking] Anthropic stream: thinking enabled, budget={_ant_budget}")
-        # Stream with thinking enabled — iterate raw events
+        # Stream with thinking enabled â€” iterate raw events
         _thought_count = 0
         with client.messages.stream(
             model=model, max_tokens=64000, system=sysprompt, messages=msgs,
@@ -4613,7 +4678,7 @@ def save_oauth_cfg():
 @require_auth
 def get_settings():
     s = load_settings()
-    safe_keys = {k: ("••••" + v[-4:] if len(v) > 4 else "••••") for k, v in s.get("keys", {}).items() if v}
+    safe_keys = {k: ("â€¢â€¢â€¢â€¢" + v[-4:] if len(v) > 4 else "â€¢â€¢â€¢â€¢") for k, v in s.get("keys", {}).items() if v}
     key_sources = {}
     for provider in ("google", "openai", "anthropic", "custom"):
         api_key, source = resolve_provider_key(s, provider)
@@ -4682,7 +4747,7 @@ def get_connectors():
         safe[name] = dict(cfg)
         if safe[name].get("token"):
             t = safe[name]["token"]
-            safe[name]["token"] = "••••" + t[-4:] if len(t) > 4 else "••••"
+            safe[name]["token"] = "â€¢â€¢â€¢â€¢" + t[-4:] if len(t) > 4 else "â€¢â€¢â€¢â€¢"
     return jsonify({"connectors": safe})
 
 @app.route("/api/connectors", methods=["POST"])
@@ -4830,7 +4895,7 @@ def get_chat(chat_id):
             _clean_partial = re.sub(r'%%%IMGGEN:\d+%%%', '', _clean_partial).strip()
             c["messages"].append({
                 "role": "model",
-                "text": _clean_partial + "\n\n*[Response interrupted — connection was lost]*",
+                "text": _clean_partial + "\n\n*[Response interrupted â€” connection was lost]*",
                 "raw_text": text,
                 "timestamp": datetime.datetime.now().isoformat(),
                 "interrupted": True,
@@ -4935,7 +5000,7 @@ def save_partial_response(chat_id):
         return jsonify({"ok": True, "skipped": True}), 200
     is_final = data.get("final", False)
     if is_final:
-        # User is leaving — append as interrupted message
+        # User is leaving â€” append as interrupted message
         chat.pop("_streaming", None)
         chat.pop("_partial_text", None)
         chat.pop("_partial_thinking", None)
@@ -4950,7 +5015,7 @@ def save_partial_response(chat_id):
             "interrupted": True,
         })
     else:
-        # Periodic save — just update partial text for recovery
+        # Periodic save â€” just update partial text for recovery
         chat["_partial_text"] = partial_text
     save_chat(chat)
     return jsonify({"ok": True}), 200
@@ -4994,7 +5059,7 @@ def stream_join(chat_id):
             resp["stock_agent_id"] = stream["stock_agent_id"]
         return jsonify(resp)
 
-    # 2. No in-memory buffer — check the chat object for active agents
+    # 2. No in-memory buffer â€” check the chat object for active agents
     chat, _ = load_chat(chat_id)
     if not chat:
         return jsonify({"events": [], "cursor": 0, "done": True, "error": "not_found"}), 404
@@ -5016,7 +5081,7 @@ def stream_join(chat_id):
             if _active_stock_agents.get(_sid) and not _active_stock_agents[_sid]["done"]:
                 resp["stock_agent_id"] = _sid
 
-    # If chat has _streaming flag but no buffer, the server restarted — clean up
+    # If chat has _streaming flag but no buffer, the server restarted â€” clean up
     if chat.get("_streaming") and not resp.get("research_id") and not resp.get("stock_agent_id"):
         # Check if there's a partial text we can use
         _partial = chat.get("_partial_text", "").strip()
@@ -5029,7 +5094,7 @@ def stream_join(chat_id):
             _clean_partial = re.sub(r'%%%IMGGEN:\d+%%%', '', _clean_partial).strip()
             chat["messages"].append({
                 "role": "model",
-                "text": _clean_partial + "\n\n*[Response interrupted — reconnected from another device]*",
+                "text": _clean_partial + "\n\n*[Response interrupted â€” reconnected from another device]*",
                 "raw_text": _partial,
                 "timestamp": datetime.datetime.now().isoformat(),
                 "interrupted": True,
@@ -5368,7 +5433,7 @@ def chat_message(chat_id):
     except Exception as e:
         err = str(e)
         if any(w in err.lower() for w in ("429", "quota", "rate")):
-            return jsonify({"error": f"Rate limit hit — wait a moment and try again. ({err[:120]})", "files": []})
+            return jsonify({"error": f"Rate limit hit â€” wait a moment and try again. ({err[:120]})", "files": []})
         return jsonify({"error": f"API error: {err}", "files": []})
 
     original_resp = resp
@@ -5554,7 +5619,7 @@ def _fetch_stock_data_dict(ticker):
                             technicals["stoch_rsi"] = round(float(stoch_rsi) * 100, 1)
                     except Exception:
                         pass
-                # ATR(14) — Average True Range (volatility)
+                # ATR(14) â€” Average True Range (volatility)
                 if len(hist) >= 15:
                     try:
                         h_c = hist["High"]
@@ -5639,7 +5704,7 @@ def _fetch_stock_data_dict(ticker):
         shares["institutionPct"] = info.get("heldPercentInstitutions")
         shares["shortShares"] = info.get("sharesShort")
 
-        # Compute a simple health score (0-100) — weighing more factors
+        # Compute a simple health score (0-100) â€” weighing more factors
         score_parts = []
         pm = health.get("profitMargin")
         if pm is not None:
@@ -5865,14 +5930,14 @@ def stock_agent():
         fail_lines = []
         for d in failing:
             price = d.get('price') or d.get('currentPrice') or 0
-            fail_lines.append(f"  ? {d.get('ticker','❌')} — ${price:.2f} (FAILS criteria)")
+            fail_lines.append(f"  ? {d.get('ticker','âŒ')} â€” ${price:.2f} (FAILS criteria)")
         screening_report = "STOCKS THAT FAIL USER'S CRITERIA:\n" + "\n".join(fail_lines) + "\n"
     if passing:
         pass_lines = []
         for d in passing:
             price = d.get('price') or d.get('currentPrice') or 0
             chart_score, chart_verdict = _assess_chart_health(d)
-            pass_lines.append(f"  ? {d.get('ticker','✅')} — ${price:.2f} (passes criteria) | Chart: {chart_verdict} ({chart_score}/100)")
+            pass_lines.append(f"  ? {d.get('ticker','âœ…')} â€” ${price:.2f} (passes criteria) | Chart: {chart_verdict} ({chart_score}/100)")
         screening_report += "STOCKS THAT PASS USER'S CRITERIA:\n" + "\n".join(pass_lines) + "\n"
 
     # Assess chart health for all stocks and add to dump
@@ -5887,10 +5952,10 @@ def stock_agent():
     # If all stocks fail criteria, still analyze them but flag heavily
     # If only some fail, focus analysis on passing stocks but mention failures
     if criteria and failing and not passing:
-        # ALL stocks fail — analyze them anyway but the screening step will flag this
+        # ALL stocks fail â€” analyze them anyway but the screening step will flag this
         analysis_stocks = stock_data_list
     elif criteria and passing:
-        # Some pass — analyze only passing stocks to not waste time on bad picks
+        # Some pass â€” analyze only passing stocks to not waste time on bad picks
         analysis_stocks = passing
     else:
         analysis_stocks = stock_data_list
@@ -5898,7 +5963,7 @@ def stock_agent():
     full_dump = _build_full_stock_dump(analysis_stocks)
     # Prepend chart health and screening info to the data dump
     if chart_assessments:
-        full_dump = "📊 CHART HEALTH ASSESSMENT:\n" + "\n".join(chart_assessments) + "\n\n" + full_dump
+        full_dump = "ðŸ“Š CHART HEALTH ASSESSMENT:\n" + "\n".join(chart_assessments) + "\n\n" + full_dump
     if screening_report:
         full_dump = screening_report + "\n" + full_dump
     if criteria_note:
@@ -5926,7 +5991,7 @@ def stock_agent():
             # Only include previous analysis for steps 2+ to save tokens on step 1
             if all_analysis:
                 prev_text = "\n\n".join(all_analysis)
-                prev_section = f"[YOUR ANALYSIS SO FAR]\n{prev_text}\n\nBuild on this — don't repeat what you've already said.\n\n"
+                prev_section = f"[YOUR ANALYSIS SO FAR]\n{prev_text}\n\nBuild on this â€” don't repeat what you've already said.\n\n"
             else:
                 prev_section = ""
 
@@ -6180,7 +6245,7 @@ def stock_agent_cancel():
 @app.route("/api/detect-tools", methods=["POST"])
 @require_auth_or_guest
 def detect_tools():
-    """Tool detection endpoint — now tools are user-activated only."""
+    """Tool detection endpoint â€” now tools are user-activated only."""
     return jsonify({"tool": None})
 
 
@@ -6356,9 +6421,9 @@ def chat_message_stream(chat_id):
                 # Render's proxy from killing the connection.
                 import queue, threading
                 _SENTINEL = object()
-                _HEARTBEAT_INTERVAL = 3           # seconds — aggressive keepalive to defeat proxy timeouts
+                _HEARTBEAT_INTERVAL = 3           # seconds â€” aggressive keepalive to defeat proxy timeouts
                 _MAX_STALL_HEARTBEATS = 200       # give up after 200 heartbeats (~10min) with no data from model
-                _AUTOSAVE_INTERVAL = 15           # seconds — periodic auto-save of partial content
+                _AUTOSAVE_INTERVAL = 15           # seconds â€” periodic auto-save of partial content
                 _last_autosave = time.time()
                 _stall_count = 0
                 _got_any_content = False           # track if we ever got a real chunk
@@ -6395,7 +6460,7 @@ def chat_message_stream(chat_id):
                     except queue.Empty:
                         _stall_count += 1
                         if _stall_count >= _MAX_STALL_HEARTBEATS:
-                            print(f"  [stream] Stall detected — {_stall_count} heartbeats (~{_stall_count*_HEARTBEAT_INTERVAL}s) with no data. Ending stream.")
+                            print(f"  [stream] Stall detected â€” {_stall_count} heartbeats (~{_stall_count*_HEARTBEAT_INTERVAL}s) with no data. Ending stream.")
                             # Save any partial content before giving up
                             _stall_partial = "".join(pieces).strip() if pieces else ""
                             if _stall_partial:
@@ -6404,7 +6469,7 @@ def chat_message_stream(chat_id):
                                 chat.pop("_partial_thinking", None)
                                 chat["messages"].append({
                                     "role": "model",
-                                    "text": _stall_partial + "\n\n*[Response interrupted — model stalled]*",
+                                    "text": _stall_partial + "\n\n*[Response interrupted â€” model stalled]*",
                                     "raw_text": _stall_partial,
                                     "timestamp": datetime.datetime.now().isoformat(),
                                     "interrupted": True,
@@ -6414,7 +6479,7 @@ def chat_message_stream(chat_id):
                             if not _got_any_content:
                                 yield event({"type": "error", "error": "The model took too long to respond. Try sending your message again."})
                             break
-                        # No data — send padded heartbeat to keep connection alive
+                        # No data â€” send padded heartbeat to keep connection alive
                         # Padding defeats proxy buffering (some proxies wait for N bytes)
                         yield event({"type": "heartbeat", "ts": int(time.time()), "_pad": "k" * 256})
                         # Periodic auto-save during heartbeats
@@ -6476,7 +6541,7 @@ def chat_message_stream(chat_id):
                                 emit_buffer = emit_buffer[close_idx + len(_THINK_CLOSE):]
                                 _in_openai_think = False
                             else:
-                                # Still inside thinking block — emit what we have so far as thinking
+                                # Still inside thinking block â€” emit what we have so far as thinking
                                 if emit_buffer:
                                     thinking_pieces.append(emit_buffer)
                                     yield event({"type": "thinking_delta", "text": emit_buffer})
@@ -6766,7 +6831,7 @@ def chat_message_stream(chat_id):
                     _s["done"] = True
 
     resp = Response(generate(), mimetype="application/x-ndjson")
-    # Anti-proxy-buffering headers — critical for school/corporate WiFi
+    # Anti-proxy-buffering headers â€” critical for school/corporate WiFi
     resp.headers["X-Accel-Buffering"] = "no"           # Nginx
     resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -7017,7 +7082,7 @@ def upload_file():
                         safe = re.sub(r'\.[^.]+$', '.png', safe)
                         converted = True
                     except (ImportError, OSError):
-                        # cairosvg not available — send SVG as text so AI can still read it
+                        # cairosvg not available â€” send SVG as text so AI can still read it
                         try:
                             text = file_bytes.decode("utf-8", errors="replace")
                         except Exception:
@@ -7041,7 +7106,7 @@ def upload_file():
         if not (converted and text):
             img_data = base64.b64encode(file_bytes).decode()
     elif not text:
-        # Non-text, non-image files (PDFs, Word docs, etc.) — store raw bytes
+        # Non-text, non-image files (PDFs, Word docs, etc.) â€” store raw bytes
         DOC_MIMES = ("application/pdf", "application/msword",
                      "application/vnd.openxmlformats-officedocument",
                      "application/rtf", "application/epub", "text/rtf")
@@ -7202,9 +7267,9 @@ gyro_CHANGELOG = [
         "changes": [
             "Code execution now reliably runs, detects generated files, and shows output inline",
             "Generated files (images, PDFs) auto-display with preview and download links in chat",
-            "Developer mode is now live-toggleable — switch back and forth without creating a new chat",
+            "Developer mode is now live-toggleable â€” switch back and forth without creating a new chat",
             "DEV indicator in topbar when developer mode is active",
-            "AI has better 'common sense' for code execution — just does it instead of explaining",
+            "AI has better 'common sense' for code execution â€” just does it instead of explaining",
         ]
     },
     {
@@ -7236,7 +7301,7 @@ gyro_CHANGELOG = [
         "title": "Quality-of-Life Improvements",
         "changes": [
             "Fixed duplicate chat reload when clicking an already-open chat",
-            "Sessions now stay alive during inactivity — no more random logouts",
+            "Sessions now stay alive during inactivity â€” no more random logouts",
             "Added update notification system so you never miss new features",
         ]
     },
@@ -7296,7 +7361,7 @@ def get_greeting():
             f"Quiet hours, clear mind{name_part}.",
             f"The world sleeps{name_part}. You build.",
             f"Night owl mode activated{name_part}.",
-            f"Still going strong{name_part}? 🌙",
+            f"Still going strong{name_part}? ðŸŒ™",
             f"Deep into the night{name_part}.",
             f"Midnight clarity{name_part}.",
             f"The best ideas come late{name_part}.",
@@ -7322,7 +7387,7 @@ def get_greeting():
             f"Keeping momentum this afternoon{name_part}?",
             f"Halfway through the day{name_part}.",
             f"Afternoon push{name_part}. Let's go.",
-            f"Post-lunch productivity{name_part}? 🚀",
+            f"Post-lunch productivity{name_part}? ðŸš€",
             f"Still crushing it{name_part}.",
             f"The afternoon stretch{name_part}.",
             f"Second wind kicking in{name_part}?",
@@ -7336,7 +7401,7 @@ def get_greeting():
             f"Wrapping up the day{name_part}?",
             f"One more thing before tonight{name_part}?",
             f"Good evening{name_part}. What's on your mind?",
-            f"The quiet part of the day{name_part}. 🌅",
+            f"The quiet part of the day{name_part}. ðŸŒ…",
             f"End-of-day clarity{name_part}.",
             f"Evening glow, fresh perspective{name_part}.",
         ],
@@ -7367,7 +7432,7 @@ def home_widgets_route():
 
 # --- Research Agent (multi-step with web search + URL context) ----------------
 
-# ── Cross-device sync: buffer streaming events so another device can join ──
+# â”€â”€ Cross-device sync: buffer streaming events so another device can join â”€â”€
 _active_streams = {}   # chat_id -> {"events": [], "done": bool, "started": float, "research_id": str|None, "stock_agent_id": str|None}
 _active_streams_lock = threading.Lock()
 
@@ -7413,10 +7478,10 @@ def _research_agent_steps(query):
     base_system = (
         "You are an elite intelligence analyst at a Tier-1 research firm. "
         "Your reports are used by executives, policymakers, and domain experts to make critical decisions. "
-        "You have access to Google Search and deep URL reading — USE THEM AGGRESSIVELY. "
+        "You have access to Google Search and deep URL reading â€” USE THEM AGGRESSIVELY. "
         "Search the web multiple times with different queries. Read full pages for primary evidence.\n\n"
         "ABSOLUTE RULES:\n"
-        "1. ALWAYS search the web — never rely on training data alone. Search multiple angles.\n"
+        "1. ALWAYS search the web â€” never rely on training data alone. Search multiple angles.\n"
         "2. Cite EVERY major claim with [Source Title](URL). No uncited assertions.\n"
         "3. Use exact numbers, dates, names, direct quotes from sources. Vague claims = failure.\n"
         "4. Clearly distinguish: confirmed fact vs. expert opinion vs. analysis vs. speculation\n"
@@ -7425,8 +7490,8 @@ def _research_agent_steps(query):
         "7. When sources conflict: present both sides, explain which is more credible and why\n"
         "8. At the end of your response, include a SOURCE LIST in this exact format:\n"
         "   <<<SOURCES>>>\n"
-        "   - [Source Title](URL) — one-line description\n"
-        "   - [Source Title](URL) — one-line description\n"
+        "   - [Source Title](URL) â€” one-line description\n"
+        "   - [Source Title](URL) â€” one-line description\n"
         "   <<<END_SOURCES>>>\n"
         "   This helps track all references across steps.\n\n"
         "TABLE FORMAT:\n"
@@ -7434,17 +7499,17 @@ def _research_agent_steps(query):
         "Example:\n"
         "| Metric | Value | Source | Trend |\n"
         "|---|---:|---|---|\n"
-        "| GDP Growth | 3.2% | [BLS](https://bls.gov) | 📈 |\n"
-        "| Unemployment | 4.1% | [Fed](https://fed.gov) | 📉 |\n"
+        "| GDP Growth | 3.2% | [BLS](https://bls.gov) | ðŸ“ˆ |\n"
+        "| Unemployment | 4.1% | [Fed](https://fed.gov) | ðŸ“‰ |\n"
     )
 
     return [
         {
             "title": "Intelligence Gathering",
-            "icon": "🔍",
+            "icon": "ðŸ”",
             "system": (
                 "You are a research intelligence operative at an elite intelligence agency. "
-                "Your job is to conduct the first wave of information gathering — cast the WIDEST possible net. "
+                "Your job is to conduct the first wave of information gathering â€” cast the WIDEST possible net. "
                 "Search for the topic from EVERY angle: breaking news, academic papers, industry reports, "
                 "government documents, social media discourse, expert blogs, think tank publications, "
                 "and international perspectives. Leave no stone unturned. "
@@ -7459,20 +7524,20 @@ def _research_agent_steps(query):
                 "Execute the initial intelligence sweep. TARGET: 15+ diverse sources.\n\n"
                 "**1. Multi-Angle Search** (search the web AT LEAST 6 TIMES with DIFFERENT query types):\n"
                 "Run these specific types of searches:\n"
-                f"- FACTUAL: \"{query}\" — core topic\n"
+                f"- FACTUAL: \"{query}\" â€” core topic\n"
                 f"- STATISTICAL: \"{query} statistics data numbers 2024 2025\"\n"
                 f"- EXPERT: \"{query} expert analysis opinion\"\n"
                 f"- CRITICAL: \"{query} criticism problems controversy\"\n"
                 f"- RECENT: \"{query} latest news developments\"\n"
                 f"- ACADEMIC: \"{query} research study report\"\n"
                 "Also search for specific sub-topics, related terminology, and key people/organizations involved.\n\n"
-                "**2. Source Mapping** (REQUIRED — create this exact table):\n"
+                "**2. Source Mapping** (REQUIRED â€” create this exact table):\n"
                 "| # | Source | Type | Date | Credibility | Key Contribution |\n"
                 "|---|---|---|---|---|---|\n"
                 "| 1 | [Title](URL) | News/Academic/Gov/Industry | YYYY-MM | High/Med/Low | What this source uniquely adds |\n\n"
                 "Aim for 15+ sources across at least 4 different source types.\n\n"
                 "**3. Initial Findings** (bullet list of 8-12 key facts discovered):\n"
-                "For each finding, include the specific source: \"[fact statement] — [Source](URL)\"\n\n"
+                "For each finding, include the specific source: \"[fact statement] â€” [Source](URL)\"\n\n"
                 "**4. Research Gaps & Priority Targets:**\n"
                 "- List 3-5 specific unanswered questions\n"
                 "- Name 3-5 specific URLs that need deep reading in the next step\n"
@@ -7481,13 +7546,13 @@ def _research_agent_steps(query):
         },
         {
             "title": "Deep Source Analysis",
-            "icon": "📖",
+            "icon": "ðŸ“–",
             "system": base_system + (
                 "\n\nYour role: PRIMARY SOURCE ANALYST. "
-                "You have URL context ability — you can READ FULL WEB PAGES. Use this power. "
+                "You have URL context ability â€” you can READ FULL WEB PAGES. Use this power. "
                 "Read the most important sources found in the previous step in their entirety. "
                 "Extract detailed data, statistics, quotes, methodologies, and evidence. "
-                "Don't just skim — read deeply and extract everything valuable. "
+                "Don't just skim â€” read deeply and extract everything valuable. "
                 "For each source you read, write a detailed extraction brief with exact data."
             ),
             "web_search": True,
@@ -7502,7 +7567,7 @@ def _research_agent_steps(query):
                 "- **Publisher/Author**: Who created this and their credibility\n"
                 "- **Date**: When published/updated\n"
                 "- **Key Data Points**: List every specific number, statistic, percentage, dollar amount\n"
-                "- **Direct Quotes** (copy exact words): \"quote\" — attribution\n"
+                "- **Direct Quotes** (copy exact words): \"quote\" â€” attribution\n"
                 "- **Methodology**: How did they get their data? Sample size? Timeframe?\n"
                 "- **Key Arguments**: What does this source argue/conclude?\n"
                 "- **Potential Bias**: Any agenda, funding source, or perspective bias?\n"
@@ -7517,12 +7582,12 @@ def _research_agent_steps(query):
                 "**3. Evidence Inventory Table:**\n"
                 "| Evidence | Type | Source | Confidence | Verified By |\n"
                 "|---|---|---|---|---|\n"
-                "| [specific fact/stat] | Stat/Quote/Claim | [Source](URL) | 🟢/🟡/🔴 | [cross-ref] |"
+                "| [specific fact/stat] | Stat/Quote/Claim | [Source](URL) | ðŸŸ¢/ðŸŸ¡/ðŸ”´ | [cross-ref] |"
             ),
         },
         {
             "title": "Fact Verification",
-            "icon": "✅",
+            "icon": "âœ…",
             "system": base_system + (
                 "\n\nYour role: FACT CHECKER AND SKEPTIC. "
                 "Cross-reference every major claim against multiple independent sources. "
@@ -7536,10 +7601,10 @@ def _research_agent_steps(query):
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
                 "Verify and cross-reference ALL major findings from Steps 1-2.\n\n"
-                "**1. Claim Verification Matrix** (REQUIRED — check every major claim):\n"
+                "**1. Claim Verification Matrix** (REQUIRED â€” check every major claim):\n"
                 "| # | Claim | Original Source | Confirming Sources | Contradicting Sources | Verdict |\n"
                 "|---|---|---|---|---|---|\n"
-                "| 1 | [Specific claim] | [Source](URL) | [Src2](URL), [Src3](URL) | None OR [Src](URL) | 🟢 Confirmed / 🟡 Partially / 🔴 Disputed |\n\n"
+                "| 1 | [Specific claim] | [Source](URL) | [Src2](URL), [Src3](URL) | None OR [Src](URL) | ðŸŸ¢ Confirmed / ðŸŸ¡ Partially / ðŸ”´ Disputed |\n\n"
                 "Check at least 8-10 key claims.\n\n"
                 "**2. Contradiction Deep-Dive:**\n"
                 "For EACH contradiction found:\n"
@@ -7555,18 +7620,18 @@ def _research_agent_steps(query):
                 "**4. Overall Confidence Assessment:**\n"
                 "| Area | Confidence | Basis | What Would Change This |\n"
                 "|---|---|---|---|\n"
-                "| [topic area] | 🟢/🟡/🔴 | [why] | [what evidence would change rating] |"
+                "| [topic area] | ðŸŸ¢/ðŸŸ¡/ðŸ”´ | [why] | [what evidence would change rating] |"
             ),
         },
         {
             "title": "Perspectives & Context",
-            "icon": "👥",
+            "icon": "ðŸ‘¥",
             "system": base_system + (
                 "\n\nYour role: EXPERT OPINION ANALYST AND CONTEXTUALIZER. "
                 "Find what the leading experts, institutions, and stakeholders say about this topic. "
                 "Search for interviews, papers, and commentary from domain authorities. "
                 "Map out the different perspectives and schools of thought. "
-                "Search for expert names specifically — find their published positions and direct quotes. "
+                "Search for expert names specifically â€” find their published positions and direct quotes. "
                 "Provide historical context: how did we get here, and what trajectory are we on?"
             ),
             "web_search": True,
@@ -7604,7 +7669,7 @@ def _research_agent_steps(query):
         },
         {
             "title": "Evidence & Data Analysis",
-            "icon": "📊",
+            "icon": "ðŸ“Š",
             "system": base_system + (
                 "\n\nYour role: SENIOR DATA ANALYST. "
                 "Compile ALL quantitative data found across all previous steps into structured tables. "
@@ -7621,7 +7686,7 @@ def _research_agent_steps(query):
                 "**1. Master Data Table** (compile ALL numbers from every step):\n"
                 "| # | Metric/Indicator | Value | Date | Source | Trend | Notes |\n"
                 "|---|---|---:|---|---|---|---|\n"
-                "| 1 | [metric name] | [exact number] | [date] | [Source](URL) | ↑/↓/→ | [context] |\n\n"
+                "| 1 | [metric name] | [exact number] | [date] | [Source](URL) | â†‘/â†“/â†’ | [context] |\n\n"
                 "Include EVERY statistic, percentage, dollar amount, count, etc. found.\n\n"
                 "**2. Missing Data Search** (search 3-4 more times for gaps):\n"
                 f"Search specifically for: \"{query} statistics report data\" and variations.\n"
@@ -7644,15 +7709,15 @@ def _research_agent_steps(query):
         },
         {
             "title": "Synthesis & Insights",
-            "icon": "🧠",
+            "icon": "ðŸ§ ",
             "system": (
                 "You are a master strategist and synthesizer at a Tier-1 intelligence firm. "
                 "Your job is to transform all previous research into crystal-clear, actionable intelligence. "
                 "Identify the key themes, connect dots between different findings, and surface non-obvious insights. "
                 "Think like a senior advisor briefing a decision-maker. "
-                "Be BOLD — state what the evidence means, don't just summarize it. "
+                "Be BOLD â€” state what the evidence means, don't just summarize it. "
                 "Identify what others would miss. Challenge conventional wisdom where the evidence supports it. "
-                "Your output should contain ZERO new searches — only synthesis of what's been found."
+                "Your output should contain ZERO new searches â€” only synthesis of what's been found."
             ),
             "web_search": False,
             "url_context": False,
@@ -7661,10 +7726,10 @@ def _research_agent_steps(query):
                 "Synthesize ALL research from Steps 1-5 into actionable intelligence.\n\n"
                 "**1. Core Findings** (exactly 6-8 of the MOST important discoveries):\n"
                 "For each finding:\n"
-                "- 📌 **Finding**: Clear, one-sentence statement of the finding\n"
+                "- ðŸ“Œ **Finding**: Clear, one-sentence statement of the finding\n"
                 "- **Why It Matters**: One sentence on significance\n"
                 "- **Evidence**: 2-3 specific data points/quotes that support this\n"
-                "- **Confidence**: 🟢 High / 🟡 Medium / 🔴 Low — with reason\n"
+                "- **Confidence**: ðŸŸ¢ High / ðŸŸ¡ Medium / ðŸ”´ Low â€” with reason\n"
                 "- **Source(s)**: [Citation1](URL), [Citation2](URL)\n\n"
                 "**2. Non-Obvious Connections:**\n"
                 "Identify 3-5 insights that only emerge from combining different research threads:\n"
@@ -7676,7 +7741,7 @@ def _research_agent_steps(query):
                 "|---|---|---|---|---|---|\n"
                 "| [specific factor] | Risk/Opportunity | High/Med/Low | High/Med/Low | Near/Med/Long | [source] |\n\n"
                 "**4. Confidence Dashboard:**\n"
-                "- Overall research confidence: [High/Medium/Low] — [justification]\n"
+                "- Overall research confidence: [High/Medium/Low] â€” [justification]\n"
                 "- Strongest evidence: [top 3 areas where evidence is rock-solid]\n"
                 "- Weakest evidence: [top 3 areas where evidence is thin]\n"
                 "- Total independent sources: [count from all steps]\n"
@@ -7687,13 +7752,13 @@ def _research_agent_steps(query):
         },
         {
             "title": "Conclusions & Assessment",
-            "icon": "🎯",
+            "icon": "ðŸŽ¯",
             "system": (
                 "You are a strategic advisor delivering forward-looking analysis to a senior decision-maker. "
                 "Based on all research, provide scenario planning, actionable recommendations, and "
                 "an assessment of what comes next. Think about implications, second-order effects, "
                 "and what the reader should actually DO with this information. "
-                "Be specific and concrete — no vague advice. Each recommendation must be actionable."
+                "Be specific and concrete â€” no vague advice. Each recommendation must be actionable."
             ),
             "web_search": False,
             "url_context": False,
@@ -7705,9 +7770,9 @@ def _research_agent_steps(query):
                 "**2. Scenario Analysis:**\n"
                 "| Scenario | Description | Probability | Key Drivers | Indicators |\n"
                 "|---|---|---|---|---|\n"
-                "| 🟢 Best Case | [specific outcome] | [X]% | [what causes this] | [early signs] |\n"
-                "| 🟡 Base Case | [most likely outcome] | [X]% | [why likely] | [current trajectory] |\n"
-                "| 🔴 Worst Case | [specific negative outcome] | [X]% | [what causes this] | [warning signs] |\n\n"
+                "| ðŸŸ¢ Best Case | [specific outcome] | [X]% | [what causes this] | [early signs] |\n"
+                "| ðŸŸ¡ Base Case | [most likely outcome] | [X]% | [why likely] | [current trajectory] |\n"
+                "| ðŸ”´ Worst Case | [specific negative outcome] | [X]% | [what causes this] | [warning signs] |\n\n"
                 "**3. Actionable Recommendations** (5-8, numbered, specific):\n"
                 "For each recommendation:\n"
                 "1. **[Action verb] [Specific action]**\n"
@@ -7715,33 +7780,33 @@ def _research_agent_steps(query):
                 "   - *Priority*: High/Medium/Low\n"
                 "   - *Timeline*: When to act\n"
                 "   - *Expected outcome*: What this achieves\n\n"
-                "**4. What to Watch — Monitor Board:**\n"
+                "**4. What to Watch â€” Monitor Board:**\n"
                 "| # | Indicator | Why It Matters | Trigger Level | Check Frequency |\n"
                 "|---|---|---|---|---|\n"
                 "| 1 | [specific metric/event] | [significance] | [what threshold matters] | Daily/Weekly/Monthly |\n\n"
                 "**5. Second-Order Effects:**\n"
                 "Map 3-5 ripple effects that aren't immediately obvious:\n"
-                "- [Primary event] → [Direct impact] → [Second-order effect] → [Why this matters]"
+                "- [Primary event] â†’ [Direct impact] â†’ [Second-order effect] â†’ [Why this matters]"
             ),
         },
         {
             "title": "Final Intelligence Brief",
-            "icon": "📋",
+            "icon": "ðŸ“‹",
             "system": (
                 "You are a senior intelligence briefing writer at a world-class consultancy. "
                 "Produce the final, publication-quality intelligence brief. It must be comprehensive "
                 "yet scannable, authoritative yet accessible, and immediately actionable. "
                 "This brief will be the PRIMARY REFERENCE DOCUMENT for the reader. "
                 "Include ALL sources with clickable URLs. Use clear hierarchy, bold key points, "
-                "and markdown tables for tabular data. Write with precision — every sentence must earn its place."
+                "and markdown tables for tabular data. Write with precision â€” every sentence must earn its place."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
                 "You have completed 7 research steps. Now produce the DEFINITIVE intelligence brief.\n"
-                "This must be a COMPLETE, standalone document — the reader should not need to look elsewhere.\n\n"
-                "## 📋 Intelligence Brief\n"
+                "This must be a COMPLETE, standalone document â€” the reader should not need to look elsewhere.\n\n"
+                "## ðŸ“‹ Intelligence Brief\n"
                 f"**Subject:** {query}\n\n"
                 "---\n\n"
                 "### TL;DR\n"
@@ -7755,7 +7820,7 @@ def _research_agent_steps(query):
                 "- Key facts with source citations: [Title](URL)\n"
                 "- Data tables (markdown) where numbers tell the story\n"
                 "- Expert quotes with attribution\n"
-                "- Confidence tag: 🟢 High / 🟡 Medium / 🔴 Low\n\n"
+                "- Confidence tag: ðŸŸ¢ High / ðŸŸ¡ Medium / ðŸ”´ Low\n\n"
                 "### Analysis & Implications\n"
                 "- What the findings MEAN (not just what they are)\n"
                 "- Key trends and where they're heading\n"
@@ -7768,26 +7833,26 @@ def _research_agent_steps(query):
                 "Table of key indicators, events, and monitoring recommendations.\n\n"
                 "### Sources & References\n"
                 "Complete list of ALL sources used across ALL steps:\n"
-                "- [Source Title](URL) — one-line summary of what it contributed\n\n"
+                "- [Source Title](URL) â€” one-line summary of what it contributed\n\n"
                 "List every single URL discovered. Be exhaustive."
             ),
         },
         {
             "title": "Comprehensive Report",
-            "icon": "📝",
+            "icon": "ðŸ“",
             "system": (
                 "You are an expert report writer producing the definitive comprehensive document. "
                 "Combine ALL findings from the previous 8 research steps into one unified, "
                 "well-structured, publication-ready report. Use rich markdown formatting. "
                 "Every claim must be cited with [Source Title](URL). "
-                "This is the LONGEST output — be thorough and detailed. Cover everything."
+                "This is the LONGEST output â€” be thorough and detailed. Cover everything."
             ),
             "web_search": False,
             "url_context": False,
             "prompt": (
                 f"RESEARCH MISSION: {query}\n\n"
                 "Write the COMPREHENSIVE FINAL REPORT. This is the complete, detailed reference document.\n"
-                "Cover EVERYTHING from all 8 previous steps. Be thorough — aim for maximum detail.\n\n"
+                "Cover EVERYTHING from all 8 previous steps. Be thorough â€” aim for maximum detail.\n\n"
                 f"## Comprehensive Research Report: {query}\n\n"
                 "---\n\n"
                 "### Executive Overview\n"
@@ -7796,10 +7861,10 @@ def _research_agent_steps(query):
                 "Organize into 4-6 major sections. For each:\n"
                 "- Descriptive subheading\n"
                 "- Detailed explanation with specific facts, dates, exact numbers\n"
-                "- Direct quotes from sources: \"quote\" — [Source](URL)\n"
+                "- Direct quotes from sources: \"quote\" â€” [Source](URL)\n"
                 "- Data tables where applicable\n"
                 "- Expert perspectives from Step 4\n"
-                "- Verification status from Step 3: 🟢/🟡/🔴\n\n"
+                "- Verification status from Step 3: ðŸŸ¢/ðŸŸ¡/ðŸ”´\n\n"
                 "### Data & Evidence\n"
                 "Include the key data tables from Step 5.\n"
                 "Add comparative analyses and trend data.\n\n"
@@ -7845,7 +7910,7 @@ def research_plan():
                 f"\"{query}\"\n\n"
                 "Generate 2-3 clarifying questions that would help focus and improve the research. "
                 "For EACH question, provide 2-4 quick-tap answer choices plus an open-ended option.\n\n"
-                "Return ONLY valid JSON — an array of objects, each with:\n"
+                "Return ONLY valid JSON â€” an array of objects, each with:\n"
                 "  \"question\": the question text,\n"
                 "  \"choices\": array of short answer strings (2-4 choices, last one can be broader like \"All of the above\" or \"Other\")\n\n"
                 "Example:\n"
@@ -7972,8 +8037,8 @@ def research_agent():
             low = txt.lower()
             return any(p in low for p in _SKIP_PHRASES)
 
-        # 📌 Finding pattern
-        for m in re.finditer(r'📌\s*\*\*([^*]+)\*\*[:\s]*([^\n]*)', text):
+        # ðŸ“Œ Finding pattern
+        for m in re.finditer(r'ðŸ“Œ\s*\*\*([^*]+)\*\*[:\s]*([^\n]*)', text):
             f = m.group(1).strip()
             desc = m.group(2).strip()
             if desc:
@@ -7994,15 +8059,15 @@ def research_agent():
             if key not in seen and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
-        # 🟢/🟡/🔴 confidence-tagged items
-        for m in re.finditer(r'[🟢🟡🔴]\s*\*\*([^*]{5,80})\*\*', text):
+        # ðŸŸ¢/ðŸŸ¡/ðŸ”´ confidence-tagged items
+        for m in re.finditer(r'[ðŸŸ¢ðŸŸ¡ðŸ”´]\s*\*\*([^*]{5,80})\*\*', text):
             f = m.group(1).strip()
             key = f.lower()[:50]
             if key not in seen and len(f) > 10 and not _is_instructional(f):
                 seen.add(key)
                 findings.append(f)
         # Numbered findings: "1. **..." or "- **..."
-        for m in re.finditer(r'(?:^|\n)\s*(?:\d+[\.\)]\s*|[-•]\s*)\*\*([^*]{8,80})\*\*', text):
+        for m in re.finditer(r'(?:^|\n)\s*(?:\d+[\.\)]\s*|[-â€¢]\s*)\*\*([^*]{8,80})\*\*', text):
             f = m.group(1).strip()
             key = f.lower()[:50]
             if key not in seen and len(f) > 10 and not _is_instructional(f):
@@ -8036,15 +8101,15 @@ def research_agent():
         _HEARTBEAT_SEC = 3  # Send keepalive every 3s to prevent proxy/browser timeouts
 
         print(f"  [research] Starting research with {len(steps)} steps, model={model}, query={query[:80]}")
-        # Immediate first byte — prevents Render's 30s proxy timeout from killing the connection
+        # Immediate first byte â€” prevents Render's 30s proxy timeout from killing the connection
         yield evt({"type": "heartbeat"})
         yield evt({"type": "agent_start", "total_steps": len(steps), "query": query,
-                    "step_meta": [{"title": s["title"], "icon": s.get("icon", "📄")} for s in steps]})
+                    "step_meta": [{"title": s["title"], "icon": s.get("icon", "ðŸ“„")} for s in steps]})
 
         for i, step in enumerate(steps):
             step_start = _time.time()
             yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                        "icon": step.get("icon", "📄"), "status": "running"})
+                        "icon": step.get("icon", "ðŸ“„"), "status": "running"})
 
             # Smart context: summarize earlier steps to avoid token overflow
             if len(all_research) <= 3:
@@ -8053,20 +8118,20 @@ def research_agent():
                 # Keep first 2 and last 2 in full, summarize middle
                 early = "\n\n".join(all_research[:2])
                 recent = "\n\n".join(all_research[-2:])
-                prev_text = f"{early}\n\n[... earlier research steps omitted for brevity — key findings are incorporated in the recent steps below ...]\n\n{recent}"
+                prev_text = f"{early}\n\n[... earlier research steps omitted for brevity â€” key findings are incorporated in the recent steps below ...]\n\n{recent}"
 
             if all_research:
                 prev_section = (
-                    f"[YOUR RESEARCH SO FAR — {len(all_research)} steps completed]\n"
+                    f"[YOUR RESEARCH SO FAR â€” {len(all_research)} steps completed]\n"
                     f"{prev_text}\n\n"
-                    f"Build on this research — don't repeat what you've already found. Go deeper, find NEW information.\n\n"
+                    f"Build on this research â€” don't repeat what you've already found. Go deeper, find NEW information.\n\n"
                 )
             else:
                 prev_section = ""
 
             messages = [{
                 "role": "user",
-                "text": f"{prev_section}[YOUR TASK — STEP {i+1}/{len(steps)}: {step['title']}]\n{step['prompt']}",
+                "text": f"{prev_section}[YOUR TASK â€” STEP {i+1}/{len(steps)}: {step['title']}]\n{step['prompt']}",
             }]
 
             use_web = step.get("web_search", False)
@@ -8193,7 +8258,7 @@ def research_agent():
                                 try:
                                     chunk = _chunk_q.get(timeout=_HEARTBEAT_SEC)
                                 except _queue.Empty:
-                                    # No data for a while — send heartbeat to keep connection alive
+                                    # No data for a while â€” send heartbeat to keep connection alive
                                     yield evt({"type": "heartbeat"})
                                     continue
                                 if chunk is _SENTINEL:
@@ -8249,7 +8314,7 @@ def research_agent():
                                 _turn < MAX_TURNS_PER_STEP - 1
                                 and _att.get("web")
                                 and len(_turn_text) < 800
-                                and _turn_text.rstrip().endswith(("...", "…", ":"))
+                                and _turn_text.rstrip().endswith(("...", "â€¦", ":"))
                             )
                             if not _needs_more:
                                 break
@@ -8266,7 +8331,7 @@ def research_agent():
                                 )]
                             ))
                             yield evt({"type": "agent_thinking", "step": i + 1,
-                                       "text": "\n\n[Continuing research — additional turn...]\n"})
+                                       "text": "\n\n[Continuing research â€” additional turn...]\n"})
                     else:
                         stream_fn = STREAM_PROVIDERS.get(provider)
                         if stream_fn:
@@ -8289,14 +8354,14 @@ def research_agent():
                             step_pieces.append(full)
                             yield evt({"type": "agent_delta", "step": i + 1, "text": full})
 
-                    # If we got here with content, success — UNLESS repetition was detected
+                    # If we got here with content, success â€” UNLESS repetition was detected
                     if _repetition_detected:
                         # Repetition detected = treat as failure, RESTART the step
-                        _last_err = Exception("Repetitive pattern detected — restarting step")
+                        _last_err = Exception("Repetitive pattern detected â€” restarting step")
                         print(f"  [research] Step {i+1} attempt {_att_idx+1}: repetition detected, RESTARTING step...")
                         # Re-emit agent_step running to tell frontend to CLEAR old content
                         yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                                    "icon": step.get("icon", "📄"), "status": "running"})
+                                    "icon": step.get("icon", "ðŸ“„"), "status": "running"})
                         continue  # Try next attempt
                     elif "".join(step_pieces).strip():
                         step_success = True
@@ -8343,14 +8408,14 @@ def research_agent():
                 elapsed = round(_time.time() - step_start, 1)
                 step_durations.append({"step": i + 1, "title": step["title"], "elapsed": elapsed})
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                            "icon": step.get("icon", "📄"), "status": "complete", "elapsed": elapsed,
+                            "icon": step.get("icon", "ðŸ“„"), "status": "complete", "elapsed": elapsed,
                             "word_count": step_word_count, "source_count": len(new_sources)})
             else:
                 elapsed = round(_time.time() - step_start, 1)
                 err_msg = str(_last_err)[:200] if _last_err else "All attempts failed"
                 all_research.append(f"## {step['title']}\n*Research step failed: {err_msg[:100]}*")
                 yield evt({"type": "agent_step", "step": i + 1, "title": step["title"],
-                            "icon": step.get("icon", "📄"), "status": "failed",
+                            "icon": step.get("icon", "ðŸ“„"), "status": "failed",
                             "error": err_msg, "elapsed": elapsed})
 
         full_report = "\n\n".join(all_research)
@@ -8586,483 +8651,15 @@ def research_agent_cancel():
     return jsonify({"ok": True})
 
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  CODER — Integrated AI Coding Agent
-# ══════════════════════════════════════════════════════════════════════════════
-
-CODER_DIR  = WORKSPACE / "Coder"
-CODER_DATA = CODER_DIR / ".coder_data"
-CODER_CHATS = CODER_DATA / "chats"
-CODER_CFG  = CODER_DIR / ".coder_config.json"
-
-CODER_MODELS = {
-    "gemma-4-31b-it":      {"label": "Gemma 4 31B",      "desc": "Dense 31B · 256K context"},
-    "gemma-4-26b-a4b-it":  {"label": "Gemma 4 26B MoE",  "desc": "MoE · 4B active params"},
-    "gemini-2.5-flash":    {"label": "Gemini 2.5 Flash",  "desc": "Fast & capable"},
-    "gemini-2.5-pro":      {"label": "Gemini 2.5 Pro",    "desc": "Most capable Gemini"},
-}
-
-CODER_IGNORE_DIRS = {'.git','__pycache__','node_modules','.venv','venv',
-                     '.next','dist','build','.cache','.coder_data','__MACOSX',
-                     '.eggs','.tox','.mypy_cache','.pytest_cache'}
-CODER_IGNORE_FILES = {'.DS_Store','Thumbs.db','.env'}
-
-CODER_DANGEROUS_CMD = [
-    r'\brm\s+-r', r'\brmdir\s+/s', r'\bdel\s+/[sfq]', r'\bformat\b',
-    r'\bdrop\s+(database|table)', r'\bshutdown\b', r'\bmkfs\b',
-    r'\bdd\s+if=', r'>\s*/dev/sd', r'\breg\s+delete\b',
-]
-
-# ── Coder helpers ────────────────────────────────────────────────────────────
-
-def _coder_safe(root, rel):
-    r = Path(root).resolve()
-    t = (r / rel).resolve()
-    if not str(t).startswith(str(r)):
-        raise ValueError("Path traversal blocked")
-    return t
-
-def _coder_load_config():
-    CODER_DIR.mkdir(parents=True, exist_ok=True)
-    if CODER_CFG.exists():
-        try: return json.loads(CODER_CFG.read_text("utf-8"))
-        except Exception: pass
-    return {"api_key":"","model":"gemma-4-31b-it","mode":"auto","project_path":""}
-
-def _coder_save_config(cfg):
-    CODER_DIR.mkdir(parents=True, exist_ok=True)
-    CODER_CFG.write_text(json.dumps(cfg, indent=2), "utf-8")
-
-def _coder_list_dir(root, rel="."):
-    t = _coder_safe(root, rel)
-    if not t.is_dir(): return {"error": f"Not a directory: {rel}"}
-    items = []
-    for p in sorted(t.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
-        if p.is_dir() and p.name in CODER_IGNORE_DIRS: continue
-        if p.is_file() and p.name in CODER_IGNORE_FILES: continue
-        items.append({"name":p.name,"path":str(p.relative_to(Path(root).resolve())).replace("\\","/"),"type":"dir" if p.is_dir() else "file"})
-    return {"items": items}
-
-def _coder_read_file(root, rel):
-    t = _coder_safe(root, rel)
-    if not t.is_file(): return {"error": f"Not found: {rel}"}
-    try: return {"content":t.read_text("utf-8",errors="replace"),"path":rel,"size":t.stat().st_size}
-    except Exception as e: return {"error":str(e)}
-
-def _coder_write_file(root, rel, content):
-    t = _coder_safe(root, rel)
-    t.parent.mkdir(parents=True, exist_ok=True)
-    t.write_text(content, "utf-8")
-    return {"ok":True,"path":rel}
-
-def _coder_edit_file(root, rel, find, replace):
-    t = _coder_safe(root, rel)
-    if not t.is_file(): return {"error": f"Not found: {rel}"}
-    src = t.read_text("utf-8")
-    if find not in src: return {"error": f"Text not found in {rel}"}
-    t.write_text(src.replace(find, replace, 1), "utf-8")
-    return {"ok":True,"path":rel}
-
-def _coder_delete_path(root, rel):
-    t = _coder_safe(root, rel)
-    if t == Path(root).resolve(): return {"error":"Cannot delete project root"}
-    if t.is_file(): t.unlink()
-    elif t.is_dir(): import shutil; shutil.rmtree(t)
-    else: return {"error": f"Not found: {rel}"}
-    return {"ok":True,"path":rel}
-
-def _coder_search_text(root, query, rel="."):
-    base = Path(root).resolve()
-    t = _coder_safe(root, rel)
-    hits = []
-    for p in t.rglob("*"):
-        if not p.is_file(): continue
-        if any(d in p.parts for d in CODER_IGNORE_DIRS): continue
-        try:
-            for i, ln in enumerate(p.read_text("utf-8","ignore").splitlines(), 1):
-                if query.lower() in ln.lower():
-                    hits.append({"file":str(p.relative_to(base)).replace("\\","/"),"line":i,"text":ln.strip()[:200]})
-                    if len(hits) >= 60: return {"results":hits,"truncated":True}
-        except Exception: pass
-    return {"results":hits,"truncated":False}
-
-def _coder_run_cmd(root, cmd, timeout=120):
-    for pat in CODER_DANGEROUS_CMD:
-        if re.search(pat, cmd, re.I):
-            return {"error":"Blocked dangerous command","blocked":True}
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           cwd=root, timeout=timeout,
-                           env={**os.environ,"PYTHONIOENCODING":"utf-8"})
-        return {"stdout":(r.stdout or "")[-12000:],"stderr":(r.stderr or "")[-6000:],"code":r.returncode}
-    except subprocess.TimeoutExpired:
-        return {"error":f"Timed out ({timeout}s)","code":-1}
-    except Exception as e:
-        return {"error":str(e),"code":-1}
-
-def _coder_build_tree(root, max_depth=3, max_files=120):
-    base = Path(root).resolve()
-    lines, count = [], [0]
-    def walk(d, pre="", depth=0):
-        if depth > max_depth or count[0] > max_files: return
-        try: entries = sorted(d.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-        except PermissionError: return
-        dirs  = [e for e in entries if e.is_dir()  and e.name not in CODER_IGNORE_DIRS]
-        files = [e for e in entries if e.is_file() and e.name not in CODER_IGNORE_FILES]
-        all_items = dirs + files
-        for i, item in enumerate(all_items):
-            last = (i==len(all_items)-1)
-            conn = "└── " if last else "├── "
-            suffix = "/" if item.is_dir() else ""
-            lines.append(f"{pre}{conn}{item.name}{suffix}")
-            count[0] += 1
-            if item.is_dir(): walk(item, pre+("    " if last else "│   "), depth+1)
-    walk(base)
-    return "\n".join(lines) if lines else "(empty project)"
-
-# ── Coder conversations ─────────────────────────────────────────────────────
-
-def _coder_conv_path(cid): return CODER_CHATS / f"{cid}.json"
-
-def _coder_list_convs():
-    CODER_CHATS.mkdir(parents=True, exist_ok=True)
-    convs = []
-    for f in sorted(CODER_CHATS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            d = json.loads(f.read_text("utf-8"))
-            convs.append({"id":d["id"],"title":d.get("title","Untitled"),"updated":d.get("updated",0)})
-        except Exception: pass
-    return convs
-
-def _coder_load_conv(cid):
-    p = _coder_conv_path(cid)
-    if p.exists(): return json.loads(p.read_text("utf-8"))
-    return None
-
-def _coder_save_conv(conv):
-    CODER_CHATS.mkdir(parents=True, exist_ok=True)
-    conv["updated"] = time.time()
-    _coder_conv_path(conv["id"]).write_text(json.dumps(conv, ensure_ascii=False), "utf-8")
-
-def _coder_delete_conv(cid):
-    p = _coder_conv_path(cid)
-    if p.exists(): p.unlink()
-
-def _coder_new_conv():
-    c = {"id":uuid.uuid4().hex[:12],"title":"New Chat","messages":[],"model_history":[],"created":time.time(),"updated":time.time()}
-    _coder_save_conv(c)
-    return c
-
-# ── Coder system prompt ─────────────────────────────────────────────────────
-
-_CODER_MODE_INSTRUCTIONS = {
-    "auto": "You are in AUTO mode. Execute tools immediately as needed to accomplish the task. Act decisively and efficiently. Do not ask for permission — just do the work.",
-    "ask": "You are in ASK mode. Before executing ANY tool, describe exactly what you plan to do and why. List the specific files you'll change and commands you'll run. Then STOP and wait for the user to say 'go ahead', 'yes', 'do it', or similar before proceeding. If the user hasn't approved yet, do NOT output any <tool_call> blocks.",
-    "plan": "You are in PLAN mode. First, create a comprehensive numbered plan listing ALL changes needed — every file to create/edit, every command to run, and why. Present the full plan. STOP and wait for the user to approve. Only after explicit approval, execute the entire plan step by step.",
-}
-
-def _coder_system_prompt(project_path, mode, tree=""):
-    return f"""You are **Coder**, an expert AI coding agent built for software development. You think step-by-step, write clean code, and use tools to interact with the user's project.
-
-## TOOLS
-Use these tools by outputting a tool_call block. Use EXACTLY this format:
-
-<tool_call>
-{{"name": "tool_name", "args": {{"param": "value"}}}}
-</tool_call>
-
-Available tools:
-
-| Tool | Args | Description |
-|------|------|-------------|
-| read_file | path | Read a file's contents |
-| write_file | path, content | Create or overwrite a file |
-| edit_file | path, find, replace | Find-and-replace in a file (first match) |
-| run_command | command | Run a shell command |
-| list_dir | path (default ".") | List directory contents |
-| search | query, path (default ".") | Search text across files |
-| delete | path | Delete a file or directory |
-
-## RULES
-1. **Always read before editing.** Never guess file contents — use read_file first.
-2. **Minimal edits.** Use edit_file for targeted changes. Only use write_file for new files or full rewrites.
-3. **Explain your reasoning.** Before acting, briefly explain what you're doing and why.
-4. **Test when possible.** After making changes, run tests or verify the code works.
-5. **One tool per block.** Each <tool_call> block should contain exactly one tool call.
-6. **Handle errors.** If a tool returns an error, explain the issue and try an alternative approach.
-7. **Security first.** Never write secrets/passwords in code. Never run destructive commands without thinking.
-8. **Clean code.** Follow the project's existing style, conventions, and patterns.
-
-## MODE
-{_CODER_MODE_INSTRUCTIONS.get(mode, _CODER_MODE_INSTRUCTIONS["auto"])}
-
-## PROJECT
-Working directory: {project_path}
-
-```
-{tree}
-```
-
-## RESPONSE STYLE
-- Use markdown formatting for explanations
-- Show code in fenced blocks with language tags
-- Be concise but thorough
-- When showing diffs or changes, be specific about what changed and why
-- If a task is ambiguous, state your interpretation before proceeding
-"""
-
-# ── Coder tool parsing ───────────────────────────────────────────────────────
-
-_CODER_TOOL_RE = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
-
-def _coder_parse_tools(text):
-    calls = []
-    for m in _CODER_TOOL_RE.finditer(text):
-        try: calls.append(json.loads(m.group(1)))
-        except json.JSONDecodeError: pass
-    return calls
-
-def _coder_strip_tools(text):
-    return _CODER_TOOL_RE.sub("", text).strip()
-
-def _coder_exec_tool(tc, root):
-    name = tc.get("name","")
-    args = tc.get("args",{})
-    try:
-        if name == "read_file": return _coder_read_file(root, args["path"])
-        elif name == "write_file": return _coder_write_file(root, args["path"], args["content"])
-        elif name == "edit_file": return _coder_edit_file(root, args["path"], args["find"], args["replace"])
-        elif name == "run_command": return _coder_run_cmd(root, args["command"], timeout=args.get("timeout",120))
-        elif name == "list_dir": return _coder_list_dir(root, args.get("path","."))
-        elif name == "search": return _coder_search_text(root, args["query"], args.get("path","."))
-        elif name == "delete": return _coder_delete_path(root, args["path"])
-        else: return {"error":f"Unknown tool: {name}"}
-    except Exception as e: return {"error":str(e)}
-
-def _coder_truncate_result(result):
-    if isinstance(result, dict):
-        r = dict(result)
-        if "content" in r and isinstance(r["content"], str) and len(r["content"]) > 3000:
-            r["content"] = r["content"][:3000] + f"\n... ({len(result['content'])} chars total)"
-        if "stdout" in r and isinstance(r["stdout"], str) and len(r["stdout"]) > 3000:
-            r["stdout"] = r["stdout"][:3000] + "\n... (truncated)"
-        if "results" in r and isinstance(r["results"], list) and len(r["results"]) > 20:
-            r["results"] = r["results"][:20]; r["truncated"] = True
-        return r
-    return result
-
-def _coder_sse(data):
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-# ── Coder agent loop ────────────────────────────────────────────────────────
-
-_CODER_MAX_TURNS = 25
-
-def _coder_agent_stream(conv_id, user_text):
-    cfg   = _coder_load_config()
-    # Use Gyro's Google key as fallback
-    key   = cfg.get("api_key","") or _load_server_key("google") or ""
-    model = cfg.get("model","gemma-4-31b-it")
-    mode  = cfg.get("mode","auto")
-    root  = cfg.get("project_path","")
-
-    if not key:
-        yield _coder_sse({"type":"error","content":"No API key configured. Add your Google AI API key in Coder settings."})
-        return
-    if not root or not Path(root).is_dir():
-        yield _coder_sse({"type":"error","content":"No valid project folder set. Open Coder settings to choose a folder."})
-        return
-
-    conv = _coder_load_conv(conv_id)
-    if not conv:
-        conv = _coder_new_conv()
-        conv["id"] = conv_id
-
-    conv["messages"].append({"role":"user","content":user_text})
-    conv["model_history"].append({"role":"user","text":user_text})
-
-    if conv["title"] == "New Chat" and len(conv["messages"]) == 1:
-        words = re.sub(r'\s+',' ', user_text).strip().split()
-        conv["title"] = " ".join(words[:6])[:48] or "New Chat"
-        yield _coder_sse({"type":"title","content":conv["title"]})
-
-    genai, types = _import_google()
-    client = genai.Client(api_key=key, http_options={"timeout": 300_000})
-
-    tree = _coder_build_tree(root, max_depth=2, max_files=80)
-    system = _coder_system_prompt(root, mode, tree)
-
-    accumulated_text = ""
-    all_tools = []
-
-    for turn in range(_CODER_MAX_TURNS):
-        yield _coder_sse({"type":"status","content":"thinking..." if turn==0 else "continuing..."})
-
-        contents = []
-        for msg in conv["model_history"]:
-            role = "user" if msg["role"]=="user" else "model"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["text"])]))
-
-        config = types.GenerateContentConfig(system_instruction=system, max_output_tokens=16384, temperature=0.2)
-
-        full_text = ""
-        try:
-            stream = client.models.generate_content_stream(model=model, contents=contents, config=config)
-            for chunk in stream:
-                t = ""
-                try: t = chunk.text or ""
-                except Exception: pass
-                if t:
-                    full_text += t
-                    yield _coder_sse({"type":"text","content":t})
-        except Exception as e:
-            err_msg = str(e)
-            if "API key" in err_msg or "401" in err_msg or "403" in err_msg:
-                yield _coder_sse({"type":"error","content":"Invalid API key. Check your Google AI API key in Coder settings."})
-            elif "not found" in err_msg.lower() or "404" in err_msg:
-                yield _coder_sse({"type":"error","content":f"Model '{model}' not available. Try a different model."})
-            else:
-                yield _coder_sse({"type":"error","content":f"Model error: {err_msg[:500]}"})
-            if accumulated_text:
-                conv["messages"].append({"role":"assistant","content":accumulated_text,"tools":all_tools})
-                conv["model_history"].append({"role":"model","text":accumulated_text})
-            _coder_save_conv(conv)
-            return
-
-        tools = _coder_parse_tools(full_text)
-        clean = _coder_strip_tools(full_text)
-        accumulated_text += ("\n" if accumulated_text else "") + clean if clean else ""
-
-        if not tools:
-            conv["model_history"].append({"role":"model","text":full_text})
-            break
-
-        conv["model_history"].append({"role":"model","text":full_text})
-
-        results_parts = []
-        for tc in tools:
-            name = tc.get("name","")
-            args = tc.get("args",{})
-            yield _coder_sse({"type":"tool_start","name":name,"args":args})
-            result = _coder_exec_tool(tc, root)
-            all_tools.append({"name":name,"args":args,"result":result})
-            yield _coder_sse({"type":"tool_result","name":name,"result":_coder_truncate_result(result)})
-            if name in ("write_file","edit_file","delete"):
-                yield _coder_sse({"type":"file_changed","path":args.get("path","")})
-            results_parts.append(json.dumps(result, ensure_ascii=False))
-
-        results_text = "\n".join(f'<tool_result name="{t["name"]}">\n{r}\n</tool_result>' for t,r in zip(tools, results_parts))
-        conv["model_history"].append({"role":"user","text":results_text})
-    else:
-        yield _coder_sse({"type":"status","content":"Reached maximum agent steps."})
-
-    conv["messages"].append({"role":"assistant","content":accumulated_text,"tools":all_tools})
-    _coder_save_conv(conv)
-    yield _coder_sse({"type":"done","conversation":{"id":conv["id"],"title":conv["title"]}})
-
-# ── Coder browse ─────────────────────────────────────────────────────────────
-
-def _coder_browse(path_str):
-    p = Path(path_str).resolve()
-    if not p.is_dir(): return {"error":"Not a directory","path":str(p)}
-    dirs = []
-    try:
-        for item in sorted(p.iterdir()):
-            if item.is_dir() and not item.name.startswith('.'):
-                dirs.append({"name":item.name,"path":str(item).replace("\\","/")})
-    except PermissionError: return {"error":"Permission denied","path":str(p)}
-    parent = str(p.parent).replace("\\","/") if p.parent != p else None
-    return {"path":str(p).replace("\\","/"),"parent":parent,"dirs":dirs}
-
-# ── Coder routes ─────────────────────────────────────────────────────────────
-
-@app.route("/api/coder/config", methods=["GET","POST"])
-@require_auth_or_guest
-def coder_config_route():
-    if request.method == "GET":
-        c = _coder_load_config()
-        masked = c.copy()
-        if masked.get("api_key"):
-            k = masked["api_key"]
-            masked["api_key_display"] = k[:6]+"..."+k[-4:] if len(k)>10 else "***"
-        else:
-            masked["api_key_display"] = ""
-        return jsonify(masked)
-    data = request.json or {}
-    c = _coder_load_config()
-    for k in ("api_key","model","mode","project_path"):
-        if k in data: c[k] = data[k]
-    _coder_save_config(c)
-    return jsonify({"ok":True})
-
-@app.route("/api/coder/models")
-@require_auth_or_guest
-def coder_models_route():
-    return jsonify(CODER_MODELS)
-
-@app.route("/api/coder/browse")
-@require_auth_or_guest
-def coder_browse_route():
-    p = request.args.get("path","") or str(Path.home())
-    return jsonify(_coder_browse(p))
-
-@app.route("/api/coder/files")
-@app.route("/api/coder/files/<path:rel>")
-@require_auth_or_guest
-def coder_files_route(rel="."):
-    root = _coder_load_config().get("project_path","")
-    if not root: return jsonify({"error":"No project set"}), 400
-    return jsonify(_coder_list_dir(root, rel))
-
-@app.route("/api/coder/file/<path:rel>", methods=["GET","PUT"])
-@require_auth_or_guest
-def coder_file_route(rel):
-    root = _coder_load_config().get("project_path","")
-    if not root: return jsonify({"error":"No project set"}), 400
-    if request.method == "GET": return jsonify(_coder_read_file(root, rel))
-    return jsonify(_coder_write_file(root, rel, (request.json or {}).get("content","")))
-
-@app.route("/api/coder/terminal", methods=["POST"])
-@require_auth_or_guest
-def coder_terminal_route():
-    root = _coder_load_config().get("project_path","")
-    if not root: return jsonify({"error":"No project set"}), 400
-    data = request.json or {}
-    cmd = data.get("command","").strip()
-    if not cmd: return jsonify({"error":"No command"}), 400
-    return jsonify(_coder_run_cmd(root, cmd, timeout=data.get("timeout",120)))
-
-@app.route("/api/coder/conversations", methods=["GET","POST"])
-@require_auth_or_guest
-def coder_conversations_route():
-    if request.method == "GET": return jsonify(_coder_list_convs())
-    return jsonify(_coder_new_conv())
-
-@app.route("/api/coder/conversations/<cid>", methods=["GET","DELETE"])
-@require_auth_or_guest
-def coder_conversation_route(cid):
-    if request.method=="DELETE": _coder_delete_conv(cid); return jsonify({"ok":True})
-    c = _coder_load_conv(cid)
-    if not c: return jsonify({"error":"Not found"}), 404
-    return jsonify(c)
-
-@app.route("/api/coder/chat", methods=["POST"])
-@require_auth_or_guest
-def coder_chat_route():
-    data = request.json or {}
-    conv_id = data.get("conversation_id", uuid.uuid4().hex[:12])
-    message = (data.get("message","") or "").strip()
-    if not message: return jsonify({"error":"Empty message"}), 400
-    def generate():
-        try:
-            for event in _coder_agent_stream(conv_id, message):
-                yield event
-        except Exception as e:
-            yield _coder_sse({"type":"error","content":f"Server error: {str(e)[:500]}"})
-            yield _coder_sse({"type":"done","conversation":{"id":conv_id,"title":"Error"}})
-    return Response(stream_with_context(generate()), mimetype="text/event-stream",
-                    headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+# ── Gyro Code Download ──────────────────────────────────────────────────────
+@app.route("/api/coder/download")
+def coder_download():
+    """Serve the pre-built GyroCode.exe."""
+    exe_path = WORKSPACE / "GyroCode" / "dist" / "GyroCode.exe"
+    if not exe_path.exists():
+        return jsonify({"error": "GyroCode.exe not found. Run build_exe.py first."}), 404
+    return send_file(str(exe_path), mimetype='application/octet-stream',
+                     as_attachment=True, download_name='GyroCode.exe')
 
 
 # --- Pre-warm heavy modules (.pyc compilation) ------------------------------
